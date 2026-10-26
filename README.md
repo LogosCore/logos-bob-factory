@@ -18,6 +18,12 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 | Channels | `http` connection schema version 2, with connection parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`) |
 | Crypto | none |
 
+## Icon
+
+BOB registers with its own icon, a boxing dummy kept as a constant in
+`cmd/bob-factory/icon.go`; core's UI shows it instead of the default factory
+icon.
+
 ## Management
 
 BOB's module page in core has the Configuration, Actions, Activity and Logs
