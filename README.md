@@ -1,8 +1,8 @@
 # logos-bob-factory
 
-BOB (Body Opponent Bag, the human-shaped boxing dummy) is a bare Logos minion
-factory. It registers with core as `minion-factory` / `bob`, says hello and
-keeps heartbeating. It builds nothing yet: it is the dummy the factory
+BOB (Body Opponent Bag, the human-shaped boxing dummy) is a bare Logos
+factory, the module type that builds minions. It registers with core as
+`factory` / `bob`, says hello and keeps heartbeating. It builds nothing yet: it is the dummy the factory
 contracts are worked out against.
 
 Built on [`logos-golang-module-core`](https://github.com/logoscore/logos-golang-module-core).

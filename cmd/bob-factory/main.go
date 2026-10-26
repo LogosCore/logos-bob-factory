@@ -1,4 +1,4 @@
-// Command bob-factory is BOB (Body Opponent Bag): a bare minion factory that
+// Command bob-factory is BOB (Body Opponent Bag): a bare factory that
 // registers with core, says hello and keeps heartbeating. It builds nothing
 // yet; it is the dummy the factory contracts are worked out against.
 package main
@@ -28,15 +28,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	slog.Info("hello from BOB, the minion factory punching bag", "instance", instance, "version", version)
+	slog.Info("hello from BOB, the factory punching bag", "instance", instance, "version", version)
 	err := module.Run(ctx, module.Config{
 		AMQPURL: amqpURL(),
 		Identity: lifecycle.Identity{
-			ModuleType:  protocol.ServiceMinionFactory,
+			ModuleType:  protocol.ServiceFactory,
 			ModuleName:  "bob",
 			Instance:    instance,
 			Version:     version,
-			Description: "BOB: bare minion factory (registers and heartbeats only)",
+			Description: "BOB: bare factory (registers and heartbeats only)",
 		},
 	})
 	if err != nil {
