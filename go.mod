@@ -3,7 +3,7 @@ module github.com/logoscore/logos-bob-factory
 go 1.25.7
 
 require (
-	github.com/logoscore/logos-golang-module-core v0.1.1
+	github.com/logoscore/logos-golang-module-core v0.1.2
 	github.com/logoscore/logos-golang-protocol v0.5.0
 )
 

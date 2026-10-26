@@ -1,5 +1,5 @@
-github.com/logoscore/logos-golang-module-core v0.1.1 h1:QayQrZ1k20MMg2t1FzTF6eOrz8B/nH2iJGuXhg81kbE=
-github.com/logoscore/logos-golang-module-core v0.1.1/go.mod h1:BrHr/TvOEAES6sRDWw0IPsvvCsyBlOSSMuSWi/gPAS0=
+github.com/logoscore/logos-golang-module-core v0.1.2 h1:1tELlizBUsF/IId0QCK2oEHFOFbu4YJYwiZcxd/Zf6M=
+github.com/logoscore/logos-golang-module-core v0.1.2/go.mod h1:rGtA13Y5YXVG+JfbADvuIsgi2NSTPpiOB+edBAo/Q1M=
 github.com/logoscore/logos-golang-protocol v0.5.0 h1:gBOHTym/pDi8XgncUivdvuinEoTKBfYBDDNjr8UzSzU=
 github.com/logoscore/logos-golang-protocol v0.5.0/go.mod h1:64YhaXbShwLB0nrzXZ6450QWksfcWR/LeS4WmQRJJ3k=
 github.com/oklog/ulid/v2 v2.1.1 h1:suPZ4ARWLOJLegGFiZZ1dFAkqzhMjL3J1TzI+5wHz8s=
