@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-BOB (`github.com/logoscore/logos-bob-factory`): a bare Logos factory (the module type that builds minions). `cmd/bob-factory/main.go` runs module-core's `module.Run` as module_type `factory`, module_name `bob`. For now it only registers, logs a hello and heartbeats: no management, no builds.
+BOB (`github.com/logoscore/logos-bob-factory`): a bare Logos factory (the module type that builds minions). `cmd/bob-factory/main.go` runs factory-core's `factory.Run` as module_name `bob`, with no management. `build.go` holds its build schema (one `dummy` target; one field of each build field type; HTTP connection parameters `method` and `path_prefix`) and the builder, which uploads a JSON description of the minion as the artifact.
 
-Control-plane plumbing stays in `logos-golang-module-core`; factory-specific SDK code (build contracts) will go in a future factory SDK, not here.
+Factory plumbing (build requests, progress, results, files, artifacts) stays in `logos-golang-factory-core`; module plumbing in `logos-golang-module-core`. BOB only declares what it builds and builds it.
 
-Build and test: `go build ./... && go vet ./...`. Go 1.25.7. Config is env only (see README).
+Build and test: `go build ./... && go vet ./... && go test ./...`. Go 1.25.7. Config is env only (see README). Builder tests use `factorytest.Build`, which runs the real builder through the SDK in process.

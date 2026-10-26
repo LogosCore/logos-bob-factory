@@ -1,6 +1,7 @@
 // Command bob-factory is BOB (Body Opponent Bag): a bare factory that
-// registers with core, says hello and keeps heartbeating. It builds nothing
-// yet; it is the dummy the factory contracts are worked out against.
+// registers with core, says hello, keeps heartbeating, and builds dummy
+// minions (build.go). It is the dummy the factory contracts are worked out
+// against.
 package main
 
 import (
@@ -13,9 +14,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/logoscore/logos-golang-factory-core/pkg/factory"
 	"github.com/logoscore/logos-golang-module-core/pkg/lifecycle"
 	"github.com/logoscore/logos-golang-module-core/pkg/module"
-	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
 // version is reported at registration; set with -ldflags "-X main.version=...".
@@ -29,15 +30,20 @@ func main() {
 	defer stop()
 
 	slog.Info("hello from BOB, the factory punching bag", "instance", instance, "version", version)
-	err := module.Run(ctx, module.Config{
-		AMQPURL: amqpURL(),
-		Identity: lifecycle.Identity{
-			ModuleType:  protocol.ServiceFactory,
-			ModuleName:  "bob",
-			Instance:    instance,
-			Version:     version,
-			Description: "BOB: bare factory (registers and heartbeats only)",
+	schema := buildSchema
+	err := factory.Run(ctx, factory.Config{
+		Config: module.Config{
+			AMQPURL: amqpURL(),
+			Identity: lifecycle.Identity{
+				ModuleName:  "bob",
+				Instance:    instance,
+				Version:     version,
+				Description: "BOB: bare factory that builds dummy minions",
+			},
 		},
+		Build:               &schema,
+		Builder:             bob{builtBy: "bob " + instance + " " + version},
+		MaxConcurrentBuilds: 4,
 	})
 	if err != nil {
 		log.Fatalf("control plane: %v", err)
