@@ -16,6 +16,8 @@ import (
 
 	"github.com/logoscore/logos-golang-factory-core/pkg/factory"
 	"github.com/logoscore/logos-golang-module-core/pkg/lifecycle"
+	"github.com/logoscore/logos-golang-module-core/pkg/logging"
+	"github.com/logoscore/logos-golang-module-core/pkg/logstream"
 	"github.com/logoscore/logos-golang-module-core/pkg/module"
 )
 
@@ -23,15 +25,29 @@ import (
 var version = "dev"
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	instance := env("FACTORY_ID", "bob-local")
+
+	// Logs go to stderr (LOG_FORMAT) at the managed log_level, and to core's
+	// live log tail (which can ask for debug on its own) through the hub.
+	var level slog.LevelVar
+	logs := logstream.New(instance)
+	logger, err := logging.New(os.Getenv("LOG_FORMAT"), os.Stderr, &level, logs)
+	if err != nil {
+		log.Fatalf("logging: %v", err)
+	}
+	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	slog.Info("hello from BOB, the factory punching bag", "instance", instance, "version", version)
+	b := &bob{builtBy: "bob " + instance + " " + version}
+	mgmtSrv, err := newManagement(b, &level)
+	if err != nil {
+		fatal("management", "err", err)
+	}
 	schema := buildSchema
-	err := factory.Run(ctx, factory.Config{
+	err = factory.Run(ctx, factory.Config{
 		Config: module.Config{
 			AMQPURL: amqpURL(),
 			Identity: lifecycle.Identity{
@@ -40,15 +56,26 @@ func main() {
 				Version:     version,
 				Description: "BOB: bare factory that builds dummy minions",
 			},
+			// factory-core adds the builds section; the live log tail is
+			// served on the same rpc_queue.
+			Management: mgmtSrv,
+			Logs:       logs,
 		},
 		Build:               &schema,
-		Builder:             bob{builtBy: "bob " + instance + " " + version},
+		Builder:             b,
 		MaxConcurrentBuilds: 4,
 	})
 	if err != nil {
-		log.Fatalf("control plane: %v", err)
+		fatal("control plane failed", "err", err)
 	}
 	slog.Info("bye")
+}
+
+// fatal logs at error level and exits. log.Fatal would go through slog's
+// default handler at info level once slog.SetDefault has run.
+func fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	os.Exit(1)
 }
 
 func amqpURL() string {

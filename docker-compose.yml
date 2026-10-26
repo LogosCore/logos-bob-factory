@@ -18,6 +18,7 @@ services:
       RABBITMQ_USER: ${RABBITMQ_USER:-logos}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
       RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     networks:
       - logos
 

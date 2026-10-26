@@ -18,12 +18,25 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 | Channels | `http` connection schema version 2, with connection parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`) |
 | Crypto | none |
 
+## Management
+
+BOB's module page in core has the Configuration, Actions, Activity and Logs
+tabs. Next to the builds section every factory gets from factory-core
+(`max_concurrent_builds`; `drain`, `resume`; build counters, the last failure
+and `draining`), BOB declares:
+
+| | |
+|---|---|
+| Properties (live) | `build_delay` (duration, 0s to 10m: each build takes punches that long first, so its progress can be watched and it can be cancelled), `fail_builds` (fail every build with code `knocked_out`), `log_level` |
+| Actions | `say_hello`: BOB logs a hello at info, to check actions and the live log tail |
+
 ## Configuration
 
 | Env | Default | |
 |---|---|---|
 | `FACTORY_ID` | `bob-local` | Instance id, unique per running process |
 | `RABBITMQ_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_VHOST` | `localhost` / `5672` / `guest` / `guest` / `/` | Core's broker |
+| `LOG_FORMAT` | `json` | `json` or `text`, on stderr |
 
 ## Run
 

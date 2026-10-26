@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"time"
 
 	"github.com/logoscore/logos-golang-factory-core/pkg/factory"
@@ -71,12 +72,29 @@ type dummyMinion struct {
 	BuiltAt     time.Time                  `json:"built_at"`
 }
 
-// bob builds dummy minions.
+// bob builds dummy minions, the way its management says (management.go).
 type bob struct {
-	builtBy string // "bob <instance> <version>"
+	builtBy  string // "bob <instance> <version>"
+	settings atomic.Pointer[settings]
 }
 
-func (b bob) Build(ctx context.Context, job *factory.Job) (factory.Result, error) {
+// settings are BOB's own properties that shape its builds.
+type settings struct {
+	delay time.Duration // build_delay
+	fail  bool          // fail_builds
+}
+
+// current is the settings a build starts with: the defaults until management
+// applies any.
+func (b *bob) current() settings {
+	if s := b.settings.Load(); s != nil {
+		return *s
+	}
+	return settings{}
+}
+
+func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, error) {
+	s := b.current()
 	var badge *protocol.BuildFile
 	if f, ok := job.File("badge"); ok {
 		job.Progress("badge", "checking the badge", 20)
@@ -84,6 +102,16 @@ func (b bob) Build(ctx context.Context, job *factory.Job) (factory.Result, error
 			return factory.Result{}, factory.Fail("badge_unreadable", err.Error())
 		}
 		badge = &f
+	}
+	if s.delay > 0 {
+		job.Progress("punches", "taking punches for "+s.delay.String(), 30)
+		job.Logf("taking punches for %s (build_delay)", s.delay)
+		if err := sleep(ctx, s.delay); err != nil {
+			return factory.Result{}, err
+		}
+	}
+	if s.fail {
+		return factory.Result{}, factory.Fail("knocked_out", "BOB is set to fail every build (fail_builds)")
 	}
 	job.Progress("render", "describing the minion", 50)
 	m := describe(job.Request, badge, b.builtBy, time.Now().UTC())
@@ -102,6 +130,18 @@ func (b bob) Build(ctx context.Context, job *factory.Job) (factory.Result, error
 		Capabilities: []string{"hello"},
 		Warnings:     []string{"a dummy minion: it describes a minion and runs nothing"},
 	}, nil
+}
+
+// sleep waits for d, or until ctx ends.
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // describe is the dummy minion a request asks for. A badge is recorded
