@@ -10,11 +10,13 @@ import (
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
-// The icon is sent at registration; module-core refuses to start with one
+// The icons are sent at registration; module-core refuses to start with one
 // core would not take.
 func TestIconIsValid(t *testing.T) {
-	if err := protocol.ValidateIcon(icon); err != nil {
-		t.Fatal(err)
+	for name, svg := range map[string]string{"icon": icon, "iconLight": iconLight} {
+		if err := protocol.ValidateIcon(svg); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 

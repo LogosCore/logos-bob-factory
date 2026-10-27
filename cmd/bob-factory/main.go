@@ -56,6 +56,7 @@ func main() {
 				Version:     version,
 				Description: "BOB: bare factory that builds dummy minions",
 				Icon:        icon,
+				IconLight:   iconLight,
 			},
 			// factory-core adds the builds section; the live log tail is
 			// served on the same rpc_queue.

@@ -22,7 +22,10 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 
 BOB registers with its own icon, a boxing dummy kept as a constant in
 `cmd/bob-factory/icon.go`; core's UI shows it instead of the default factory
-icon.
+icon. The icon is the lit skin of a shaded picture, which reads right in a
+light colour on dark themes, so BOB also registers `iconLight`, the same
+picture drawn for light themes, with the outline, lines and shading as the
+shape.
 
 ## Management
 
