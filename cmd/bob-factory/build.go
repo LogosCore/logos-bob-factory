@@ -93,18 +93,39 @@ func (b *bob) current() settings {
 	return settings{}
 }
 
+// The steps of BOB's builds.
+var (
+	stepBadge   = protocol.BuildStep{ID: "badge", Label: "Check the badge"}
+	stepPunches = protocol.BuildStep{ID: "punches", Label: "Take punches"}
+	stepRender  = protocol.BuildStep{ID: "render", Label: "Describe the minion"}
+	stepUpload  = protocol.BuildStep{ID: "upload", Label: "Upload the artifact"}
+)
+
+// Steps is the plan for a build of req: the badge is checked only when there
+// is one, and punches taken only while build_delay is set.
+func (b *bob) Steps(req protocol.BuildRequest) []protocol.BuildStep {
+	var steps []protocol.BuildStep
+	if id, _ := req.Values["badge"].(string); id != "" {
+		steps = append(steps, stepBadge)
+	}
+	if b.current().delay > 0 {
+		steps = append(steps, stepPunches)
+	}
+	return append(steps, stepRender, stepUpload)
+}
+
 func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, error) {
 	s := b.current()
 	var badge *protocol.BuildFile
 	if f, ok := job.File("badge"); ok {
-		job.Progress("badge", "checking the badge", 20)
+		job.Step(stepBadge.ID, "checking the badge")
 		if _, err := job.ReadFile(ctx, f); err != nil {
 			return factory.Result{}, factory.Fail("badge_unreadable", err.Error())
 		}
 		badge = &f
 	}
 	if s.delay > 0 {
-		job.Progress("punches", "taking punches for "+s.delay.String(), 30)
+		job.Step(stepPunches.ID, "taking punches for "+s.delay.String())
 		job.Logf("taking punches for %s (build_delay)", s.delay)
 		if err := sleep(ctx, s.delay); err != nil {
 			return factory.Result{}, err
@@ -113,7 +134,7 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	if s.fail {
 		return factory.Result{}, factory.Fail("knocked_out", "BOB is set to fail every build (fail_builds)")
 	}
-	job.Progress("render", "describing the minion", 50)
+	job.Step(stepRender.ID, "")
 	m := describe(job.Request, badge, b.builtBy, time.Now().UTC())
 	body, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -121,7 +142,7 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	}
 	job.Logf("dummy minion %s for %s with %d connection(s)", m.MinionID, m.Platform, len(m.Connections))
 
-	job.Progress("upload", "uploading the artifact", 80)
+	job.Step(stepUpload.ID, "")
 	name := "bob-" + m.MinionID[:8] + ".json"
 	if err := job.UploadArtifact(ctx, name, "application/json", bytes.NewReader(body)); err != nil {
 		return factory.Result{}, err

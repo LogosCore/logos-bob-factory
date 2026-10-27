@@ -22,7 +22,8 @@ func TestBuildDummyMinion(t *testing.T) {
 	req.Files = map[string]protocol.BuildFile{badge.ID: badge}
 	req.Values["badge"] = badge.ID
 
-	res, artifact := factorytest.Build(t, buildSchema, &bob{builtBy: "bob bob-test test"}, st, req)
+	out := factorytest.Run(t, buildSchema, &bob{builtBy: "bob bob-test test"}, st, req)
+	res, artifact := out.Result, out.Artifact
 	if res.Status != protocol.BuildSucceeded || res.Artifact.Filename != "bob-5b0c4f6e.json" ||
 		res.Artifact.MediaType != "application/json" || res.Capabilities[0] != "hello" {
 		t.Fatalf("result %+v (error %+v)", res, res.Error)
@@ -38,6 +39,37 @@ func TestBuildDummyMinion(t *testing.T) {
 	if strings.Contains(string(artifact), badge.URL) || !strings.Contains(res.Log, "dummy minion 5b0c4f6e") {
 		t.Fatalf("artifact or log: %s\nlog: %s", artifact, res.Log)
 	}
+	// The plan core got, and the step the build reported last.
+	if ids := stepIDs(out.Steps); ids != "badge render upload" {
+		t.Fatalf("plan %s", ids)
+	}
+	if n := len(out.Progress); n == 0 || out.Progress[n-1].Step != "upload" {
+		t.Fatalf("progress %+v", out.Progress)
+	}
+}
+
+func TestPlanFollowsTheBuild(t *testing.T) {
+	b := &bob{}
+	if ids := stepIDs(b.Steps(noBadgeRequest(t))); ids != "render upload" {
+		t.Errorf("no badge, no delay: %s", ids)
+	}
+	b.settings.Store(&settings{delay: time.Second})
+	withBadge := noBadgeRequest(t)
+	withBadge.Values["badge"] = "badge-1"
+	if ids := stepIDs(b.Steps(withBadge)); ids != "badge punches render upload" {
+		t.Errorf("a badge and a delay: %s", ids)
+	}
+	if err := protocol.ValidateBuildSteps(b.Steps(withBadge)); err != nil {
+		t.Errorf("an invalid plan: %v", err)
+	}
+}
+
+func stepIDs(steps []protocol.BuildStep) string {
+	ids := make([]string, len(steps))
+	for i, s := range steps {
+		ids[i] = s.ID
+	}
+	return strings.Join(ids, " ")
 }
 
 func TestBuildRefusesAWrongBadge(t *testing.T) {
