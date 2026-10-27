@@ -31,8 +31,8 @@ func coreRequest(t *testing.T) protocol.BuildRequest {
 	target, _ := buildSchema.Target("dummy")
 	http, _ := buildSchema.Channel("http")
 	r := protocol.BuildRequest{
-		BuildID: protocol.NewULID(), MinionID: "5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f",
-		Target: "dummy", Platform: "any/any", SchemaVersion: buildSchema.Version,
+		MinionID: "5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f", Target: "dummy", Platform: "any/any",
+		SchemaVersion: buildSchema.Version,
 		Values: protocol.ResolveFieldValues(buildSchema.TargetFields(target), map[string]any{
 			"kill_date": "2027-01-31T00:00:00Z", "punches": []any{"jab", "hook"}, "badge": "badge-1",
 		}),

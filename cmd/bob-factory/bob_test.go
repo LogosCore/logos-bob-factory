@@ -18,7 +18,7 @@ func TestBuildDummyMinion(t *testing.T) {
 	st := factorytest.NewStore(t)
 	badge := st.File("badge-1", "badge.png", "image/png", []byte("\x89PNG fake"))
 	req := coreRequest(t)
-	req.BuildID, req.Artifact = "", protocol.ArtifactUpload{} // filled in by Build
+	req.Artifact = protocol.ArtifactUpload{} // filled in by Build
 	req.Files = map[string]protocol.BuildFile{badge.ID: badge}
 	req.Values["badge"] = badge.ID
 
@@ -77,7 +77,7 @@ func TestBuildRefusesAWrongBadge(t *testing.T) {
 	badge := st.File("badge-1", "badge.png", "image/png", []byte("\x89PNG fake"))
 	badge.Size++ // the download will not check out
 	req := coreRequest(t)
-	req.BuildID, req.Artifact = "", protocol.ArtifactUpload{}
+	req.Artifact = protocol.ArtifactUpload{}
 	req.Files = map[string]protocol.BuildFile{badge.ID: badge}
 	req.Values["badge"] = badge.ID
 
@@ -91,7 +91,7 @@ func TestBuildRefusesAWrongBadge(t *testing.T) {
 func noBadgeRequest(t *testing.T) protocol.BuildRequest {
 	t.Helper()
 	req := coreRequest(t)
-	req.BuildID, req.Artifact = "", protocol.ArtifactUpload{}
+	req.Artifact = protocol.ArtifactUpload{}
 	req.Files = nil
 	delete(req.Values, "badge")
 	return req
