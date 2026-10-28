@@ -11,10 +11,12 @@ import (
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
-// buildSchema is what BOB builds: one dummy target whose artifact describes
-// the minion as JSON. It declares one field of each kind a build schema adds
-// (datetime, enum_list, file), and HTTP connection parameters, so the build
-// flow can be worked out end to end before a real factory exists.
+// buildSchema is what BOB builds: dummy minions whose artifact describes the
+// minion as JSON. It declares one field of each kind a build schema adds
+// (datetime, enum_list, file), HTTP connection parameters, and commands of
+// each kind (required, picked by default, picked by the operator, one
+// target's only), so the build flow can be worked out end to end before a
+// real factory exists.
 var buildSchema = protocol.BuildSchema{
 	SchemaVersion: protocol.BuildSchemaV1,
 	Version:       1,
@@ -51,10 +53,48 @@ var buildSchema = protocol.BuildSchema{
 			Description: "An image the minion would wear. BOB checks it and records its SHA-256.",
 		},
 	},
-	Targets: []protocol.BuildTarget{{
-		ID: "dummy", Label: "Dummy minion", Format: "json", Platforms: []string{"any/any"},
-		Description: "A JSON description of the minion: what it would be built with, and nothing to run.",
-	}},
+	Targets: []protocol.BuildTarget{
+		{
+			ID: "dummy", Label: "Dummy minion", Format: "json", Platforms: []string{"any/any"},
+			Description: "A JSON description of the minion: what it would be built with, and nothing to run.",
+		},
+		{
+			ID: "dummy-lite", Label: "Lite dummy minion", Format: "json", Platforms: []string{"any/any"},
+			Description: "The dummy minion without a shell: a target that has fewer commands.",
+		},
+	},
+	Commands: []protocol.BuildCommand{
+		{
+			ID: "sleep", Label: "Sleep", Group: "Session", Required: true,
+			Description: "Changes how long the minion waits between check-ins.",
+			Params: []protocol.FieldSpec{
+				{Key: "interval", Type: protocol.FieldDuration, Label: "Interval", Required: true},
+				{
+					Key: "jitter", Type: protocol.FieldInt, Label: "Jitter", Unit: "%", Min: 0, Max: 100, Default: 10,
+					Description: "How far each wait may stray from the interval.",
+				},
+			},
+		},
+		{ID: "exit", Label: "Exit", Group: "Session", Required: true, Description: "Stops the minion for good."},
+		{ID: "hello", Label: "Say hello", Group: "Session", Default: true, Description: "Answers with the build's greeting."},
+		{
+			ID: "ls", Label: "List a directory", Group: "Files", Default: true,
+			Params: []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Default: "."}},
+		},
+		{
+			ID: "download", Label: "Download a file", Group: "Files",
+			Description: "Sends a file from the minion's host to core.",
+			Params:      []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true}},
+		},
+		{
+			ID: "shell", Label: "Run a shell command", Group: "Execution", Targets: []string{"dummy"},
+			Description: "Runs a command in the system shell and answers with its output.",
+			Params: []protocol.FieldSpec{
+				{Key: "command", Type: protocol.FieldString, Label: "Command", Required: true},
+				{Key: "timeout", Type: protocol.FieldDuration, Label: "Timeout", Default: "30s"},
+			},
+		},
+	},
 }
 
 // dummyMinion is BOB's artifact.
@@ -63,6 +103,7 @@ type dummyMinion struct {
 	MinionID    string                     `json:"minion_id"`
 	Target      string                     `json:"target"`
 	Platform    string                     `json:"platform"`
+	Commands    []string                   `json:"commands"`
 	Greeting    string                     `json:"greeting"`
 	KillDate    string                     `json:"kill_date,omitempty"`
 	Punches     []string                   `json:"punches,omitempty"`
@@ -148,8 +189,7 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 		return factory.Result{}, err
 	}
 	return factory.Result{
-		Capabilities: []string{"hello"},
-		Warnings:     []string{"a dummy minion: it describes a minion and runs nothing"},
+		Warnings: []string{"a dummy minion: it describes a minion and runs nothing"},
 	}, nil
 }
 
@@ -190,6 +230,7 @@ func describe(req protocol.BuildRequest, badge *protocol.BuildFile, builtBy stri
 		MinionID:    req.MinionID,
 		Target:      req.Target,
 		Platform:    req.Platform,
+		Commands:    req.Commands,
 		Greeting:    text("greeting"),
 		KillDate:    text("kill_date"),
 		Punches:     punches,

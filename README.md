@@ -3,9 +3,9 @@
 BOB (Body Opponent Bag, the human-shaped boxing dummy) is a bare Logos
 factory, the module type that builds minions. It registers with core as
 `factory` / `bob`, says hello, keeps heartbeating, and builds **dummy
-minions**: its one target, `dummy`, produces a JSON description of the minion
-(its id, values, connections and badge) with nothing to run. It is the dummy
-the factory contracts are worked out against.
+minions**: a JSON description of the minion (its id, commands, values,
+connections and badge) with nothing to run. It is the dummy the factory
+contracts are worked out against.
 
 Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang-factory-core).
 
@@ -13,8 +13,9 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 
 | | |
 |---|---|
-| Target | `dummy`: format `json`, platform `any/any` |
+| Targets | `dummy` and `dummy-lite` (no shell): format `json`, platform `any/any` |
 | Fields | `greeting` (string), `kill_date` (datetime), `punches` (enum_list: jab, cross, hook, uppercut), `badge` (file, an image up to 256 KiB, checked and recorded by SHA-256) |
+| Commands | `sleep` and `exit` (required), `hello` and `ls` (picked by default), `download`, `shell` (the `dummy` target's only). Each declares the params a task of it would take; the dummy minion runs none of them, and its description lists the ones its build picked. |
 | Channels | `http` connection schema version 2, with connection parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`) |
 | Crypto | none |
 

@@ -26,6 +26,29 @@ func TestBuildSchemaIsValid(t *testing.T) {
 	}
 }
 
+// The lite dummy has every command but the shell.
+func TestLiteHasNoShell(t *testing.T) {
+	ids := func(id string) string {
+		target, _ := buildSchema.Target(id)
+		var out []string
+		for _, c := range buildSchema.TargetCommands(target) {
+			out = append(out, c.ID)
+		}
+		return strings.Join(out, " ")
+	}
+	if got := ids("dummy"); got != "sleep exit hello ls download shell" {
+		t.Errorf("dummy: %s", got)
+	}
+	if got := ids("dummy-lite"); got != "sleep exit hello ls download" {
+		t.Errorf("dummy-lite: %s", got)
+	}
+	r := coreRequest(t)
+	r.Target, r.Commands = "dummy-lite", append(r.Commands, "shell")
+	if p := protocol.ValidateBuildRequest(buildSchema, r); p["commands[4]"] == "" || len(p) != 1 {
+		t.Fatalf("a lite build with a shell: %v", p)
+	}
+}
+
 // coreRequest is a request as core would send it: values validated against
 // the schema with the defaults filled in.
 func coreRequest(t *testing.T) protocol.BuildRequest {
@@ -38,6 +61,9 @@ func coreRequest(t *testing.T) protocol.BuildRequest {
 		Values: protocol.ResolveFieldValues(buildSchema.TargetFields(target), map[string]any{
 			"kill_date": "2027-01-31T00:00:00Z", "punches": []any{"jab", "hook"}, "badge": "badge-1",
 		}),
+		// Core sends the target's default and required commands when the
+		// operator picked none.
+		Commands: buildSchema.DefaultCommands(target),
 		Connections: []protocol.BuildConnection{{
 			Endpoint: protocol.ChannelEndpointExport{
 				Format: protocol.ChannelEndpointExportV1, Name: "edge-eu",
@@ -67,7 +93,8 @@ func TestDescribe(t *testing.T) {
 
 	if m.Format != "logos.bob-dummy.v1" || m.MinionID != req.MinionID || m.Platform != "any/any" ||
 		m.Greeting != "hello from BOB" || m.KillDate != "2027-01-31T00:00:00Z" ||
-		!reflect.DeepEqual(m.Punches, []string{"jab", "hook"}) || !m.BuiltAt.Equal(at) {
+		!reflect.DeepEqual(m.Punches, []string{"jab", "hook"}) || !m.BuiltAt.Equal(at) ||
+		!reflect.DeepEqual(m.Commands, []string{"sleep", "exit", "hello", "ls"}) {
 		t.Fatalf("minion %+v", m)
 	}
 	if m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.Badge.URL != "" || badge.URL == "" {

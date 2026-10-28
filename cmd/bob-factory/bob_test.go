@@ -25,7 +25,7 @@ func TestBuildDummyMinion(t *testing.T) {
 	out := factorytest.Run(t, buildSchema, &bob{builtBy: "bob bob-test test"}, st, req)
 	res, artifact := out.Result, out.Artifact
 	if res.Status != protocol.BuildSucceeded || res.Artifact.Filename != "bob-5b0c4f6e.json" ||
-		res.Artifact.MediaType != "application/json" || res.Capabilities[0] != "hello" {
+		res.Artifact.MediaType != "application/json" {
 		t.Fatalf("result %+v (error %+v)", res, res.Error)
 	}
 	var m dummyMinion
@@ -33,7 +33,7 @@ func TestBuildDummyMinion(t *testing.T) {
 		t.Fatalf("artifact %s: %v", artifact, err)
 	}
 	if m.MinionID != req.MinionID || m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.BuiltBy != "bob bob-test test" ||
-		m.Connections[0].Values["path_prefix"] != "/cdn/assets/" {
+		m.Connections[0].Values["path_prefix"] != "/cdn/assets/" || strings.Join(m.Commands, " ") != "sleep exit hello ls" {
 		t.Fatalf("minion %+v", m)
 	}
 	if strings.Contains(string(artifact), badge.URL) || !strings.Contains(res.Log, "dummy minion 5b0c4f6e") {
