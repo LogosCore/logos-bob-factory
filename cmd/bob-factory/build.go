@@ -65,7 +65,7 @@ var buildSchema = protocol.BuildSchema{
 	},
 	Commands: []protocol.BuildCommand{
 		{
-			ID: "sleep", Label: "Sleep", Group: "Session", Required: true,
+			ID: "sleep", Label: "Sleep", Required: true,
 			Description: "Changes how long the minion waits between check-ins.",
 			Params: []protocol.FieldSpec{
 				{Key: "interval", Type: protocol.FieldDuration, Label: "Interval", Required: true},
@@ -75,19 +75,19 @@ var buildSchema = protocol.BuildSchema{
 				},
 			},
 		},
-		{ID: "exit", Label: "Exit", Group: "Session", Required: true, Description: "Stops the minion for good."},
-		{ID: "hello", Label: "Say hello", Group: "Session", Default: true, Description: "Answers with the build's greeting."},
+		{ID: "exit", Label: "Exit", Required: true, Description: "Stops the minion for good."},
+		{ID: "hello", Label: "Say hello", Default: true, Description: "Answers with the build's greeting."},
 		{
-			ID: "ls", Label: "List a directory", Group: "Files", Default: true,
+			ID: "ls", Label: "List a directory", Default: true,
 			Params: []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Default: "."}},
 		},
 		{
-			ID: "download", Label: "Download a file", Group: "Files",
+			ID: "download", Label: "Download a file",
 			Description: "Sends a file from the minion's host to core.",
 			Params:      []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true}},
 		},
 		{
-			ID: "shell", Label: "Run a shell command", Group: "Execution", Targets: []string{"dummy"},
+			ID: "shell", Label: "Run a shell command", Targets: []string{"dummy"},
 			Description: "Runs a command in the system shell and answers with its output.",
 			Params: []protocol.FieldSpec{
 				{Key: "command", Type: protocol.FieldString, Label: "Command", Required: true},
