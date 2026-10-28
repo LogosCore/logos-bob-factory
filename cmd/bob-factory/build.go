@@ -29,7 +29,8 @@ var buildSchema = protocol.BuildSchema{
 				Options:     []protocol.EnumOption{{Value: "GET"}, {Value: "POST"}, {Value: "PUT"}},
 			},
 			{
-				Key: "path_prefix", Type: protocol.FieldString, Label: "Path prefix", Default: "/", Group: "HTTP", Order: 2,
+				Key: "path_prefix", Type: protocol.FieldString, Format: protocol.FormatPath, Label: "Path prefix", Default: "/",
+				Group: "HTTP", Order: 2,
 				Description: "Every request path starts with it, e.g. /cdn/assets/ when the front forwards only that path.",
 				Pattern:     `^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`, MaxLength: 256,
 			},
