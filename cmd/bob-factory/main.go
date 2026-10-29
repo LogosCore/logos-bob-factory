@@ -41,7 +41,7 @@ func main() {
 	defer stop()
 
 	slog.Info("hello from BOB, the factory punching bag", "instance", instance, "version", version)
-	b := &bob{builtBy: "bob " + instance + " " + version}
+	b := &bob{builtBy: "bob " + instance + " " + version, minionSrc: env("MINION_SRC", defaultMinionSrc)}
 	mgmtSrv, err := newManagement(b, &level)
 	if err != nil {
 		fatal("management", "err", err)

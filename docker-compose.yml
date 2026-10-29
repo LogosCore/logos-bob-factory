@@ -19,6 +19,10 @@ services:
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
       RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/}
       LOG_FORMAT: ${LOG_FORMAT:-json}
+    # Working on the minion: mount its sources over the image's, and the next
+    # linux-elf build compiles your edits, without rebuilding BOB.
+    # volumes:
+    #   - ./minion:/app/minion:ro
     networks:
       - logos
 

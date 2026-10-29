@@ -15,6 +15,10 @@ import (
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
+// testMinionSrc is the repository's minion module: the sources the image
+// ships.
+const testMinionSrc = "../../minion"
+
 func needGo(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("go"); err != nil {
@@ -41,7 +45,7 @@ func TestCompile(t *testing.T) {
 	needGo(t)
 	minion := []byte(`{"format":"logos.bob-dummy.v1","greeting":"hello"}` + "\n")
 	for platform, machine := range map[string]elf.Machine{"linux/amd64": elf.EM_X86_64, "linux/386": elf.EM_386} {
-		bin, err := compile(context.Background(), "linux-elf", platform, minion)
+		bin, err := compile(context.Background(), testMinionSrc, "linux-elf", platform, minion)
 		if err != nil {
 			t.Fatalf("%s: %v", platform, err)
 		}
@@ -55,8 +59,14 @@ func TestCompile(t *testing.T) {
 			}
 		}
 	}
-	if _, err := compile(context.Background(), "linux-elf", "windows/amd64", minion); err == nil {
+	if _, err := compile(context.Background(), testMinionSrc, "linux-elf", "windows/amd64", minion); err == nil {
 		t.Fatal("compiled for a platform the target does not have")
+	}
+	if _, err := compile(context.Background(), t.TempDir(), "linux-elf", "linux/amd64", minion); err == nil {
+		t.Fatal("compiled without minion sources")
+	}
+	if b, _ := os.ReadFile(filepath.Join(testMinionSrc, "minion.json")); string(b) != "{}\n" {
+		t.Fatalf("a build wrote to the minion sources: %q", b)
 	}
 }
 
@@ -72,7 +82,7 @@ func TestBuildLinuxELF(t *testing.T) {
 	req.Files = map[string]protocol.BuildFile{badge.ID: badge}
 	req.Values["badge"] = badge.ID
 
-	out := factorytest.Run(t, buildSchema, &bob{builtBy: "bob bob-test test"}, st, req)
+	out := factorytest.Run(t, buildSchema, &bob{builtBy: "bob bob-test test", minionSrc: testMinionSrc}, st, req)
 	res := out.Result
 	if res.Status != protocol.BuildSucceeded || res.Artifact.Filename != "bob-5b0c4f6e" ||
 		res.Artifact.MediaType != "application/x-executable" {

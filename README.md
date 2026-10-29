@@ -23,10 +23,12 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 
 For `linux-elf`, BOB compiles a real program: a static Linux binary (no cgo,
 stripped) that prints the dummy minion's JSON description and exits. The
-description is **baked in at compile time**: BOB writes it next to the
-program's source (`cmd/bob-factory/stub`, embedded in BOB) and runs
-`go build` for the build's platform, with `GOOS=linux` and `GOARCH=amd64` or
-`386`. The plan gets a **Compile the binary** step, and the artifact is
+description is **baked in at compile time**. The minion's sources are their
+own Go module, `minion/` in this repository. For each build BOB copies that
+directory, writes the build's description into it as `minion.json`, and runs
+`go build` there for the build's platform (`GOOS=linux`, `GOARCH=amd64` or
+`386`), with no network: a `vendor/` directory, once the minion has
+dependencies, is used as it is. The plan gets a **Compile the binary** step, and the artifact is
 `bob-<build id>`, `application/x-executable`, about 1 MiB.
 
 ```console
@@ -40,12 +42,16 @@ $ ./bob-5b0c4f6e
 }
 ```
 
-So BOB needs the **Go toolchain at run time**. Its image is built on
-`golang:1.25-alpine`, runs as an unprivileged user, and warms its build cache
-with the standard library for both platforms, so a compile takes about a
-second. Run outside the image, BOB uses the `go` on its `PATH`; without one a
-`linux-elf` build fails with `no_toolchain`, and one that does not compile
-with `compile_failed` (the compiler's output is in the build log).
+So BOB needs the **Go toolchain and the minion's sources at run time**. Its
+image is built on `golang:1.25-alpine`, keeps the sources in `/app/minion`,
+runs as an unprivileged user, and warms its build cache with the standard
+library for both platforms, so a compile takes about a second. To work on the
+minion, mount `./minion` over `/app/minion` (commented out in
+`docker-compose.yml`): the next build compiles the edits without rebuilding
+BOB. Run outside the image, BOB uses the `go` on its `PATH` and the sources in
+`MINION_SRC`. Without a toolchain a `linux-elf` build fails with
+`no_toolchain`, and one that does not compile with `compile_failed` (the
+compiler's output is in the build log).
 
 ## Icon
 
@@ -75,11 +81,12 @@ and `draining`), BOB declares:
 | `FACTORY_ID` | `bob-local` | Instance id, unique per running process |
 | `RABBITMQ_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_VHOST` | `localhost` / `5672` / `guest` / `guest` / `/` | Core's broker |
 | `LOG_FORMAT` | `json` | `json` or `text`, on stderr |
+| `MINION_SRC` | `/app/minion` | The minion module compiled for `linux-elf` builds; `./minion` when running from the repository |
 
 ## Run
 
 ```bash
-go run ./cmd/bob-factory                 # against a local broker
+MINION_SRC=./minion go run ./cmd/bob-factory   # against a local broker
 docker compose up -d --build             # next to logos-core (set RABBITMQ_PASSWORD in .env)
 ```
 

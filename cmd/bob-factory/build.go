@@ -125,8 +125,10 @@ type dummyMinion struct {
 
 // bob builds dummy minions, the way its management says (management.go).
 type bob struct {
-	builtBy  string // "bob <instance> <version>"
-	settings atomic.Pointer[settings]
+	builtBy string // "bob <instance> <version>"
+	// minionSrc is the minion module's directory, compiled for linux-elf.
+	minionSrc string
+	settings  atomic.Pointer[settings]
 }
 
 // settings are BOB's own properties that shape its builds.
@@ -203,7 +205,7 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	warning := "a dummy minion: it describes a minion and runs nothing"
 	if _, ok := compiledTargets[m.Target]; ok {
 		job.Step(stepCompile.ID, "go build for "+m.Platform)
-		bin, err := compile(ctx, m.Target, m.Platform, body)
+		bin, err := compile(ctx, b.minionSrc, m.Target, m.Platform, body)
 		switch {
 		case errors.Is(err, errNoToolchain):
 			return factory.Result{}, factory.Fail("no_toolchain", err.Error())

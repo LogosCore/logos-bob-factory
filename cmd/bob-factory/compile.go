@@ -3,19 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
-// stubSource is the program compiled for linux-elf builds (stub/main.go).
-//
-//go:embed stub/main.go
-var stubSource []byte
+// defaultMinionSrc is where BOB's image keeps the minion's sources
+// (MINION_SRC overrides it).
+const defaultMinionSrc = "/app/minion"
 
 // compiledTargets are the targets BOB compiles a binary for, by platform:
 // GOOS/GOARCH pairs.
@@ -29,10 +28,12 @@ var compiledTargets = map[string]map[string][2]string{
 // errNoToolchain means BOB has no Go toolchain to compile with.
 var errNoToolchain = errors.New("no Go toolchain: the go command is not on PATH")
 
-// compile builds the stub of target for platform with minion baked in, and
-// returns the binary: static (no cgo), stripped, and the same for the same
-// input.
-func compile(ctx context.Context, target, platform string, minion []byte) ([]byte, error) {
+// compile builds the minion module in src for target and platform, with
+// minion baked in as its minion.json, and returns the binary: static (no
+// cgo), stripped, and the same for the same input. src is copied first, so
+// it is never written to. A vendor directory in it is used; nothing is
+// downloaded either way.
+func compile(ctx context.Context, src, target, platform string, minion []byte) ([]byte, error) {
 	pair, ok := compiledTargets[target][platform]
 	if !ok {
 		return nil, fmt.Errorf("target %s does not compile for %s", target, platform)
@@ -41,23 +42,25 @@ func compile(ctx context.Context, target, platform string, minion []byte) ([]byt
 	if err != nil {
 		return nil, errNoToolchain
 	}
+	if _, err := os.Stat(filepath.Join(src, "go.mod")); err != nil {
+		return nil, fmt.Errorf("no minion sources in %s: %w", src, err)
+	}
 	dir, err := os.MkdirTemp("", "bob-build-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(dir)
-	files := map[string][]byte{
-		"go.mod":      []byte("module bobminion\n\ngo 1.25\n"),
-		"main.go":     stubSource,
-		"minion.json": minion,
+	if err := os.CopyFS(dir, os.DirFS(src)); err != nil {
+		return nil, fmt.Errorf("copy the minion sources: %w", err)
 	}
-	for name, body := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
-			return nil, err
-		}
+	if err := os.WriteFile(filepath.Join(dir, "minion.json"), minion, 0o600); err != nil {
+		return nil, err
 	}
-	out := filepath.Join(dir, "minion")
-	cmd := exec.CommandContext(ctx, goBin, "build", "-trimpath", "-ldflags=-s -w -buildid=", "-o", out, ".")
+	args := []string{"build", "-trimpath", "-ldflags=-s -w -buildid=", "-o", filepath.Join(dir, ".bin", "minion")}
+	if _, err := fs.Stat(os.DirFS(dir), "vendor"); err == nil {
+		args = append(args, "-mod=vendor")
+	}
+	cmd := exec.CommandContext(ctx, goBin, append(args, ".")...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GOOS="+pair[0], "GOARCH="+pair[1], "CGO_ENABLED=0",
@@ -71,5 +74,5 @@ func compile(ctx context.Context, target, platform string, minion []byte) ([]byt
 		}
 		return nil, fmt.Errorf("go build: %w: %s", err, strings.TrimSpace(output.String()))
 	}
-	return os.ReadFile(out)
+	return os.ReadFile(filepath.Join(dir, ".bin", "minion"))
 }
