@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/logoscore/logos-golang-factory-core/pkg/factory"
 	"github.com/logoscore/logos-golang-module-core/pkg/lifecycle"
@@ -37,7 +36,7 @@ func TestManagementJoinsTheBuildsSection(t *testing.T) {
 	for i, p := range m.Properties {
 		keys[i] = p.Key
 	}
-	if strings.Join(keys, ",") != "build_delay,fail_builds,log_level,"+factory.PropertyMaxConcurrentBuilds ||
+	if strings.Join(keys, ",") != "fail_builds,log_level,"+factory.PropertyMaxConcurrentBuilds ||
 		len(m.Actions) != 3 || len(m.Status) == 0 {
 		t.Fatalf("manifest = %+v", m)
 	}
@@ -51,12 +50,12 @@ func TestApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	rep := s.ApplyConfig(context.Background(), protocol.ManagementConfig{Revision: 1, Values: map[string]any{
-		"build_delay": "30s", "fail_builds": true, "log_level": "debug",
+		"fail_builds": true, "log_level": "debug",
 	}})
 	if len(rep.Rejected) != 0 {
 		t.Fatalf("rejected %v", rep.Rejected)
 	}
-	if got := b.current(); got != (settings{delay: 30 * time.Second, fail: true}) || level.Level() != slog.LevelDebug {
+	if got := b.current(); got != (settings{fail: true}) || level.Level() != slog.LevelDebug {
 		t.Fatalf("settings %+v, level %v", got, level.Level())
 	}
 
@@ -66,10 +65,6 @@ func TestApply(t *testing.T) {
 		t.Fatalf("settings %+v, level %v", got, level.Level())
 	}
 
-	rep = s.ApplyConfig(context.Background(), protocol.ManagementConfig{Revision: 3, Values: map[string]any{"build_delay": "11m"}})
-	if rep.Rejected["build_delay"] == "" || b.current().delay != 0 {
-		t.Fatalf("a delay over the max: %+v, settings %+v", rep, b.current())
-	}
 }
 
 func TestSayHello(t *testing.T) {

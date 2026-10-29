@@ -53,21 +53,15 @@ func manifest() protocol.ManagementManifest {
 		SchemaVersion: protocol.ManagementSchemaV1,
 		Properties: []protocol.PropertySpec{
 			{FieldSpec: protocol.FieldSpec{
-				Key: "build_delay", Type: protocol.FieldDuration, Label: "Build delay",
-				Description: "How long each dummy build takes punches before it compiles, so its progress can be watched and it can be cancelled.",
-				Group:       "Dummy builds", Order: 2,
-				Default: "0s", Min: "0s", Max: "10m",
-			}, Apply: protocol.ApplyLive},
-			{FieldSpec: protocol.FieldSpec{
 				Key: "fail_builds", Type: protocol.FieldBool, Label: "Fail builds",
-				Description: "Fail every build with code knocked_out (after the build delay), to see how a failed build looks.",
-				Group:       "Dummy builds", Order: 3,
+				Description: "Fail every build with code knocked_out, to see how a failed build looks.",
+				Group:       "Dummy builds", Order: 2,
 				Default: false,
 			}, Apply: protocol.ApplyLive},
 			{FieldSpec: protocol.FieldSpec{
 				Key: "log_level", Type: protocol.FieldEnum, Label: "Log level",
 				Description: "Level of BOB's own output (stderr). The Logs tab has its own level.",
-				Group:       "Logging", Order: 4,
+				Group:       "Logging", Order: 3,
 				Default: defaultLogLevel,
 				Options: logLevelOptions(),
 			}, Apply: protocol.ApplyLive},
@@ -99,19 +93,15 @@ func newManagement(b *bob, level *slog.LevelVar) (*mgmt.Server, error) {
 // apply sets the build settings and the log level from the live values.
 // Builds already running keep the settings they started with.
 func (b *bob) apply(ctx context.Context, level *slog.LevelVar, live map[string]any) error {
-	delay, err := protocol.ParseDuration(live["build_delay"])
-	if err != nil {
-		return fmt.Errorf("build_delay: %w", err)
-	}
 	fail, _ := live["fail_builds"].(bool)
-	next, lvl := settings{delay: delay, fail: fail}, slogLevel(live["log_level"])
+	next, lvl := settings{fail: fail}, slogLevel(live["log_level"])
 	if b.current() == next && level.Level() == lvl {
 		return nil
 	}
 	b.settings.Store(&next)
 	level.Set(lvl)
 	slog.Info("management: config applied", "by", actorName(mgmt.ActorFromContext(ctx)),
-		"build_delay", delay.String(), "fail_builds", fail, "log_level", lvl.String())
+		"fail_builds", fail, "log_level", lvl.String())
 	return nil
 }
 

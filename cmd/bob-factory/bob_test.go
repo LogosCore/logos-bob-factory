@@ -2,14 +2,11 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"debug/elf"
 	"encoding/json"
-	"errors"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/logoscore/logos-golang-factory-core/pkg/factorytest"
 	"github.com/logoscore/logos-golang-protocol/protocol"
@@ -62,13 +59,12 @@ func TestBuildDummyMinion(t *testing.T) {
 func TestPlanFollowsTheBuild(t *testing.T) {
 	b := &bob{}
 	if ids := stepIDs(b.Steps(noBadgeRequest(t))); ids != "compile upload" {
-		t.Errorf("no badge, no delay: %s", ids)
+		t.Errorf("no badge: %s", ids)
 	}
-	b.settings.Store(&settings{delay: time.Second})
 	withBadge := noBadgeRequest(t)
 	withBadge.Values["badge"] = "badge-1"
 	if ids := stepIDs(b.Steps(withBadge)); ids != "badge compile upload" {
-		t.Errorf("a badge and a delay: %s", ids)
+		t.Errorf("a badge: %s", ids)
 	}
 	if err := protocol.ValidateBuildSteps(b.Steps(withBadge)); err != nil {
 		t.Errorf("an invalid plan: %v", err)
@@ -108,37 +104,11 @@ func noBadgeRequest(t *testing.T) protocol.BuildRequest {
 	return req
 }
 
-func TestBuildTakesPunchesFirst(t *testing.T) {
-	needGo(t)
-	b := &bob{minionSrc: testMinionSrc}
-	b.settings.Store(&settings{delay: 30 * time.Millisecond})
-	start := time.Now()
-	res, artifact := factorytest.Build(t, buildSchema, b, factorytest.NewStore(t), noBadgeRequest(t))
-	if res.Status != protocol.BuildSucceeded || artifact == nil {
-		t.Fatalf("result %+v (error %+v)", res, res.Error)
-	}
-	if took := time.Since(start); took < 30*time.Millisecond || !strings.Contains(res.Log, "taking punches for 30ms") {
-		t.Fatalf("took %s, log: %s", took, res.Log)
-	}
-}
-
 func TestBuildFailsWhenTold(t *testing.T) {
 	b := &bob{}
 	b.settings.Store(&settings{fail: true})
 	res, artifact := factorytest.Build(t, buildSchema, b, factorytest.NewStore(t), noBadgeRequest(t))
 	if res.Status != protocol.BuildFailed || res.Error.Code != "knocked_out" || artifact != nil {
 		t.Fatalf("result %+v (error %+v)", res, res.Error)
-	}
-}
-
-func TestSleepEndsWithItsContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	start := time.Now()
-	if err := sleep(ctx, time.Hour); !errors.Is(err, context.Canceled) || time.Since(start) > time.Second {
-		t.Fatalf("sleep on a cancelled context: %v after %s", err, time.Since(start))
-	}
-	if err := sleep(context.Background(), time.Millisecond); err != nil {
-		t.Fatalf("sleep: %v", err)
 	}
 }

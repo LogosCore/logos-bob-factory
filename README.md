@@ -76,7 +76,7 @@ and `draining`), BOB declares:
 
 | | |
 |---|---|
-| Properties (live) | `build_delay` (duration, 0s to 10m: each build takes punches that long in its compile step, before compiling, so its progress can be watched and it can be cancelled), `fail_builds` (fail every build with code `knocked_out`), `log_level` |
+| Properties (live) | `fail_builds` (fail every build with code `knocked_out`), `log_level` |
 | Actions | `say_hello`: BOB logs a hello at info, to check actions and the live log tail |
 
 ## Configuration

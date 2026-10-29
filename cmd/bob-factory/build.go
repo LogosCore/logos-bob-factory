@@ -126,8 +126,7 @@ type bob struct {
 
 // settings are BOB's own properties that shape its builds.
 type settings struct {
-	delay time.Duration // build_delay
-	fail  bool          // fail_builds
+	fail bool // fail_builds
 }
 
 // current is the settings a build starts with: the defaults until management
@@ -147,7 +146,7 @@ var (
 )
 
 // Steps is the plan for a build of req: the badge is checked only when there
-// is one. build_delay, when set, is spent in the compile step.
+// is one.
 func (b *bob) Steps(req protocol.BuildRequest) []protocol.BuildStep {
 	var steps []protocol.BuildStep
 	if id, _ := req.Values["badge"].(string); id != "" {
@@ -167,12 +166,6 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 		badge = &f
 	}
 	job.Step(stepCompile.ID, "go build for "+job.Request.Platform)
-	if s.delay > 0 {
-		job.Logf("taking punches for %s (build_delay)", s.delay)
-		if err := sleep(ctx, s.delay); err != nil {
-			return factory.Result{}, err
-		}
-	}
 	if s.fail {
 		return factory.Result{}, factory.Fail("knocked_out", "BOB is set to fail every build (fail_builds)")
 	}
@@ -204,18 +197,6 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	return factory.Result{
 		Warnings: []string{"a dummy minion: it prints its description and does nothing else"},
 	}, nil
-}
-
-// sleep waits for d, or until ctx ends.
-func sleep(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
 }
 
 // describe is the dummy minion a request asks for. A badge is recorded
