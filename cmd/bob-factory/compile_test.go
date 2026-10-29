@@ -25,14 +25,14 @@ func needGo(t *testing.T) {
 	}
 }
 
-// run executes bin and returns what it printed, when this machine can run it.
+// run executes bin with "describe" and returns the description it printed.
 func run(t *testing.T, bin []byte) []byte {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "minion")
 	if err := os.WriteFile(path, bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(path).Output()
+	out, err := exec.Command(path, "describe").Output()
 	if err != nil {
 		t.Fatalf("run the minion: %v", err)
 	}

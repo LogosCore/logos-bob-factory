@@ -23,13 +23,16 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 ## The linux-elf binary
 
 For `linux-elf`, BOB compiles a real program: a static Linux binary (no cgo,
-stripped) that prints the dummy minion's JSON description and exits. The
+stripped). Run, it **stages** with core through its first HTTP connection, as
+the [Minion Messages](https://logoscore.github.io/logos-docs/contracts/minion-messages/#staging)
+contract says, and logs each step to the console; `./bob-<id>.bin describe`
+prints the JSON description it was built with instead. The
 description is **baked in at compile time**. The minion's sources are their
 own Go module, `minion/` in this repository. For each build BOB copies that
 directory, writes the build's description into it as `minion.json`, and runs
 `go build` there for the build's platform (`GOOS=linux`, `GOARCH=amd64` or
 `386`), with no network: a `vendor/` directory, once the minion has
-dependencies, is used as it is. The plan is **Check the badge** (when the build has one), **Compile the
+dependencies, is used as it is: the minion vendors the protocol package (its sealed frame, CBOR messages and stage items) and the CBOR library. The plan is **Check the badge** (when the build has one), **Compile the
 binary** and **Upload the artifact**. The compile step runs the command, and
 everything the compiler prints to stdout and stderr goes to the build log as
 it comes (`go build -v`, so it names what it compiles), on success too. The
@@ -38,6 +41,19 @@ artifact is
 
 ```console
 $ ./bob-5b0c4f6e.bin
+minion 23:52:21.316424 build 160a41b2-e202-4841-9766-5dedfb861947, crypto aes-256-cbc-hmac-sha256
+minion 23:52:21.316456 channel http "localhost-8090" (POST http://localhost:8090/)
+minion 23:52:21.435591 generated an RSA-2048 key pair in 119ms; public key sha256 39c61b8d6944f84a
+minion 23:52:21.435614 correlation id 8cd63702…, message id 2910971f…
+minion 23:52:21.435666 stage: 363 bytes of CBOR, a 418-byte sealed frame, 435 bytes packed for the channel
+minion 23:52:21.451981 channel answered 200 with 435 bytes in 16ms
+minion 23:52:21.452016 opened core's reply: 356 bytes of CBOR, 1 item(s)
+minion 23:52:21.452985 stage_response: correlation id matches
+minion 23:52:21.452993 temporary id a69d016e-365c-4364-a48b-5aaf30711567
+minion 23:52:21.452995 new keys decrypted with our private key: enc_key sha256 a621cf52…, mac_key sha256 d81c124c…
+minion 23:52:21.452996 staged. Next: hello under the temporary id, sealed with the new keys (not built yet)
+
+$ ./bob-5b0c4f6e.bin describe
 {
   "format": "logos.bob-dummy.v1",
   "build_id": "5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f",
