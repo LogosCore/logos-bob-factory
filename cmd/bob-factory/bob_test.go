@@ -32,11 +32,11 @@ func TestBuildDummyMinion(t *testing.T) {
 	if err := json.Unmarshal(artifact, &m); err != nil {
 		t.Fatalf("artifact %s: %v", artifact, err)
 	}
-	if m.MinionID != req.MinionID || m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.BuiltBy != "bob bob-test test" ||
+	if m.BuildID != req.BuildID || m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.BuiltBy != "bob bob-test test" ||
 		m.Connections[0].Values["path_prefix"] != "/cdn/assets/" || strings.Join(m.Commands, " ") != "sleep exit hello ls" {
 		t.Fatalf("minion %+v", m)
 	}
-	if strings.Contains(string(artifact), badge.URL) || !strings.Contains(res.Log, "dummy minion 5b0c4f6e") {
+	if strings.Contains(string(artifact), badge.URL) || !strings.Contains(res.Log, "dummy minion of build 5b0c4f6e") {
 		t.Fatalf("artifact or log: %s\nlog: %s", artifact, res.Log)
 	}
 	// The plan core got, and the step the build reported last.

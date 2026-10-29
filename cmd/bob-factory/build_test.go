@@ -56,7 +56,7 @@ func coreRequest(t *testing.T) protocol.BuildRequest {
 	target, _ := buildSchema.Target("dummy")
 	http, _ := buildSchema.Channel("http")
 	r := protocol.BuildRequest{
-		MinionID: "5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f", Target: "dummy", Platform: "any/any",
+		BuildID: "5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f", Target: "dummy", Platform: "any/any",
 		SchemaVersion: buildSchema.Version,
 		Values: protocol.ResolveFieldValues(buildSchema.TargetFields(target), map[string]any{
 			"kill_date": "2027-01-31T00:00:00Z", "punches": []any{"jab", "hook"}, "badge": "badge-1",
@@ -95,7 +95,7 @@ func TestDescribe(t *testing.T) {
 	at := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
 	m := describe(req, &badge, "bob bob-local dev", at)
 
-	if m.Format != "logos.bob-dummy.v1" || m.MinionID != req.MinionID || m.Platform != "any/any" ||
+	if m.Format != "logos.bob-dummy.v1" || m.BuildID != req.BuildID || m.Platform != "any/any" ||
 		m.Greeting != "hello from BOB" || m.KillDate != "2027-01-31T00:00:00Z" ||
 		!reflect.DeepEqual(m.Punches, []string{"jab", "hook"}) || !m.BuiltAt.Equal(at) ||
 		!reflect.DeepEqual(m.Commands, []string{"sleep", "exit", "hello", "ls"}) {

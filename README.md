@@ -3,7 +3,7 @@
 BOB (Body Opponent Bag, the human-shaped boxing dummy) is a bare Logos
 factory, the module type that builds minions. It registers with core as
 `factory` / `bob`, says hello, keeps heartbeating, and builds **dummy
-minions**: a JSON description of the minion (its id, commands, values,
+minions**: a JSON description of the minion (its build id, commands, values,
 connections and badge) with nothing to run. It is the dummy the factory
 contracts are worked out against.
 

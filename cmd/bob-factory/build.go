@@ -104,7 +104,7 @@ var buildSchema = protocol.BuildSchema{
 // dummyMinion is BOB's artifact.
 type dummyMinion struct {
 	Format      string                     `json:"format"`
-	MinionID    string                     `json:"minion_id"`
+	BuildID     string                     `json:"build_id"`
 	Target      string                     `json:"target"`
 	Platform    string                     `json:"platform"`
 	Commands    []string                   `json:"commands"`
@@ -186,10 +186,10 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	if err != nil {
 		return factory.Result{}, err
 	}
-	job.Logf("dummy minion %s for %s with %d connection(s)", m.MinionID, m.Platform, len(m.Connections))
+	job.Logf("dummy minion of build %s for %s with %d connection(s)", m.BuildID, m.Platform, len(m.Connections))
 
 	job.Step(stepUpload.ID, "")
-	name := "bob-" + m.MinionID[:8] + ".json"
+	name := "bob-" + m.BuildID[:8] + ".json"
 	if err := job.UploadArtifact(ctx, name, "application/json", bytes.NewReader(body)); err != nil {
 		return factory.Result{}, err
 	}
@@ -232,7 +232,7 @@ func describe(req protocol.BuildRequest, badge *protocol.BuildFile, builtBy stri
 	}
 	return dummyMinion{
 		Format:      "logos.bob-dummy.v1",
-		MinionID:    req.MinionID,
+		BuildID:     req.BuildID,
 		Target:      req.Target,
 		Platform:    req.Platform,
 		Commands:    req.Commands,
