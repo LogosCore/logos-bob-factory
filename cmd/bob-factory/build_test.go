@@ -26,29 +26,15 @@ func TestBuildSchemaIsValid(t *testing.T) {
 	}
 }
 
-// The lite dummy has every command but the shell.
-func TestLiteHasNoShell(t *testing.T) {
-	ids := func(id string) string {
-		target, _ := buildSchema.Target(id)
-		var out []string
-		for _, c := range buildSchema.TargetCommands(target) {
-			out = append(out, c.ID)
-		}
-		return strings.Join(out, " ")
+// The binary has every command; shell is one only the operator picks.
+func TestCommands(t *testing.T) {
+	target, _ := buildSchema.Target("linux-elf")
+	var ids []string
+	for _, c := range buildSchema.TargetCommands(target) {
+		ids = append(ids, c.ID)
 	}
-	if got := ids("dummy"); got != "sleep exit hello ls download shell" {
-		t.Errorf("dummy: %s", got)
-	}
-	if got := ids("dummy-lite"); got != "sleep exit hello ls download" {
-		t.Errorf("dummy-lite: %s", got)
-	}
-	if got := ids("linux-elf"); got != "sleep exit hello ls download shell" {
+	if got := strings.Join(ids, " "); got != "sleep exit hello ls download shell" {
 		t.Errorf("linux-elf: %s", got)
-	}
-	r := coreRequest(t)
-	r.Target, r.Commands = "dummy-lite", append(r.Commands, "shell")
-	if p := protocol.ValidateBuildRequest(buildSchema, r); p["commands[4]"] == "" || len(p) != 1 {
-		t.Fatalf("a lite build with a shell: %v", p)
 	}
 }
 
@@ -56,10 +42,10 @@ func TestLiteHasNoShell(t *testing.T) {
 // the schema with the defaults filled in.
 func coreRequest(t *testing.T) protocol.BuildRequest {
 	t.Helper()
-	target, _ := buildSchema.Target("dummy")
+	target, _ := buildSchema.Target("linux-elf")
 	http, _ := buildSchema.Channel("http")
 	r := protocol.BuildRequest{
-		BuildID: "5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f", Target: "dummy", Platform: "any/any",
+		BuildID: "5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f", Target: "linux-elf", Platform: "linux/amd64",
 		SchemaVersion: buildSchema.Version,
 		Values: protocol.ResolveFieldValues(buildSchema.TargetFields(target), map[string]any{
 			"kill_date": "2027-01-31T00:00:00Z", "punches": []any{"jab", "hook"}, "badge": "badge-1",
@@ -98,7 +84,7 @@ func TestDescribe(t *testing.T) {
 	at := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
 	m := describe(req, &badge, "bob bob-local dev", at)
 
-	if m.Format != "logos.bob-dummy.v1" || m.BuildID != req.BuildID || m.Platform != "any/any" ||
+	if m.Format != "logos.bob-dummy.v1" || m.BuildID != req.BuildID || m.Platform != "linux/amd64" ||
 		m.Greeting != "hello from BOB" || m.KillDate != "2027-01-31T00:00:00Z" ||
 		!reflect.DeepEqual(m.Punches, []string{"jab", "hook"}) || !m.BuiltAt.Equal(at) ||
 		!reflect.DeepEqual(m.Commands, []string{"sleep", "exit", "hello", "ls"}) {
@@ -135,8 +121,7 @@ func TestDescribeWithoutOptionalValues(t *testing.T) {
 	}
 }
 
-// linux-elf builds the same dummy JSON, for one of its two platforms, and
-// refuses any other.
+// linux-elf builds for its two platforms, and refuses any other.
 func TestLinuxELF(t *testing.T) {
 	r := coreRequest(t)
 	r.Target, r.Platform = "linux-elf", "linux/386"

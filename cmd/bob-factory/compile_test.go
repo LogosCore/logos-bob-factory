@@ -4,15 +4,11 @@ import (
 	"bytes"
 	"context"
 	"debug/elf"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
-
-	"github.com/logoscore/logos-golang-factory-core/pkg/factorytest"
-	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
 // testMinionSrc is the repository's minion module: the sources the image
@@ -67,41 +63,5 @@ func TestCompile(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(testMinionSrc, "minion.json")); string(b) != "{}\n" {
 		t.Fatalf("a build wrote to the minion sources: %q", b)
-	}
-}
-
-// A linux-elf build plans a compile step and uploads a binary that prints the
-// dummy minion.
-func TestBuildLinuxELF(t *testing.T) {
-	needGo(t)
-	st := factorytest.NewStore(t)
-	badge := st.File("badge-1", "badge.png", "image/png", []byte("\x89PNG fake"))
-	req := coreRequest(t)
-	req.Target, req.Platform = "linux-elf", "linux/amd64"
-	req.Artifact = protocol.ArtifactUpload{}
-	req.Files = map[string]protocol.BuildFile{badge.ID: badge}
-	req.Values["badge"] = badge.ID
-
-	out := factorytest.Run(t, buildSchema, &bob{builtBy: "bob bob-test test", minionSrc: testMinionSrc}, st, req)
-	res := out.Result
-	if res.Status != protocol.BuildSucceeded || res.Artifact.Filename != "bob-5b0c4f6e" ||
-		res.Artifact.MediaType != "application/x-executable" {
-		t.Fatalf("result %+v (error %+v, log %s)", res, res.Error, res.Log)
-	}
-	if ids := stepIDs(out.Steps); ids != "badge render compile upload" {
-		t.Fatalf("plan %s", ids)
-	}
-	if _, err := elf.NewFile(bytes.NewReader(out.Artifact)); err != nil {
-		t.Fatalf("artifact is no ELF: %v", err)
-	}
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		return
-	}
-	var m dummyMinion
-	if err := json.Unmarshal(run(t, out.Artifact), &m); err != nil {
-		t.Fatal(err)
-	}
-	if m.BuildID != req.BuildID || m.Target != "linux-elf" || m.Platform != "linux/amd64" || m.Greeting != "hello from BOB" {
-		t.Fatalf("the binary printed %+v", m)
 	}
 }

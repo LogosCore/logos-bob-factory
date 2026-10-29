@@ -12,15 +12,16 @@ import (
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
-// buildSchema is what BOB builds: dummy minions whose artifact describes the
-// minion as JSON. It declares one field of each kind a build schema adds
-// (datetime, enum_list, file), HTTP connection parameters, and commands of
-// each kind (required, picked by default, picked by the operator, one
-// target's only), so the build flow can be worked out end to end before a
-// real factory exists.
+// buildSchema is what BOB builds: dummy minions, Linux binaries that print a
+// JSON description of the minion and do nothing else. It declares one field of
+// each kind a build schema adds (datetime, enum_list, file), HTTP connection
+// parameters, and commands of each kind (required, picked by default, picked
+// by the operator), so the build flow can be worked out end to end before a
+// real factory exists. Version 2: the JSON-only targets dummy and dummy-lite
+// are gone.
 var buildSchema = protocol.BuildSchema{
 	SchemaVersion: protocol.BuildSchemaV1,
-	Version:       1,
+	Version:       2,
 	Channels: []protocol.BuildChannel{{
 		ChannelVersions: protocol.ChannelVersions{ModuleName: "http", Versions: []int{2}},
 		Fields: []protocol.FieldSpec{
@@ -60,14 +61,6 @@ var buildSchema = protocol.BuildSchema{
 	},
 	Targets: []protocol.BuildTarget{
 		{
-			ID: "dummy", Label: "Dummy minion", Format: "json", Platforms: []string{"any/any"},
-			Description: "A JSON description of the minion: what it would be built with, and nothing to run.",
-		},
-		{
-			ID: "dummy-lite", Label: "Lite dummy minion", Format: "json", Platforms: []string{"any/any"},
-			Description: "The dummy minion without a shell: a target that has fewer commands.",
-		},
-		{
 			ID: "linux-elf", Label: "Linux binary", Format: "elf", Platforms: []string{"linux/amd64", "linux/386"},
 			Description: "A static Linux binary that prints the dummy minion's JSON description, baked in when it is compiled.",
 		},
@@ -96,7 +89,7 @@ var buildSchema = protocol.BuildSchema{
 			Params:      []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true}},
 		},
 		{
-			ID: "shell", Label: "Run a shell command", Targets: []string{"dummy", "linux-elf"},
+			ID: "shell", Label: "Run a shell command",
 			Description: "Runs a command in the system shell and answers with its output.",
 			Params: []protocol.FieldSpec{
 				{Key: "command", Type: protocol.FieldString, Label: "Command", Required: true},
@@ -156,8 +149,7 @@ var (
 )
 
 // Steps is the plan for a build of req: the badge is checked only when there
-// is one, punches taken only while build_delay is set, and a binary compiled
-// only for the targets that have one (compile.go).
+// is one, and punches taken only while build_delay is set.
 func (b *bob) Steps(req protocol.BuildRequest) []protocol.BuildStep {
 	var steps []protocol.BuildStep
 	if id, _ := req.Values["badge"].(string); id != "" {
@@ -166,11 +158,7 @@ func (b *bob) Steps(req protocol.BuildRequest) []protocol.BuildStep {
 	if b.current().delay > 0 {
 		steps = append(steps, stepPunches)
 	}
-	steps = append(steps, stepRender)
-	if _, ok := compiledTargets[req.Target]; ok {
-		steps = append(steps, stepCompile)
-	}
-	return append(steps, stepUpload)
+	return append(steps, stepRender, stepCompile, stepUpload)
 }
 
 func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, error) {
@@ -201,30 +189,27 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	}
 	job.Logf("dummy minion of build %s for %s with %d connection(s)", m.BuildID, m.Platform, len(m.Connections))
 
-	name, mediaType := "bob-"+m.BuildID[:8]+".json", "application/json"
-	warning := "a dummy minion: it describes a minion and runs nothing"
-	if _, ok := compiledTargets[m.Target]; ok {
-		job.Step(stepCompile.ID, "go build for "+m.Platform)
-		bin, err := compile(ctx, b.minionSrc, m.Target, m.Platform, body)
-		switch {
-		case errors.Is(err, errNoToolchain):
-			return factory.Result{}, factory.Fail("no_toolchain", err.Error())
-		case err != nil && ctx.Err() == nil:
-			job.Logf("%v", err)
-			return factory.Result{}, factory.Fail("compile_failed", "the dummy minion did not compile; see the build log")
-		case err != nil:
-			return factory.Result{}, err
-		}
-		job.Logf("compiled a %d-byte binary for %s", len(bin), m.Platform)
-		name, mediaType, body = "bob-"+m.BuildID[:8], "application/x-executable", bin
-		warning = "a dummy minion: it prints its description and does nothing else"
-	}
-
-	job.Step(stepUpload.ID, "")
-	if err := job.UploadArtifact(ctx, name, mediaType, bytes.NewReader(body)); err != nil {
+	job.Step(stepCompile.ID, "go build for "+m.Platform)
+	bin, err := compile(ctx, b.minionSrc, m.Target, m.Platform, body)
+	switch {
+	case errors.Is(err, errNoToolchain):
+		return factory.Result{}, factory.Fail("no_toolchain", err.Error())
+	case err != nil && ctx.Err() == nil:
+		job.Logf("%v", err)
+		return factory.Result{}, factory.Fail("compile_failed", "the dummy minion did not compile; see the build log")
+	case err != nil:
 		return factory.Result{}, err
 	}
-	return factory.Result{Warnings: []string{warning}}, nil
+	job.Logf("compiled a %d-byte binary for %s", len(bin), m.Platform)
+
+	job.Step(stepUpload.ID, "")
+	name := "bob-" + m.BuildID[:8] + ".bin"
+	if err := job.UploadArtifact(ctx, name, "application/x-executable", bytes.NewReader(bin)); err != nil {
+		return factory.Result{}, err
+	}
+	return factory.Result{
+		Warnings: []string{"a dummy minion: it prints its description and does nothing else"},
+	}, nil
 }
 
 // sleep waits for d, or until ctx ends.

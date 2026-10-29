@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"debug/elf"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -22,15 +25,23 @@ func TestBuildDummyMinion(t *testing.T) {
 	req.Files = map[string]protocol.BuildFile{badge.ID: badge}
 	req.Values["badge"] = badge.ID
 
-	out := factorytest.Run(t, buildSchema, &bob{builtBy: "bob bob-test test"}, st, req)
-	res, artifact := out.Result, out.Artifact
-	if res.Status != protocol.BuildSucceeded || res.Artifact.Filename != "bob-5b0c4f6e.json" ||
-		res.Artifact.MediaType != "application/json" {
-		t.Fatalf("result %+v (error %+v)", res, res.Error)
+	needGo(t)
+	out := factorytest.Run(t, buildSchema, &bob{builtBy: "bob bob-test test", minionSrc: testMinionSrc}, st, req)
+	res := out.Result
+	if res.Status != protocol.BuildSucceeded || res.Artifact.Filename != "bob-5b0c4f6e.bin" ||
+		res.Artifact.MediaType != "application/x-executable" {
+		t.Fatalf("result %+v (error %+v, log %s)", res, res.Error, res.Log)
 	}
+	if _, err := elf.NewFile(bytes.NewReader(out.Artifact)); err != nil {
+		t.Fatalf("artifact is no ELF: %v", err)
+	}
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		return // cannot run it here
+	}
+	artifact := run(t, out.Artifact)
 	var m dummyMinion
 	if err := json.Unmarshal(artifact, &m); err != nil {
-		t.Fatalf("artifact %s: %v", artifact, err)
+		t.Fatalf("the binary printed %s: %v", artifact, err)
 	}
 	if m.BuildID != req.BuildID || m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.BuiltBy != "bob bob-test test" ||
 		m.Connections[0].Values["path_prefix"] != "/cdn/assets/" || strings.Join(m.Commands, " ") != "sleep exit hello ls" {
@@ -40,7 +51,7 @@ func TestBuildDummyMinion(t *testing.T) {
 		t.Fatalf("artifact or log: %s\nlog: %s", artifact, res.Log)
 	}
 	// The plan core got, and the step the build reported last.
-	if ids := stepIDs(out.Steps); ids != "badge render upload" {
+	if ids := stepIDs(out.Steps); ids != "badge render compile upload" {
 		t.Fatalf("plan %s", ids)
 	}
 	if n := len(out.Progress); n == 0 || out.Progress[n-1].Step != "upload" {
@@ -50,13 +61,13 @@ func TestBuildDummyMinion(t *testing.T) {
 
 func TestPlanFollowsTheBuild(t *testing.T) {
 	b := &bob{}
-	if ids := stepIDs(b.Steps(noBadgeRequest(t))); ids != "render upload" {
+	if ids := stepIDs(b.Steps(noBadgeRequest(t))); ids != "render compile upload" {
 		t.Errorf("no badge, no delay: %s", ids)
 	}
 	b.settings.Store(&settings{delay: time.Second})
 	withBadge := noBadgeRequest(t)
 	withBadge.Values["badge"] = "badge-1"
-	if ids := stepIDs(b.Steps(withBadge)); ids != "badge punches render upload" {
+	if ids := stepIDs(b.Steps(withBadge)); ids != "badge punches render compile upload" {
 		t.Errorf("a badge and a delay: %s", ids)
 	}
 	if err := protocol.ValidateBuildSteps(b.Steps(withBadge)); err != nil {
@@ -98,7 +109,8 @@ func noBadgeRequest(t *testing.T) protocol.BuildRequest {
 }
 
 func TestBuildTakesPunchesFirst(t *testing.T) {
-	b := &bob{}
+	needGo(t)
+	b := &bob{minionSrc: testMinionSrc}
 	b.settings.Store(&settings{delay: 30 * time.Millisecond})
 	start := time.Now()
 	res, artifact := factorytest.Build(t, buildSchema, b, factorytest.NewStore(t), noBadgeRequest(t))
