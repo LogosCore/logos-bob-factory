@@ -76,6 +76,10 @@ func coreRequest(t *testing.T) protocol.BuildRequest {
 			ID: "badge-1", Name: "badge.png", Size: 3, SHA256: strings.Repeat("ab", 32), MediaType: "image/png",
 			URL: "http://logos-seaweedfs-s3:8333/badge-1?X-Amz-Signature=x",
 		}},
+		Crypto: &protocol.BuildCrypto{
+			Suite:    protocol.CryptoAES256CBCHMACSHA256,
+			Material: json.RawMessage(`{"enc_key":"ZW5j","mac_key":"bWFj"}`),
+		},
 		Artifact: protocol.ArtifactUpload{UploadURL: "http://logos-seaweedfs-s3:8333/artifact", MaxSize: 1 << 20},
 		Deadline: time.Now().Add(time.Minute),
 	}
@@ -103,6 +107,10 @@ func TestDescribe(t *testing.T) {
 	conn := m.Connections[0]
 	if conn.Endpoint.Name != "edge-eu" || conn.Values["method"] != "POST" || conn.Values["path_prefix"] != "/cdn/assets/" {
 		t.Fatalf("connection %+v", conn)
+	}
+
+	if m.Crypto == nil || m.Crypto.Suite != protocol.CryptoAES256CBCHMACSHA256 {
+		t.Fatalf("crypto %+v: want the minion's keys in the artifact", m.Crypto)
 	}
 
 	raw, err := json.Marshal(m)

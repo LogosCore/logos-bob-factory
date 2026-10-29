@@ -36,6 +36,9 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 	}},
+	// Its minions encrypt with AES-256-CBC and HMAC-SHA256; core generates
+	// each one's keys and BOB writes them into the artifact.
+	Crypto: protocol.CryptoAES256CBCHMACSHA256,
 	Fields: []protocol.FieldSpec{
 		{
 			Key: "greeting", Type: protocol.FieldString, Label: "Greeting", Default: "hello from BOB", MaxLength: 200,
@@ -110,6 +113,7 @@ type dummyMinion struct {
 	Punches     []string                   `json:"punches,omitempty"`
 	Badge       *protocol.BuildFile        `json:"badge,omitempty"`
 	Connections []protocol.BuildConnection `json:"connections"`
+	Crypto      *protocol.BuildCrypto      `json:"crypto,omitempty"`
 	BuiltBy     string                     `json:"built_by"`
 	BuiltAt     time.Time                  `json:"built_at"`
 }
@@ -237,6 +241,7 @@ func describe(req protocol.BuildRequest, badge *protocol.BuildFile, builtBy stri
 		Punches:     punches,
 		Badge:       badge,
 		Connections: req.Connections,
+		Crypto:      req.Crypto,
 		BuiltBy:     builtBy,
 		BuiltAt:     now,
 	}
