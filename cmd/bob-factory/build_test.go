@@ -42,6 +42,9 @@ func TestLiteHasNoShell(t *testing.T) {
 	if got := ids("dummy-lite"); got != "sleep exit hello ls download" {
 		t.Errorf("dummy-lite: %s", got)
 	}
+	if got := ids("linux-elf"); got != "sleep exit hello ls download shell" {
+		t.Errorf("linux-elf: %s", got)
+	}
 	r := coreRequest(t)
 	r.Target, r.Commands = "dummy-lite", append(r.Commands, "shell")
 	if p := protocol.ValidateBuildRequest(buildSchema, r); p["commands[4]"] == "" || len(p) != 1 {
@@ -129,5 +132,23 @@ func TestDescribeWithoutOptionalValues(t *testing.T) {
 	m := describe(req, nil, "bob", time.Now())
 	if m.KillDate != "" || m.Punches != nil || m.Badge != nil {
 		t.Fatalf("minion %+v", m)
+	}
+}
+
+// linux-elf builds the same dummy JSON, for one of its two platforms, and
+// refuses any other.
+func TestLinuxELF(t *testing.T) {
+	r := coreRequest(t)
+	r.Target, r.Platform = "linux-elf", "linux/386"
+	if p := protocol.ValidateBuildRequest(buildSchema, r); p != nil {
+		t.Fatalf("linux-elf for linux/386: %v", p)
+	}
+	badge := r.Files["badge-1"]
+	if m := describe(r, &badge, "bob", time.Now()); m.Format != "logos.bob-dummy.v1" || m.Target != "linux-elf" || m.Platform != "linux/386" {
+		t.Fatalf("minion %+v", m)
+	}
+	r.Platform = "any/any"
+	if p := protocol.ValidateBuildRequest(buildSchema, r); p["platform"] == "" {
+		t.Fatalf("linux-elf for any/any: %v", p)
 	}
 }

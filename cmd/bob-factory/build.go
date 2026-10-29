@@ -66,6 +66,10 @@ var buildSchema = protocol.BuildSchema{
 			ID: "dummy-lite", Label: "Lite dummy minion", Format: "json", Platforms: []string{"any/any"},
 			Description: "The dummy minion without a shell: a target that has fewer commands.",
 		},
+		{
+			ID: "linux-elf", Label: "Linux binary", Format: "json", Platforms: []string{"linux/amd64", "linux/386"},
+			Description: "A target with real platforms to pick from. Still a dummy: the artifact is the same JSON description, with the platform in it.",
+		},
 	},
 	Commands: []protocol.BuildCommand{
 		{
@@ -91,7 +95,7 @@ var buildSchema = protocol.BuildSchema{
 			Params:      []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true}},
 		},
 		{
-			ID: "shell", Label: "Run a shell command", Targets: []string{"dummy"},
+			ID: "shell", Label: "Run a shell command", Targets: []string{"dummy", "linux-elf"},
 			Description: "Runs a command in the system shell and answers with its output.",
 			Params: []protocol.FieldSpec{
 				{Key: "command", Type: protocol.FieldString, Label: "Command", Required: true},

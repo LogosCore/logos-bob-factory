@@ -13,9 +13,9 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 
 | | |
 |---|---|
-| Targets | `dummy` and `dummy-lite` (no shell): format `json`, platform `any/any` |
+| Targets | `dummy` and `dummy-lite` (no shell): format `json`, platform `any/any`; `linux-elf`: platforms `linux/amd64` and `linux/386`, still the dummy JSON (format `json`) |
 | Fields | `greeting` (string), `kill_date` (datetime), `punches` (enum_list: jab, cross, hook, uppercut), `badge` (file, an image up to 256 KiB, checked and recorded by SHA-256) |
-| Commands | `sleep` and `exit` (required), `hello` and `ls` (picked by default), `download`, `shell` (the `dummy` target's only). Each declares the params a task of it would take; the dummy minion runs none of them, and its description lists the ones its build picked. |
+| Commands | `sleep` and `exit` (required), `hello` and `ls` (picked by default), `download`, `shell` (the `dummy` and `linux-elf` targets only). Each declares the params a task of it would take; the dummy minion runs none of them, and its description lists the ones its build picked. |
 | Channels | `http` connection schema version 2, with connection parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`) |
 | Crypto | `aes-256-cbc-hmac-sha256` (AES-256-CBC with HMAC-SHA256); the keys core generates go into the artifact |
 
