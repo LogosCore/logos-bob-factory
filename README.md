@@ -29,7 +29,11 @@ own Go module, `minion/` in this repository. For each build BOB copies that
 directory, writes the build's description into it as `minion.json`, and runs
 `go build` there for the build's platform (`GOOS=linux`, `GOARCH=amd64` or
 `386`), with no network: a `vendor/` directory, once the minion has
-dependencies, is used as it is. The plan gets a **Compile the binary** step, and the artifact is
+dependencies, is used as it is. The plan is **Check the badge** (when the build has one), **Compile the
+binary** and **Upload the artifact**. The compile step runs the command, and
+everything the compiler prints to stdout and stderr goes to the build log as
+it comes (`go build -v`, so it names what it compiles), on success too. The
+artifact is
 `bob-<first 8 of the build id>.bin`, `application/x-executable`, about 1 MiB.
 
 ```console
@@ -72,7 +76,7 @@ and `draining`), BOB declares:
 
 | | |
 |---|---|
-| Properties (live) | `build_delay` (duration, 0s to 10m: each build takes punches that long first, so its progress can be watched and it can be cancelled), `fail_builds` (fail every build with code `knocked_out`), `log_level` |
+| Properties (live) | `build_delay` (duration, 0s to 10m: each build takes punches that long in its compile step, before compiling, so its progress can be watched and it can be cancelled), `fail_builds` (fail every build with code `knocked_out`), `log_level` |
 | Actions | `say_hello`: BOB logs a hello at info, to check actions and the live log tail |
 
 ## Configuration

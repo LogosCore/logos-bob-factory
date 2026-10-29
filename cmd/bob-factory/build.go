@@ -142,23 +142,18 @@ func (b *bob) current() settings {
 // The steps of BOB's builds.
 var (
 	stepBadge   = protocol.BuildStep{ID: "badge", Label: "Check the badge"}
-	stepPunches = protocol.BuildStep{ID: "punches", Label: "Take punches"}
-	stepRender  = protocol.BuildStep{ID: "render", Label: "Describe the minion"}
 	stepCompile = protocol.BuildStep{ID: "compile", Label: "Compile the binary"}
 	stepUpload  = protocol.BuildStep{ID: "upload", Label: "Upload the artifact"}
 )
 
 // Steps is the plan for a build of req: the badge is checked only when there
-// is one, and punches taken only while build_delay is set.
+// is one. build_delay, when set, is spent in the compile step.
 func (b *bob) Steps(req protocol.BuildRequest) []protocol.BuildStep {
 	var steps []protocol.BuildStep
 	if id, _ := req.Values["badge"].(string); id != "" {
 		steps = append(steps, stepBadge)
 	}
-	if b.current().delay > 0 {
-		steps = append(steps, stepPunches)
-	}
-	return append(steps, stepRender, stepCompile, stepUpload)
+	return append(steps, stepCompile, stepUpload)
 }
 
 func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, error) {
@@ -171,8 +166,8 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 		}
 		badge = &f
 	}
+	job.Step(stepCompile.ID, "go build for "+job.Request.Platform)
 	if s.delay > 0 {
-		job.Step(stepPunches.ID, "taking punches for "+s.delay.String())
 		job.Logf("taking punches for %s (build_delay)", s.delay)
 		if err := sleep(ctx, s.delay); err != nil {
 			return factory.Result{}, err
@@ -181,7 +176,6 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	if s.fail {
 		return factory.Result{}, factory.Fail("knocked_out", "BOB is set to fail every build (fail_builds)")
 	}
-	job.Step(stepRender.ID, "")
 	m := describe(job.Request, badge, b.builtBy, time.Now().UTC())
 	body, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -189,13 +183,13 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	}
 	job.Logf("dummy minion of build %s for %s with %d connection(s)", m.BuildID, m.Platform, len(m.Connections))
 
-	job.Step(stepCompile.ID, "go build for "+m.Platform)
-	bin, err := compile(ctx, b.minionSrc, m.Target, m.Platform, body)
+	out := &lineLog{logf: job.Logf}
+	bin, err := compile(ctx, b.minionSrc, m.Target, m.Platform, body, out)
+	out.Flush()
 	switch {
 	case errors.Is(err, errNoToolchain):
 		return factory.Result{}, factory.Fail("no_toolchain", err.Error())
 	case err != nil && ctx.Err() == nil:
-		job.Logf("%v", err)
 		return factory.Result{}, factory.Fail("compile_failed", "the dummy minion did not compile; see the build log")
 	case err != nil:
 		return factory.Result{}, err

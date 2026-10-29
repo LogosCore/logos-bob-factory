@@ -51,7 +51,7 @@ func TestBuildDummyMinion(t *testing.T) {
 		t.Fatalf("artifact or log: %s\nlog: %s", artifact, res.Log)
 	}
 	// The plan core got, and the step the build reported last.
-	if ids := stepIDs(out.Steps); ids != "badge render compile upload" {
+	if ids := stepIDs(out.Steps); ids != "badge compile upload" {
 		t.Fatalf("plan %s", ids)
 	}
 	if n := len(out.Progress); n == 0 || out.Progress[n-1].Step != "upload" {
@@ -61,13 +61,13 @@ func TestBuildDummyMinion(t *testing.T) {
 
 func TestPlanFollowsTheBuild(t *testing.T) {
 	b := &bob{}
-	if ids := stepIDs(b.Steps(noBadgeRequest(t))); ids != "render compile upload" {
+	if ids := stepIDs(b.Steps(noBadgeRequest(t))); ids != "compile upload" {
 		t.Errorf("no badge, no delay: %s", ids)
 	}
 	b.settings.Store(&settings{delay: time.Second})
 	withBadge := noBadgeRequest(t)
 	withBadge.Values["badge"] = "badge-1"
-	if ids := stepIDs(b.Steps(withBadge)); ids != "badge punches render compile upload" {
+	if ids := stepIDs(b.Steps(withBadge)); ids != "badge compile upload" {
 		t.Errorf("a badge and a delay: %s", ids)
 	}
 	if err := protocol.ValidateBuildSteps(b.Steps(withBadge)); err != nil {

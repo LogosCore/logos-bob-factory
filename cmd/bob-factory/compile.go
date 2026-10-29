@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -32,8 +33,9 @@ var errNoToolchain = errors.New("no Go toolchain: the go command is not on PATH"
 // minion baked in as its minion.json, and returns the binary: static (no
 // cgo), stripped, and the same for the same input. src is copied first, so
 // it is never written to. A vendor directory in it is used; nothing is
-// downloaded either way.
-func compile(ctx context.Context, src, target, platform string, minion []byte) ([]byte, error) {
+// downloaded either way. The command and everything the compiler writes to
+// stdout and stderr go to log as they come.
+func compile(ctx context.Context, src, target, platform string, minion []byte, log io.Writer) ([]byte, error) {
 	pair, ok := compiledTargets[target][platform]
 	if !ok {
 		return nil, fmt.Errorf("target %s does not compile for %s", target, platform)
@@ -56,7 +58,7 @@ func compile(ctx context.Context, src, target, platform string, minion []byte) (
 	if err := os.WriteFile(filepath.Join(dir, "minion.json"), minion, 0o600); err != nil {
 		return nil, err
 	}
-	args := []string{"build", "-trimpath", "-ldflags=-s -w -buildid=", "-o", filepath.Join(dir, ".bin", "minion")}
+	args := []string{"build", "-v", "-trimpath", "-ldflags=-s -w -buildid=", "-o", filepath.Join(".bin", "minion")}
 	if _, err := fs.Stat(os.DirFS(dir), "vendor"); err == nil {
 		args = append(args, "-mod=vendor")
 	}
@@ -66,13 +68,40 @@ func compile(ctx context.Context, src, target, platform string, minion []byte) (
 		"GOOS="+pair[0], "GOARCH="+pair[1], "CGO_ENABLED=0",
 		"GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local", "GOPROXY=off",
 	)
-	var output bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &output, &output
+	fmt.Fprintf(log, "$ GOOS=%s GOARCH=%s CGO_ENABLED=0 go %s\n", pair[0], pair[1], strings.Join(cmd.Args[1:], " "))
+	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("go build: %w: %s", err, strings.TrimSpace(output.String()))
+		return nil, fmt.Errorf("go build: %w", err)
 	}
 	return os.ReadFile(filepath.Join(dir, ".bin", "minion"))
+}
+
+// lineLog writes whole lines to a build log as they come: what a process
+// prints, split at newlines, each line one Logf.
+type lineLog struct {
+	logf func(format string, args ...any)
+	buf  []byte
+}
+
+func (l *lineLog) Write(p []byte) (int, error) {
+	l.buf = append(l.buf, p...)
+	for {
+		i := bytes.IndexByte(l.buf, '\n')
+		if i < 0 {
+			return len(p), nil
+		}
+		l.logf("%s", l.buf[:i])
+		l.buf = l.buf[i+1:]
+	}
+}
+
+// Flush logs what is left after the last newline.
+func (l *lineLog) Flush() {
+	if len(l.buf) > 0 {
+		l.logf("%s", l.buf)
+		l.buf = nil
+	}
 }

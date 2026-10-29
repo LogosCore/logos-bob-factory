@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"debug/elf"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -41,7 +44,7 @@ func TestCompile(t *testing.T) {
 	needGo(t)
 	minion := []byte(`{"format":"logos.bob-dummy.v1","greeting":"hello"}` + "\n")
 	for platform, machine := range map[string]elf.Machine{"linux/amd64": elf.EM_X86_64, "linux/386": elf.EM_386} {
-		bin, err := compile(context.Background(), testMinionSrc, "linux-elf", platform, minion)
+		bin, err := compile(context.Background(), testMinionSrc, "linux-elf", platform, minion, io.Discard)
 		if err != nil {
 			t.Fatalf("%s: %v", platform, err)
 		}
@@ -55,13 +58,44 @@ func TestCompile(t *testing.T) {
 			}
 		}
 	}
-	if _, err := compile(context.Background(), testMinionSrc, "linux-elf", "windows/amd64", minion); err == nil {
+	if _, err := compile(context.Background(), testMinionSrc, "linux-elf", "windows/amd64", minion, io.Discard); err == nil {
 		t.Fatal("compiled for a platform the target does not have")
 	}
-	if _, err := compile(context.Background(), t.TempDir(), "linux-elf", "linux/amd64", minion); err == nil {
+	if _, err := compile(context.Background(), t.TempDir(), "linux-elf", "linux/amd64", minion, io.Discard); err == nil {
 		t.Fatal("compiled without minion sources")
 	}
 	if b, _ := os.ReadFile(filepath.Join(testMinionSrc, "minion.json")); string(b) != "{}\n" {
 		t.Fatalf("a build wrote to the minion sources: %q", b)
+	}
+}
+
+// The command and what the compiler prints reach the log, a line at a time.
+func TestCompileLogs(t *testing.T) {
+	needGo(t)
+	var lines []string
+	l := &lineLog{logf: func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }}
+	if _, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/386", []byte("{}"), l); err != nil {
+		t.Fatal(err)
+	}
+	l.Flush()
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "$ GOOS=linux GOARCH=386 CGO_ENABLED=0 go build -v ") {
+		t.Fatalf("log %q", lines)
+	}
+
+	// A minion that does not compile: the compiler's errors are in the log.
+	src := t.TempDir()
+	if err := os.CopyFS(src, os.DirFS(testMinionSrc)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "broken.go"), []byte("package main\nfunc broken() { undefined() }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lines = nil
+	if _, err := compile(context.Background(), src, "linux-elf", "linux/amd64", []byte("{}"), l); err == nil {
+		t.Fatal("a broken minion compiled")
+	}
+	l.Flush()
+	if !strings.Contains(strings.Join(lines, "\n"), "undefined: undefined") {
+		t.Fatalf("log %q", lines)
 	}
 }

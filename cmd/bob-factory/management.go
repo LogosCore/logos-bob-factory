@@ -54,7 +54,7 @@ func manifest() protocol.ManagementManifest {
 		Properties: []protocol.PropertySpec{
 			{FieldSpec: protocol.FieldSpec{
 				Key: "build_delay", Type: protocol.FieldDuration, Label: "Build delay",
-				Description: "How long each dummy build takes punches before describing the minion, so its progress can be watched and it can be cancelled.",
+				Description: "How long each dummy build takes punches before it compiles, so its progress can be watched and it can be cancelled.",
 				Group:       "Dummy builds", Order: 2,
 				Default: "0s", Min: "0s", Max: "10m",
 			}, Apply: protocol.ApplyLive},
