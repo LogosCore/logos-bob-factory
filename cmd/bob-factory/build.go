@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -67,8 +68,8 @@ var buildSchema = protocol.BuildSchema{
 			Description: "The dummy minion without a shell: a target that has fewer commands.",
 		},
 		{
-			ID: "linux-elf", Label: "Linux binary", Format: "json", Platforms: []string{"linux/amd64", "linux/386"},
-			Description: "A target with real platforms to pick from. Still a dummy: the artifact is the same JSON description, with the platform in it.",
+			ID: "linux-elf", Label: "Linux binary", Format: "elf", Platforms: []string{"linux/amd64", "linux/386"},
+			Description: "A static Linux binary that prints the dummy minion's JSON description, baked in when it is compiled.",
 		},
 	},
 	Commands: []protocol.BuildCommand{
@@ -148,11 +149,13 @@ var (
 	stepBadge   = protocol.BuildStep{ID: "badge", Label: "Check the badge"}
 	stepPunches = protocol.BuildStep{ID: "punches", Label: "Take punches"}
 	stepRender  = protocol.BuildStep{ID: "render", Label: "Describe the minion"}
+	stepCompile = protocol.BuildStep{ID: "compile", Label: "Compile the binary"}
 	stepUpload  = protocol.BuildStep{ID: "upload", Label: "Upload the artifact"}
 )
 
 // Steps is the plan for a build of req: the badge is checked only when there
-// is one, and punches taken only while build_delay is set.
+// is one, punches taken only while build_delay is set, and a binary compiled
+// only for the targets that have one (compile.go).
 func (b *bob) Steps(req protocol.BuildRequest) []protocol.BuildStep {
 	var steps []protocol.BuildStep
 	if id, _ := req.Values["badge"].(string); id != "" {
@@ -161,7 +164,11 @@ func (b *bob) Steps(req protocol.BuildRequest) []protocol.BuildStep {
 	if b.current().delay > 0 {
 		steps = append(steps, stepPunches)
 	}
-	return append(steps, stepRender, stepUpload)
+	steps = append(steps, stepRender)
+	if _, ok := compiledTargets[req.Target]; ok {
+		steps = append(steps, stepCompile)
+	}
+	return append(steps, stepUpload)
 }
 
 func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, error) {
@@ -192,14 +199,30 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	}
 	job.Logf("dummy minion of build %s for %s with %d connection(s)", m.BuildID, m.Platform, len(m.Connections))
 
+	name, mediaType := "bob-"+m.BuildID[:8]+".json", "application/json"
+	warning := "a dummy minion: it describes a minion and runs nothing"
+	if _, ok := compiledTargets[m.Target]; ok {
+		job.Step(stepCompile.ID, "go build for "+m.Platform)
+		bin, err := compile(ctx, m.Target, m.Platform, body)
+		switch {
+		case errors.Is(err, errNoToolchain):
+			return factory.Result{}, factory.Fail("no_toolchain", err.Error())
+		case err != nil && ctx.Err() == nil:
+			job.Logf("%v", err)
+			return factory.Result{}, factory.Fail("compile_failed", "the dummy minion did not compile; see the build log")
+		case err != nil:
+			return factory.Result{}, err
+		}
+		job.Logf("compiled a %d-byte binary for %s", len(bin), m.Platform)
+		name, mediaType, body = "bob-"+m.BuildID[:8], "application/x-executable", bin
+		warning = "a dummy minion: it prints its description and does nothing else"
+	}
+
 	job.Step(stepUpload.ID, "")
-	name := "bob-" + m.BuildID[:8] + ".json"
-	if err := job.UploadArtifact(ctx, name, "application/json", bytes.NewReader(body)); err != nil {
+	if err := job.UploadArtifact(ctx, name, mediaType, bytes.NewReader(body)); err != nil {
 		return factory.Result{}, err
 	}
-	return factory.Result{
-		Warnings: []string{"a dummy minion: it describes a minion and runs nothing"},
-	}, nil
+	return factory.Result{Warnings: []string{warning}}, nil
 }
 
 // sleep waits for d, or until ctx ends.

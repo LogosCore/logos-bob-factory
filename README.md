@@ -13,11 +13,39 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 
 | | |
 |---|---|
-| Targets | `dummy` and `dummy-lite` (no shell): format `json`, platform `any/any`; `linux-elf`: platforms `linux/amd64` and `linux/386`, still the dummy JSON (format `json`) |
+| Targets | `dummy` and `dummy-lite` (no shell): format `json`, platform `any/any`, the artifact is the JSON description; `linux-elf`: format `elf`, platforms `linux/amd64` and `linux/386`, the artifact is a [binary](#the-linux-elf-binary) that prints it |
 | Fields | `greeting` (string), `kill_date` (datetime), `punches` (enum_list: jab, cross, hook, uppercut), `badge` (file, an image up to 256 KiB, checked and recorded by SHA-256) |
 | Commands | `sleep` and `exit` (required), `hello` and `ls` (picked by default), `download`, `shell` (the `dummy` and `linux-elf` targets only). Each declares the params a task of it would take; the dummy minion runs none of them, and its description lists the ones its build picked. |
 | Channels | `http` connection schema version 2, with connection parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`) |
 | Crypto | `aes-256-cbc-hmac-sha256` (AES-256-CBC with HMAC-SHA256); the keys core generates go into the artifact |
+
+## The linux-elf binary
+
+For `linux-elf`, BOB compiles a real program: a static Linux binary (no cgo,
+stripped) that prints the dummy minion's JSON description and exits. The
+description is **baked in at compile time**: BOB writes it next to the
+program's source (`cmd/bob-factory/stub`, embedded in BOB) and runs
+`go build` for the build's platform, with `GOOS=linux` and `GOARCH=amd64` or
+`386`. The plan gets a **Compile the binary** step, and the artifact is
+`bob-<build id>`, `application/x-executable`, about 1 MiB.
+
+```console
+$ ./bob-5b0c4f6e
+{
+  "format": "logos.bob-dummy.v1",
+  "build_id": "5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f",
+  "target": "linux-elf",
+  "platform": "linux/amd64",
+  …
+}
+```
+
+So BOB needs the **Go toolchain at run time**. Its image is built on
+`golang:1.25-alpine`, runs as an unprivileged user, and warms its build cache
+with the standard library for both platforms, so a compile takes about a
+second. Run outside the image, BOB uses the `go` on its `PATH`; without one a
+`linux-elf` build fails with `no_toolchain`, and one that does not compile
+with `compile_failed` (the compiler's output is in the build log).
 
 ## Icon
 
