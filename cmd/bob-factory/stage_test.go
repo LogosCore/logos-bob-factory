@@ -20,14 +20,20 @@ import (
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
-// fakeCore is an HTTP channel and core in one: it unpacks a request, opens
-// the stage as core does, and answers with a stage_response.
+// fakeCore is an HTTP channel and core in one: it unpacks a request and
+// answers it as core does. A stage under the build id gets a temporary id
+// and new keys, a hello under the temporary id a session id, and a check-in
+// under the session id nothing (an empty reply).
 type fakeCore struct {
-	t       *testing.T
-	buildID [16]byte
-	keys    protocol.AES256CBCHMACSHA256Material
-	tempID  [16]byte
-	path    string
+	t         *testing.T
+	buildID   [16]byte
+	keys      protocol.AES256CBCHMACSHA256Material
+	tempID    [16]byte
+	newKeys   protocol.AES256CBCHMACSHA256Material
+	sessionID [16]byte
+	path      string
+	hello     protocol.HelloItem
+	checkIns  int
 }
 
 func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -37,37 +43,64 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var id [16]byte
 	copy(id[:], body[1+off:1+off+16])
 	frame := append(append([]byte{}, body[1:1+off]...), body[1+off+16:]...)
+	keys := f.keys
 	if id != f.buildID {
-		f.t.Errorf("sent under %x", id)
+		keys = f.newKeys
 	}
-	plain, err := protocol.OpenFrame(f.keys, id, protocol.FrameMinionToCore, frame)
+	plain, err := protocol.OpenFrame(keys, id, protocol.FrameMinionToCore, frame)
 	if err != nil {
-		f.t.Errorf("open: %v", err)
-		http.NotFound(w, r)
+		f.t.Errorf("open under %x: %v", id, err)
+		http.Error(w, "", http.StatusUnprocessableEntity)
 		return
 	}
 	var msg protocol.MinionMessage
-	var stage protocol.StageItem
-	if err := protocol.UnmarshalCBOR(plain, &msg); err != nil || len(msg.Items) != 1 || protocol.UnmarshalCBOR(msg.Items[0], &stage) != nil {
-		f.t.Errorf("message %+v: %v", msg, err)
+	if err := protocol.UnmarshalCBOR(plain, &msg); err != nil {
+		f.t.Errorf("message: %v", err)
 		return
 	}
-	pub, err := protocol.ParseStageKey(stage.Key)
-	if err != nil {
-		f.t.Error(err)
+	var item any
+	switch id {
+	case f.buildID:
+		var stage protocol.StageItem
+		if len(msg.Items) != 1 || protocol.UnmarshalCBOR(msg.Items[0], &stage) != nil {
+			f.t.Errorf("stage %+v", msg)
+			return
+		}
+		pub, err := protocol.ParseStageKey(stage.Key)
+		if err != nil {
+			f.t.Error(err)
+			return
+		}
+		material, _ := protocol.MarshalCBOR(f.newKeys)
+		sealed, _ := protocol.EncryptStageKeys(pub, material)
+		item = protocol.StageResponseItem{T: protocol.ItemStageResponse, TID: f.tempID[:], Keys: sealed, Corr: stage.Corr}
+	case f.tempID:
+		if len(msg.Items) != 1 || protocol.UnmarshalCBOR(msg.Items[0], &f.hello) != nil || f.hello.Validate() != nil {
+			f.t.Errorf("hello %+v", msg)
+			return
+		}
+		item = protocol.HelloResponseItem{T: protocol.ItemHelloResponse, SID: f.sessionID[:]}
+	case f.sessionID:
+		if len(msg.Items) != 0 {
+			f.t.Errorf("check-in with items %+v", msg)
+		}
+		f.checkIns++
+		// Core's 204, as the HTTP channel passes it on: the id, no frame.
+		_, _ = w.Write(append([]byte{0}, id[:]...))
+		return
+	default:
+		f.t.Errorf("sent under %x", id)
 		return
 	}
-	newKeys := protocol.AES256CBCHMACSHA256Material{EncKey: make([]byte, 32), MACKey: make([]byte, 32)}
-	material, _ := protocol.MarshalCBOR(newKeys)
-	sealed, _ := protocol.EncryptStageKeys(pub, material)
-	item, _ := protocol.MarshalCBOR(protocol.StageResponseItem{T: protocol.ItemStageResponse, TID: f.tempID[:], Keys: sealed, Corr: stage.Corr})
-	answer, _ := protocol.MarshalCBOR(protocol.CoreMessage{V: protocol.MinionMessageV1, Re: msg.ID, Items: []cbor.RawMessage{item}})
-	replyFrame, _ := protocol.SealFrame(f.keys, id, protocol.FrameCoreToMinion, answer)
+	raw, _ := protocol.MarshalCBOR(item)
+	answer, _ := protocol.MarshalCBOR(protocol.CoreMessage{V: protocol.MinionMessageV1, Re: msg.ID, Items: []cbor.RawMessage{raw}})
+	replyFrame, _ := protocol.SealFrame(keys, id, protocol.FrameCoreToMinion, answer)
 	out := append([]byte{0}, id[:]...)
 	_, _ = w.Write(append(out, replyFrame...))
 }
 
-// The compiled minion stages through its http connection and logs it.
+// The compiled minion stages through its http connection, says hello,
+// checks in, and logs it.
 func TestMinionStages(t *testing.T) {
 	needGo(t)
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
@@ -78,6 +111,10 @@ func TestMinionStages(t *testing.T) {
 	_, _ = rand.Read(core.keys.EncKey)
 	_, _ = rand.Read(core.keys.MACKey)
 	_, _ = rand.Read(core.tempID[:])
+	_, _ = rand.Read(core.sessionID[:])
+	core.newKeys = protocol.AES256CBCHMACSHA256Material{EncKey: make([]byte, 32), MACKey: make([]byte, 32)}
+	_, _ = rand.Read(core.newKeys.EncKey)
+	_, _ = rand.Read(core.newKeys.MACKey)
 	srv := httptest.NewServer(core)
 	defer srv.Close()
 
@@ -106,18 +143,23 @@ func TestMinionStages(t *testing.T) {
 		"generated an RSA-2048 key pair",
 		"channel answered 200",
 		"stage_response: correlation id matches",
-		"temporary id " + formatTempID(core.tempID),
-		"staged.",
+		"temporary id " + formatUUID(core.tempID),
+		"staged",
+		"session id " + formatUUID(core.sessionID),
+		"checked in.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q:\n%s", want, out)
 		}
+	}
+	if core.hello.PID != uint64(cmd.Process.Pid) || core.hello.OS != "linux" || core.hello.Arch != "amd64" || core.checkIns != 1 {
+		t.Errorf("hello %+v, %d check-ins", core.hello, core.checkIns)
 	}
 	if core.path != "/cdn/assets/" {
 		t.Errorf("posted to %q, want the path prefix", core.path)
 	}
 }
 
-func formatTempID(b [16]byte) string {
+func formatUUID(b [16]byte) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

@@ -8,6 +8,8 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -31,6 +33,8 @@ const (
 const (
 	ItemStage         = "stage"
 	ItemStageResponse = "stage_response"
+	ItemHello         = "hello"
+	ItemHelloResponse = "hello_response"
 	ItemErr           = "err"
 )
 
@@ -67,6 +71,50 @@ type StageResponseItem struct {
 	TID  []byte `cbor:"tid"`
 	Keys []byte `cbor:"keys"`
 	Corr []byte `cbor:"corr"`
+}
+
+// HelloItem is the minion's host and process: it opens a session, and
+// under a session id it replaces what the session recorded (a rehello).
+// PID, OS and Arch are required; OS and Arch use Go's names, as build
+// platforms do. X holds the factory's own fields.
+type HelloItem struct {
+	T         string         `cbor:"t"`
+	PID       uint64         `cbor:"pid"`
+	OS        string         `cbor:"os"`
+	Arch      string         `cbor:"arch"`
+	Host      string         `cbor:"host,omitempty"`
+	User      string         `cbor:"user,omitempty"`
+	Domain    string         `cbor:"domain,omitempty"`
+	Proc      string         `cbor:"proc,omitempty"`
+	Integrity string         `cbor:"integrity,omitempty"`
+	Addrs     []string       `cbor:"addrs,omitempty"`
+	Version   string         `cbor:"version,omitempty"`
+	X         map[string]any `cbor:"x,omitempty"`
+}
+
+// HelloIntegrity holds the integrity values a hello may carry: Windows'
+// integrity levels, or root and user elsewhere.
+var HelloIntegrity = []string{"low", "medium", "high", "system", "root", "user"}
+
+// Validate checks the required fields and the integrity value.
+func (h HelloItem) Validate() error {
+	switch {
+	case h.PID == 0:
+		return errors.New("hello: pid is required")
+	case h.OS == "":
+		return errors.New("hello: os is required")
+	case h.Arch == "":
+		return errors.New("hello: arch is required")
+	case h.Integrity != "" && !slices.Contains(HelloIntegrity, h.Integrity):
+		return fmt.Errorf("hello: integrity %q is not one of %v", h.Integrity, HelloIntegrity)
+	}
+	return nil
+}
+
+// HelloResponseItem is core's answer to a hello: the session id, raw bytes.
+type HelloResponseItem struct {
+	T   string `cbor:"t"`
+	SID []byte `cbor:"sid"`
 }
 
 // ErrItem reports a problem with a message or one of its items.
@@ -111,6 +159,9 @@ func init() {
 		MaxArrayElements: MaxMinionMessageItems,
 		MaxMapPairs:      MaxMinionMessageItems,
 		UTF8:             cbor.UTF8RejectInvalid,
+		// Maps decoded into any (a hello's x) are map[string]any, so they
+		// store and print as JSON objects; a key that is not text fails.
+		DefaultMapType: reflect.TypeOf(map[string]any(nil)),
 	}).DecMode(); err != nil {
 		panic(err)
 	}

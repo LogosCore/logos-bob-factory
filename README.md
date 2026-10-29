@@ -25,14 +25,17 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 For `linux-elf`, BOB compiles a real program: a static Linux binary (no cgo,
 stripped). Run, it **stages** with core through its first HTTP connection, as
 the [Minion Messages](https://logoscore.github.io/logos-docs/contracts/minion-messages/#staging)
-contract says, and logs each step to the console; `./bob-<id>.bin describe`
+contract says, says **hello** under the temporary id with the new keys (its
+pid, OS and arch, hostname, user, executable, root or user, and addresses),
+which opens a session in core, checks in once under the session id, and logs
+each step to the console; `./bob-<id>.bin describe`
 prints the JSON description it was built with instead. The
 description is **baked in at compile time**. The minion's sources are their
 own Go module, `minion/` in this repository. For each build BOB copies that
 directory, writes the build's description into it as `minion.json`, and runs
 `go build` there for the build's platform (`GOOS=linux`, `GOARCH=amd64` or
 `386`), with no network: a `vendor/` directory, once the minion has
-dependencies, is used as it is: the minion vendors the protocol package (its sealed frame, CBOR messages and stage items) and the CBOR library. The plan is **Check the badge** (when the build has one), **Compile the
+dependencies, is used as it is: the minion vendors the protocol package (its sealed frame, CBOR messages and stage and hello items) and the CBOR library. The plan is **Check the badge** (when the build has one), **Compile the
 binary** and **Upload the artifact**. The compile step runs the command, and
 everything the compiler prints to stdout and stderr goes to the build log as
 it comes (`go build -v`, so it names what it compiles), on success too. The
@@ -41,17 +44,26 @@ artifact is
 
 ```console
 $ ./bob-5b0c4f6e.bin
-minion 23:52:21.316424 build 160a41b2-e202-4841-9766-5dedfb861947, crypto aes-256-cbc-hmac-sha256
-minion 23:52:21.316456 channel http "localhost-8090" (POST http://localhost:8090/)
-minion 23:52:21.435591 generated an RSA-2048 key pair in 119ms; public key sha256 39c61b8d6944f84a
-minion 23:52:21.435614 correlation id 8cd63702…, message id 2910971f…
-minion 23:52:21.435666 stage: 363 bytes of CBOR, a 418-byte sealed frame, 435 bytes packed for the channel
-minion 23:52:21.451981 channel answered 200 with 435 bytes in 16ms
-minion 23:52:21.452016 opened core's reply: 356 bytes of CBOR, 1 item(s)
-minion 23:52:21.452985 stage_response: correlation id matches
-minion 23:52:21.452993 temporary id a69d016e-365c-4364-a48b-5aaf30711567
-minion 23:52:21.452995 new keys decrypted with our private key: enc_key sha256 a621cf52…, mac_key sha256 d81c124c…
-minion 23:52:21.452996 staged. Next: hello under the temporary id, sealed with the new keys (not built yet)
+minion 00:15:11.276315 build 160a41b2-e202-4841-9766-5dedfb861947, crypto aes-256-cbc-hmac-sha256
+minion 00:15:11.276347 channel http "localhost-8090" (POST http://localhost:8090/)
+minion 00:15:11.338861 generated an RSA-2048 key pair in 62ms; public key sha256 39c61b8d6944f84a
+minion 00:15:11.338884 correlation id 8cd63702…
+minion 00:15:11.338931 message 2910971f… under 160a41b2-e202-4841-9766-5dedfb861947: 363 bytes of CBOR, a 418-byte sealed frame, 435 bytes packed for the channel
+minion 00:15:11.343012 channel answered 200 with 435 bytes in 4ms
+minion 00:15:11.343047 opened core's reply: 356 bytes of CBOR, 1 item(s)
+minion 00:15:11.343921 stage_response: correlation id matches
+minion 00:15:11.343925 temporary id bb1779b3-9fcc-4639-8aa4-5d52c1f3b4e6
+minion 00:15:11.343927 new keys decrypted with our private key: enc_key sha256 a621cf52…, mac_key sha256 d81c124c…
+minion 00:15:11.343929 staged
+minion 00:15:11.344102 hello: pid 2953236, linux/amd64, host "homez", user "user", integrity user, addrs [192.168.0.124 …]
+minion 00:15:11.344150 message 368b46b2… under bb1779b3-9fcc-4639-8aa4-5d52c1f3b4e6: 620 bytes of CBOR, a 674-byte sealed frame, 691 bytes packed for the channel
+minion 00:15:11.345990 channel answered 200 with 147 bytes in 2ms
+minion 00:15:11.346034 opened core's reply: 70 bytes of CBOR, 1 item(s)
+minion 00:15:11.346057 session id 8fba1ac4-b8e7-46ca-b96e-bdddc9e52906
+minion 00:15:11.346058 check-in under the session id
+minion 00:15:11.346070 message c4dcd5dd… under 8fba1ac4-b8e7-46ca-b96e-bdddc9e52906: 24 bytes of CBOR, a 82-byte sealed frame, 99 bytes packed for the channel
+minion 00:15:11.347591 channel answered 200 with 17 bytes in 2ms
+minion 00:15:11.347614 checked in. Next: tasks (not built yet)
 
 $ ./bob-5b0c4f6e.bin describe
 {

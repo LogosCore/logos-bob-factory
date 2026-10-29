@@ -2,8 +2,9 @@
 // dummy minion. BOB writes the build's description to minion.json before
 // compiling, so it is baked into the binary (the minion.json kept here is a
 // placeholder). Run, the minion stages with core through its first HTTP
-// connection and logs each step (docs: contracts/minion-messages.md);
-// "minion describe" prints the description instead.
+// connection, says hello to open a session, checks in once and logs each
+// step (docs: contracts/minion-messages.md); "minion describe" prints the
+// description instead.
 package main
 
 import (
@@ -21,17 +22,22 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
+	"os/user"
+	"runtime"
 	"strings"
 	"time"
 
-	"github.com/fxamacker/cbor/v2"
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
 //go:embed minion.json
 var minion []byte
+
+// version is the minion implementation's own, sent in its hello.
+const version = "0.2.0"
 
 // description is what the minion reads of the description it was built with.
 type description struct {
@@ -47,14 +53,15 @@ func main() {
 	}
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.SetPrefix("minion ")
-	if err := stage(); err != nil {
-		log.Printf("stage failed: %v", err)
+	if err := run(); err != nil {
+		log.Printf("failed: %v", err)
 		os.Exit(1)
 	}
 }
 
-// stage sends the minion's first message, a stage, and reads core's answer.
-func stage() error {
+// run stages, says hello under the temporary id with the new keys, and
+// checks in once under the session id.
+func run() error {
 	var d description
 	if err := json.Unmarshal(minion, &d); err != nil {
 		return fmt.Errorf("read the description: %w", err)
@@ -77,110 +84,223 @@ func stage() error {
 	log.Printf("build %s, crypto %s", d.BuildID, d.Crypto.Suite)
 	log.Printf("channel http %q (%s %s)", conn.Endpoint.Name, conn.method(), conn.url())
 
+	tempID, newKeys, err := stage(conn, buildID, keys)
+	if err != nil {
+		return fmt.Errorf("stage: %w", err)
+	}
+	sessionID, err := hello(conn, tempID, newKeys)
+	if err != nil {
+		return fmt.Errorf("hello: %w", err)
+	}
+	// A check-in: a message with no items. Core records it and has nothing
+	// to say.
+	log.Printf("check-in under the session id")
+	answer, err := exchange(conn, sessionID, newKeys)
+	if err != nil {
+		return fmt.Errorf("check-in: %w", err)
+	}
+	if err := coreErr(answer); err != nil {
+		return fmt.Errorf("check-in: %w", err)
+	}
+	log.Printf("checked in. Next: tasks (not built yet)")
+	return nil
+}
+
+// stage sends the minion's first message, a stage, under the build id with
+// the build's keys, and returns the temporary id and the new keys.
+func stage(conn connection, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material) ([16]byte, protocol.AES256CBCHMACSHA256Material, error) {
+	var tempID [16]byte
+	var newKeys protocol.AES256CBCHMACSHA256Material
+
 	// 1–2. A key pair of the minion's own, and a correlation id.
 	start := time.Now()
 	priv, err := rsa.GenerateKey(rand.Reader, protocol.StageKeySize)
 	if err != nil {
-		return err
+		return tempID, newKeys, err
 	}
 	pub, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
-	corr, msgID := protocol.NewMessageID(), protocol.NewMessageID()
+	corr := protocol.NewMessageID()
 	log.Printf("generated an RSA-%d key pair in %s; public key sha256 %s", protocol.StageKeySize,
 		time.Since(start).Round(time.Millisecond), fingerprint(pub))
-	log.Printf("correlation id %x, message id %x", corr, msgID)
+	log.Printf("correlation id %x", corr)
 
 	// 3. The stage, sealed with the build's keys, under the build id.
-	item, err := protocol.MarshalCBOR(protocol.StageItem{T: protocol.ItemStage, Key: pub, Corr: corr})
+	answer, err := exchange(conn, buildID, keys, protocol.StageItem{T: protocol.ItemStage, Key: pub, Corr: corr})
 	if err != nil {
-		return err
+		return tempID, newKeys, err
 	}
-	plain, err := protocol.MarshalCBOR(protocol.MinionMessage{V: protocol.MinionMessageV1, ID: msgID, Items: []cbor.RawMessage{item}})
-	if err != nil {
-		return err
-	}
-	frame, err := protocol.SealFrame(keys, buildID, protocol.FrameMinionToCore, plain)
-	if err != nil {
-		return err
-	}
-	body, err := pack(buildID, frame)
-	if err != nil {
-		return err
-	}
-	log.Printf("stage: %d bytes of CBOR, a %d-byte sealed frame, %d bytes packed for the channel", len(plain), len(frame), len(body))
-
-	reply, status, took, err := conn.send(body)
-	if err != nil {
-		return err
-	}
-	log.Printf("channel answered %d with %d bytes in %s", status, len(reply), took.Round(time.Millisecond))
-	if status != http.StatusOK {
-		return fmt.Errorf("the channel answered %d: core refused the message, or could not be reached", status)
-	}
-	replyID, sealed, err := unpack(reply)
-	if err != nil {
-		return err
-	}
-	if replyID != buildID {
-		return fmt.Errorf("the reply is for %x, not this build", replyID)
-	}
-	if len(sealed) == 0 {
-		return errors.New("core had nothing to say: it took the message as a replay")
+	if err := coreErr(answer); err != nil {
+		return tempID, newKeys, err
 	}
 
 	// 4–6. Core's answer: a temporary id and new keys, encrypted to ours.
-	plain, err = protocol.OpenFrame(keys, buildID, protocol.FrameCoreToMinion, sealed)
-	if err != nil {
-		return fmt.Errorf("core's reply: %w", err)
+	raw := item(answer, protocol.ItemStageResponse)
+	if raw == nil {
+		return tempID, newKeys, errors.New("core's reply has no stage_response")
 	}
-	var answer protocol.CoreMessage
-	if err := protocol.UnmarshalCBOR(plain, &answer); err != nil {
-		return fmt.Errorf("core's reply: %w", err)
-	}
-	if err := protocol.ValidateMessageHead(answer.V, answer.ID, answer.Re, len(answer.Items)); err != nil {
-		return fmt.Errorf("core's reply: %w", err)
-	}
-	if !bytes.Equal(answer.Re, msgID) {
-		return fmt.Errorf("core's reply answers %x, not our message", answer.Re)
-	}
-	log.Printf("opened core's reply: %d bytes of CBOR, %d item(s)", len(plain), len(answer.Items))
-	for _, raw := range answer.Items {
-		switch protocol.ItemType(raw) {
-		case protocol.ItemErr:
-			var e protocol.ErrItem
-			_ = protocol.UnmarshalCBOR(raw, &e)
-			return fmt.Errorf("core says %s: %s", e.Code, e.Msg)
-		case protocol.ItemStageResponse:
-			return staged(raw, corr, priv)
-		}
-	}
-	return errors.New("core's reply has no stage_response")
-}
-
-// staged reads a stage_response and logs what the minion now has.
-func staged(raw []byte, corr []byte, priv *rsa.PrivateKey) error {
 	var resp protocol.StageResponseItem
 	if err := protocol.UnmarshalCBOR(raw, &resp); err != nil {
-		return fmt.Errorf("stage_response: %w", err)
+		return tempID, newKeys, fmt.Errorf("stage_response: %w", err)
 	}
 	if !bytes.Equal(resp.Corr, corr) {
-		return errors.New("stage_response: another correlation id")
+		return tempID, newKeys, errors.New("stage_response: another correlation id")
 	}
 	if len(resp.TID) != 16 {
-		return errors.New("stage_response: the temporary id is not 16 bytes")
+		return tempID, newKeys, errors.New("stage_response: the temporary id is not 16 bytes")
 	}
 	material, err := protocol.DecryptStageKeys(priv, resp.Keys)
 	if err != nil {
-		return fmt.Errorf("decrypt the new keys: %w", err)
+		return tempID, newKeys, fmt.Errorf("decrypt the new keys: %w", err)
 	}
-	var keys protocol.AES256CBCHMACSHA256Material
-	if err := protocol.UnmarshalCBOR(material, &keys); err != nil || len(keys.EncKey) != 32 || len(keys.MACKey) != 32 {
-		return fmt.Errorf("the new keys do not read: %v", err)
+	if err := protocol.UnmarshalCBOR(material, &newKeys); err != nil || len(newKeys.EncKey) != 32 || len(newKeys.MACKey) != 32 {
+		return tempID, newKeys, fmt.Errorf("the new keys do not read: %v", err)
 	}
+	copy(tempID[:], resp.TID)
 	log.Printf("stage_response: correlation id matches")
 	log.Printf("temporary id %s", formatUUID(resp.TID))
 	log.Printf("new keys decrypted with our private key: enc_key sha256 %s, mac_key sha256 %s",
-		fingerprint(keys.EncKey), fingerprint(keys.MACKey))
-	log.Printf("staged. Next: hello under the temporary id, sealed with the new keys (not built yet)")
+		fingerprint(newKeys.EncKey), fingerprint(newKeys.MACKey))
+	log.Printf("staged")
+	return tempID, newKeys, nil
+}
+
+// hello sends the host and process under the temporary id, sealed with the
+// new keys, and returns the session id.
+func hello(conn connection, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material) ([16]byte, error) {
+	var sessionID [16]byte
+	h := describeHost()
+	log.Printf("hello: pid %d, %s/%s, host %q, user %q, integrity %s, addrs %v", h.PID, h.OS, h.Arch, h.Host, h.User, h.Integrity, h.Addrs)
+	answer, err := exchange(conn, tempID, keys, h)
+	if err != nil {
+		return sessionID, err
+	}
+	if err := coreErr(answer); err != nil {
+		return sessionID, err
+	}
+	raw := item(answer, protocol.ItemHelloResponse)
+	if raw == nil {
+		return sessionID, errors.New("core's reply has no hello_response")
+	}
+	var resp protocol.HelloResponseItem
+	if err := protocol.UnmarshalCBOR(raw, &resp); err != nil || len(resp.SID) != 16 {
+		return sessionID, fmt.Errorf("hello_response does not read: %v", err)
+	}
+	copy(sessionID[:], resp.SID)
+	log.Printf("session id %s", formatUUID(resp.SID))
+	return sessionID, nil
+}
+
+// describeHost is the hello: what the minion can learn of its host and
+// process.
+func describeHost() protocol.HelloItem {
+	h := protocol.HelloItem{T: protocol.ItemHello, PID: uint64(os.Getpid()), OS: runtime.GOOS, Arch: runtime.GOARCH,
+		Version: version, Integrity: "user"}
+	h.Host, _ = os.Hostname()
+	if u, err := user.Current(); err == nil {
+		h.User = u.Username
+	}
+	if exe, err := os.Executable(); err == nil {
+		h.Proc = exe
+	}
+	if os.Geteuid() == 0 {
+		h.Integrity = "root"
+	}
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if ipn, ok := a.(*net.IPNet); ok && !ipn.IP.IsLoopback() && !ipn.IP.IsLinkLocalUnicast() {
+				h.Addrs = append(h.Addrs, ipn.IP.String())
+			}
+		}
+	}
+	return h
+}
+
+// exchange sends one message with items under id, sealed with keys, and
+// returns core's answer to it: a message with no items when core had
+// nothing to say.
+func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
+	var answer protocol.CoreMessage
+	msgID := protocol.NewMessageID()
+	msg := protocol.MinionMessage{V: protocol.MinionMessageV1, ID: msgID}
+	for _, it := range items {
+		raw, err := protocol.MarshalCBOR(it)
+		if err != nil {
+			return answer, err
+		}
+		msg.Items = append(msg.Items, raw)
+	}
+	plain, err := protocol.MarshalCBOR(msg)
+	if err != nil {
+		return answer, err
+	}
+	frame, err := protocol.SealFrame(keys, id, protocol.FrameMinionToCore, plain)
+	if err != nil {
+		return answer, err
+	}
+	body, err := pack(id, frame)
+	if err != nil {
+		return answer, err
+	}
+	log.Printf("message %x under %s: %d bytes of CBOR, a %d-byte sealed frame, %d bytes packed for the channel",
+		msgID, formatUUID(id[:]), len(plain), len(frame), len(body))
+
+	reply, status, took, err := conn.send(body)
+	if err != nil {
+		return answer, err
+	}
+	log.Printf("channel answered %d with %d bytes in %s", status, len(reply), took.Round(time.Millisecond))
+	if status == http.StatusNoContent {
+		return answer, nil
+	}
+	if status != http.StatusOK {
+		return answer, fmt.Errorf("the channel answered %d: core refused the message, or could not be reached", status)
+	}
+	replyID, sealed, err := unpack(reply)
+	if err != nil {
+		return answer, err
+	}
+	if replyID != id {
+		return answer, fmt.Errorf("the reply is for %x, not %x", replyID, id)
+	}
+	if len(sealed) == 0 {
+		// The channel's empty reply: core had nothing to say (a check-in,
+		// or a message it took as a replay).
+		return answer, nil
+	}
+	plain, err = protocol.OpenFrame(keys, id, protocol.FrameCoreToMinion, sealed)
+	if err != nil {
+		return answer, fmt.Errorf("core's reply: %w", err)
+	}
+	if err := protocol.UnmarshalCBOR(plain, &answer); err != nil {
+		return answer, fmt.Errorf("core's reply: %w", err)
+	}
+	if err := protocol.ValidateMessageHead(answer.V, answer.ID, answer.Re, len(answer.Items)); err != nil {
+		return answer, fmt.Errorf("core's reply: %w", err)
+	}
+	if !bytes.Equal(answer.Re, msgID) {
+		return answer, fmt.Errorf("core's reply answers %x, not our message", answer.Re)
+	}
+	log.Printf("opened core's reply: %d bytes of CBOR, %d item(s)", len(plain), len(answer.Items))
+	return answer, nil
+}
+
+// coreErr is the first err item of core's answer, as an error.
+func coreErr(answer protocol.CoreMessage) error {
+	if raw := item(answer, protocol.ItemErr); raw != nil {
+		var e protocol.ErrItem
+		_ = protocol.UnmarshalCBOR(raw, &e)
+		return fmt.Errorf("core says %s: %s", e.Code, e.Msg)
+	}
+	return nil
+}
+
+// item is the answer's first item of type t, or nil.
+func item(answer protocol.CoreMessage, t string) []byte {
+	for _, raw := range answer.Items {
+		if protocol.ItemType(raw) == t {
+			return raw
+		}
+	}
 	return nil
 }
 
