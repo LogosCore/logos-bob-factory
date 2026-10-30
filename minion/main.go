@@ -4,8 +4,10 @@
 // placeholder). Run, the minion stages with core through its first HTTP
 // connection, says hello to open a session, then checks in with a get_tasks
 // every check-in interval of the connection, with its jitter, and logs each
-// step (docs: contracts/minion-messages.md). When anything fails it starts
-// over. "minion describe" prints the description instead.
+// step (docs: contracts/minion-messages.md). It keeps its session through
+// failures on the way, and starts over when core closes the session, after
+// 24 hours of nothing but failures, or when staging or the hello fails.
+// "minion describe" prints the description instead.
 package main
 
 import (
@@ -88,8 +90,8 @@ func run() error {
 	log.Printf("channel http %q (%s %s), check-in every %s ± %g%%", conn.Endpoint.Name, conn.method(), conn.url(),
 		sched.interval, sched.jitter)
 
-	// The build is responsible for starting over: when anything fails, the
-	// process stages again after a check-in interval.
+	// Starting over: a stage or hello that fails, core closing the session,
+	// or the backstop, stages again after a check-in interval.
 	for {
 		err := session(conn, sched, buildID, keys)
 		wait := sched.next()
@@ -111,22 +113,39 @@ func session(conn connection, sched schedule, buildID [16]byte, keys protocol.AE
 	}
 	// Check in every interval, with jitter: a get_tasks for one task at a
 	// time. Core records each check-in; with no tasks waiting it has nothing
-	// to say.
+	// to say. The session's keys live only in this process, so a failure on
+	// the way (the channel out of reach, its 404, a reply that does not
+	// open) keeps the session: only core's sealed session_closed, or the
+	// backstop, starts over (docs: "When an exchange fails").
 	one := uint64(1)
+	lastOK := time.Now()
 	for n := 1; ; n++ {
 		wait := sched.next()
 		log.Printf("next check-in in %s", wait.Round(time.Millisecond))
 		time.Sleep(wait)
 		answer, err := exchange(conn, sessionID, newKeys, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &one})
 		if err != nil {
-			return fmt.Errorf("check-in %d: %w", n, err)
+			if since := time.Since(lastOK); since >= backstop {
+				return fmt.Errorf("check-in %d: nothing has worked for %s: %w", n, since.Round(time.Second), err)
+			}
+			log.Printf("check-in %d failed, keeping the session: %v", n, err)
+			continue
 		}
-		if err := coreErr(answer); err != nil {
-			return fmt.Errorf("check-in %d: %w", n, err)
+		lastOK = time.Now()
+		if e, ok := coreErrItem(answer); ok {
+			if e.Code == protocol.ErrItemSessionClosed {
+				return fmt.Errorf("check-in %d: core closed the session", n)
+			}
+			log.Printf("check-in %d: core says %s: %s; keeping the session", n, e.Code, e.Msg)
+			continue
 		}
 		log.Printf("check-in %d: get_tasks max 1, %d item(s) back (tasks are not built yet)", n, len(answer.Items))
 	}
 }
+
+// backstop is how long the minion keeps a session whose exchanges all fail:
+// core may have forgotten it, and cannot say so.
+const backstop = 24 * time.Hour
 
 // schedule is when the minion checks in: every interval, spread at random
 // by up to jitter percent of it either way.
@@ -321,12 +340,21 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 
 // coreErr is the first err item of core's answer, as an error.
 func coreErr(answer protocol.CoreMessage) error {
-	if raw := item(answer, protocol.ItemErr); raw != nil {
-		var e protocol.ErrItem
-		_ = protocol.UnmarshalCBOR(raw, &e)
+	if e, ok := coreErrItem(answer); ok {
 		return fmt.Errorf("core says %s: %s", e.Code, e.Msg)
 	}
 	return nil
+}
+
+// coreErrItem is the first err item of core's answer.
+func coreErrItem(answer protocol.CoreMessage) (protocol.ErrItem, bool) {
+	var e protocol.ErrItem
+	raw := item(answer, protocol.ItemErr)
+	if raw == nil {
+		return e, false
+	}
+	_ = protocol.UnmarshalCBOR(raw, &e)
+	return e, true
 }
 
 // item is the answer's first item of type t, or nil.

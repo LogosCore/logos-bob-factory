@@ -31,7 +31,10 @@ which opens a session in core, then checks in under the session id with a
 `get_tasks` for one task every check-in interval of the connection, spread by
 its jitter (`checkin_interval`, `checkin_jitter`; the channel's 60s and 20%
 when the endpoint has none). It logs each step to the console and runs until
-stopped; when anything fails it starts over from the stage after an interval. `./bob-<id>.bin describe`
+stopped. A failed check-in (the channel out of reach, its 404, core
+restarting) keeps the session; it starts over from the stage only when core
+answers `session_closed`, after 24 hours of nothing but failures, or when the
+stage or hello fails. `./bob-<id>.bin describe`
 prints the JSON description it was built with instead. The
 description is **baked in at compile time**. The minion's sources are their
 own Go module, `minion/` in this repository. For each build BOB copies that

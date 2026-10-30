@@ -145,6 +145,9 @@ type ErrItem struct {
 const (
 	ErrItemBadMessage  = "bad_message"
 	ErrItemUnknownItem = "unknown_item"
+	// ErrItemSessionClosed: the session the message was sent under is
+	// closed. The one code a minion starts over on.
+	ErrItemSessionClosed = "session_closed"
 )
 
 // StageKeySize is the RSA key size a stage's key must have.

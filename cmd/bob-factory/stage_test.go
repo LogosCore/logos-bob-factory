@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +25,9 @@ import (
 // fakeCore is an HTTP channel and core in one: it unpacks a request and
 // answers it as core does. A stage under the build id gets a temporary id
 // and new keys, a hello under the temporary id a session id, and a check-in
-// under the session id, a get_tasks, nothing (an empty reply).
+// under the session id, a get_tasks, nothing (an empty reply), unless
+// script says otherwise for that check-in: "404", the channel's answer to
+// any failure, or "closed", core's sealed session_closed.
 type fakeCore struct {
 	t         *testing.T
 	buildID   [16]byte
@@ -34,8 +37,14 @@ type fakeCore struct {
 	sessionID [16]byte
 	path      string
 	hello     protocol.HelloItem
-	// checkIns gets one value per check-in: a get_tasks for one task.
-	checkIns chan struct{}
+	// checkIns gets each check-in's number (1, 2, … across sessions): a
+	// get_tasks for one task.
+	checkIns chan int
+	script   map[int]string
+
+	mu      sync.Mutex
+	stages  int
+	checkIn int
 }
 
 func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +82,9 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.t.Error(err)
 			return
 		}
+		f.mu.Lock()
+		f.stages++
+		f.mu.Unlock()
 		material, _ := protocol.MarshalCBOR(f.newKeys)
 		sealed, _ := protocol.EncryptStageKeys(pub, material)
 		item = protocol.StageResponseItem{T: protocol.ItemStageResponse, TID: f.tempID[:], Keys: sealed, Corr: stage.Corr}
@@ -88,10 +100,22 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			get.Max == nil || *get.Max != 1 {
 			f.t.Errorf("check-in %+v", msg)
 		}
-		f.checkIns <- struct{}{}
-		// Core's 204, as the HTTP channel passes it on: the id, no frame.
-		_, _ = w.Write(append([]byte{0}, id[:]...))
-		return
+		f.mu.Lock()
+		f.checkIn++
+		n := f.checkIn
+		f.mu.Unlock()
+		f.checkIns <- n
+		switch f.script[n] {
+		case "404":
+			http.NotFound(w, r)
+			return
+		case "closed":
+			item = protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemSessionClosed, Msg: "start over"}
+		default:
+			// Core's 204, as the HTTP channel passes it on: the id, no frame.
+			_, _ = w.Write(append([]byte{0}, id[:]...))
+			return
+		}
 	default:
 		f.t.Errorf("sent under %x", id)
 		return
@@ -104,7 +128,9 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // The compiled minion stages through its http connection, says hello,
-// checks in every interval of the connection, and logs it.
+// checks in every interval of the connection, and logs it. It keeps its
+// session through a failed check-in, and starts over when core closes the
+// session.
 func TestMinionStages(t *testing.T) {
 	needGo(t)
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
@@ -116,7 +142,8 @@ func TestMinionStages(t *testing.T) {
 	_, _ = rand.Read(core.keys.MACKey)
 	_, _ = rand.Read(core.tempID[:])
 	_, _ = rand.Read(core.sessionID[:])
-	core.checkIns = make(chan struct{}, 16)
+	core.checkIns = make(chan int, 16)
+	core.script = map[int]string{1: "404", 3: "closed"}
 	core.newKeys = protocol.AES256CBCHMACSHA256Material{EncKey: make([]byte, 32), MACKey: make([]byte, 32)}
 	_, _ = rand.Read(core.newKeys.EncKey)
 	_, _ = rand.Read(core.newKeys.MACKey)
@@ -144,8 +171,9 @@ func TestMinionStages(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	// The minion checks in until it is stopped: wait for two check-ins.
-	for i := range 2 {
+	// The minion checks in until it is stopped: a failed check-in, a good
+	// one, session_closed, and one more under the new session.
+	for i := range 4 {
 		select {
 		case <-core.checkIns:
 		case <-time.After(10 * time.Second):
@@ -166,7 +194,9 @@ func TestMinionStages(t *testing.T) {
 		"staged",
 		"session id " + formatUUID(core.sessionID),
 		"check-in every 100ms ± 20%",
-		"check-in 1: get_tasks max 1",
+		"check-in 1 failed, keeping the session",
+		"check-in 2: get_tasks max 1",
+		"core closed the session; starting over",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q:\n%s", want, out)
@@ -174,6 +204,12 @@ func TestMinionStages(t *testing.T) {
 	}
 	if core.hello.PID != uint64(cmd.Process.Pid) || core.hello.OS != "linux" || core.hello.Arch != "amd64" {
 		t.Errorf("hello %+v", core.hello)
+	}
+	core.mu.Lock()
+	stages := core.stages
+	core.mu.Unlock()
+	if stages != 2 {
+		t.Errorf("%d stages, want 2: the first, and one after session_closed alone", stages)
 	}
 	if core.path != "/cdn/assets/" {
 		t.Errorf("posted to %q, want the path prefix", core.path)

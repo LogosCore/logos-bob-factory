@@ -14,6 +14,9 @@ const (
 	HeaderMessageID       = "Logos-Message-Id"
 	HeaderBuildID         = "Logos-Build-Id"
 	HeaderChannelInstance = "Logos-Channel-Instance"
+	// HeaderPeerAddress is the IP address the channel got the message from,
+	// when its transport has one.
+	HeaderPeerAddress = "Logos-Peer-Address"
 	// HeaderTraceParent is W3C Trace Context's header.
 	HeaderTraceParent = "Traceparent"
 )
@@ -28,6 +31,12 @@ type InboundMinionMessage struct {
 	ChannelInstance string
 	// TraceParent is an optional W3C traceparent value.
 	TraceParent string
+	// PeerAddress is the IP address the channel got the message from: the
+	// minion's host as the channel's network sees it (its NAT's outside
+	// address, say), or the client a trusted proxy forwarded for. Empty
+	// when the transport has none. The channel's observation, not the
+	// minion's claim.
+	PeerAddress string
 	// Data is the minion's ciphertext, as the minion sent it once the channel
 	// has undone its own transport encoding. Never empty.
 	Data []byte
@@ -55,6 +64,9 @@ func (m InboundMinionMessage) SetHeaders(h http.Header) {
 	if m.TraceParent != "" {
 		h.Set(HeaderTraceParent, m.TraceParent)
 	}
+	if m.PeerAddress != "" {
+		h.Set(HeaderPeerAddress, m.PeerAddress)
+	}
 }
 
 // InboundFromHeaders reads an inbound message's header fields from h. Data
@@ -65,6 +77,7 @@ func InboundFromHeaders(h http.Header) InboundMinionMessage {
 		BuildID:         h.Get(HeaderBuildID),
 		ChannelInstance: h.Get(HeaderChannelInstance),
 		TraceParent:     h.Get(HeaderTraceParent),
+		PeerAddress:     h.Get(HeaderPeerAddress),
 	}
 }
 
