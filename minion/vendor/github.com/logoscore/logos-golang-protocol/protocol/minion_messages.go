@@ -91,6 +91,9 @@ type HelloItem struct {
 	Addrs     []string       `cbor:"addrs,omitempty"`
 	Version   string         `cbor:"version,omitempty"`
 	X         map[string]any `cbor:"x,omitempty"`
+	// SID is the persisted session the minion claims, raw bytes; nil for a
+	// new session.
+	SID []byte `cbor:"sid,omitempty"`
 }
 
 // HelloIntegrity holds the integrity values a hello may carry: Windows'
@@ -108,6 +111,8 @@ func (h HelloItem) Validate() error {
 		return errors.New("hello: arch is required")
 	case h.Integrity != "" && !slices.Contains(HelloIntegrity, h.Integrity):
 		return fmt.Errorf("hello: integrity %q is not one of %v", h.Integrity, HelloIntegrity)
+	case h.SID != nil && len(h.SID) != 16:
+		return errors.New("hello: sid is 16 bytes")
 	}
 	return nil
 }
@@ -148,6 +153,9 @@ const (
 	// ErrItemSessionClosed: the session the message was sent under is
 	// closed. The one code a minion starts over on.
 	ErrItemSessionClosed = "session_closed"
+	// ErrItemSessionReplaced: another process claimed the persisted session
+	// the message was sent under. Start over without claiming it.
+	ErrItemSessionReplaced = "session_replaced"
 )
 
 // StageKeySize is the RSA key size a stage's key must have.

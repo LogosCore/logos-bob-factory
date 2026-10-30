@@ -45,6 +45,7 @@ type fakeCore struct {
 	mu      sync.Mutex
 	stages  int
 	checkIn int
+	hellos  []protocol.HelloItem
 }
 
 func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -89,10 +90,15 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sealed, _ := protocol.EncryptStageKeys(pub, material)
 		item = protocol.StageResponseItem{T: protocol.ItemStageResponse, TID: f.tempID[:], Keys: sealed, Corr: stage.Corr}
 	case f.tempID:
-		if len(msg.Items) != 1 || protocol.UnmarshalCBOR(msg.Items[0], &f.hello) != nil || f.hello.Validate() != nil {
+		var h protocol.HelloItem // fresh: a key a hello leaves out stays unset
+		if len(msg.Items) != 1 || protocol.UnmarshalCBOR(msg.Items[0], &h) != nil || h.Validate() != nil {
 			f.t.Errorf("hello %+v", msg)
 			return
 		}
+		f.mu.Lock()
+		f.hello = h
+		f.hellos = append(f.hellos, h)
+		f.mu.Unlock()
 		item = protocol.HelloResponseItem{T: protocol.ItemHelloResponse, SID: f.sessionID[:]}
 	case f.sessionID:
 		var get protocol.GetTasksItem
@@ -111,6 +117,8 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		case "closed":
 			item = protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemSessionClosed, Msg: "start over"}
+		case "replaced":
+			item = protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemSessionReplaced, Msg: "start over without claiming"}
 		default:
 			// Core's 204, as the HTTP channel passes it on: the id, no frame.
 			_, _ = w.Write(append([]byte{0}, id[:]...))
@@ -136,54 +144,11 @@ func TestMinionStages(t *testing.T) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Skip("runs a linux/amd64 minion")
 	}
-	core := &fakeCore{t: t, buildID: [16]byte{0x5b, 0x0c, 0x4f, 0x6e, 0x8a, 0x1d, 0x4c, 0x2b, 0x9e, 0x7f, 0x3d, 0x2a, 0x1b, 0x0c, 0x9e, 0x8f}}
-	core.keys = protocol.AES256CBCHMACSHA256Material{EncKey: make([]byte, 32), MACKey: make([]byte, 32)}
-	_, _ = rand.Read(core.keys.EncKey)
-	_, _ = rand.Read(core.keys.MACKey)
-	_, _ = rand.Read(core.tempID[:])
-	_, _ = rand.Read(core.sessionID[:])
-	core.checkIns = make(chan int, 16)
-	core.script = map[int]string{1: "404", 3: "closed"}
-	core.newKeys = protocol.AES256CBCHMACSHA256Material{EncKey: make([]byte, 32), MACKey: make([]byte, 32)}
-	_, _ = rand.Read(core.newKeys.EncKey)
-	_, _ = rand.Read(core.newKeys.MACKey)
-	srv := httptest.NewServer(core)
-	defer srv.Close()
-
-	req := coreRequest(t)
-	material, _ := json.Marshal(core.keys)
-	req.Crypto = &protocol.BuildCrypto{Suite: protocol.CryptoAES256CBCHMACSHA256, Material: material}
-	req.Connections[0].Endpoint.Params["base_url"] = srv.URL
-	req.Connections[0].Endpoint.Params["checkin_interval"] = "100ms"
-	req.Connections[0].Endpoint.Params["checkin_jitter"] = 20.0
-	desc, _ := json.Marshal(describe(req, nil, "bob", req.Deadline))
-	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/amd64", desc, io.Discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "minion")
-	if err := os.WriteFile(path, bin, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	var logs bytes.Buffer
-	cmd := exec.Command(path)
-	cmd.Stderr = &logs
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
+	core := newFakeCore(t, map[int]string{1: "404", 3: "closed"})
+	cmd, logs := startMinion(t, core, nil)
 	// The minion checks in until it is stopped: a failed check-in, a good
 	// one, session_closed, and one more under the new session.
-	for i := range 4 {
-		select {
-		case <-core.checkIns:
-		case <-time.After(10 * time.Second):
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			t.Fatalf("no check-in %d:\n%s", i+1, logs.String())
-		}
-	}
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
+	waitCheckIns(t, core, cmd, logs, 4)
 	out := logs.String()
 	for _, want := range []string{
 		"build 5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f",
@@ -213,6 +178,93 @@ func TestMinionStages(t *testing.T) {
 	}
 	if core.path != "/cdn/assets/" {
 		t.Errorf("posted to %q, want the path prefix", core.path)
+	}
+}
+
+func newFakeCore(t *testing.T, script map[int]string) *fakeCore {
+	core := &fakeCore{t: t, buildID: [16]byte{0x5b, 0x0c, 0x4f, 0x6e, 0x8a, 0x1d, 0x4c, 0x2b, 0x9e, 0x7f, 0x3d, 0x2a, 0x1b, 0x0c, 0x9e, 0x8f}}
+	core.keys = protocol.AES256CBCHMACSHA256Material{EncKey: make([]byte, 32), MACKey: make([]byte, 32)}
+	_, _ = rand.Read(core.keys.EncKey)
+	_, _ = rand.Read(core.keys.MACKey)
+	_, _ = rand.Read(core.tempID[:])
+	_, _ = rand.Read(core.sessionID[:])
+	core.checkIns = make(chan int, 16)
+	core.script = script
+	core.newKeys = protocol.AES256CBCHMACSHA256Material{EncKey: make([]byte, 32), MACKey: make([]byte, 32)}
+	_, _ = rand.Read(core.newKeys.EncKey)
+	_, _ = rand.Read(core.newKeys.MACKey)
+	return core
+}
+
+// startMinion compiles a minion for core's fake (mutate edits its build
+// request) and starts it; the test stops it.
+func startMinion(t *testing.T, core *fakeCore, mutate func(req *protocol.BuildRequest)) (*exec.Cmd, *bytes.Buffer) {
+	t.Helper()
+	srv := httptest.NewServer(core)
+	t.Cleanup(srv.Close)
+	req := coreRequest(t)
+	material, _ := json.Marshal(core.keys)
+	req.Crypto = &protocol.BuildCrypto{Suite: protocol.CryptoAES256CBCHMACSHA256, Material: material}
+	req.Connections[0].Endpoint.Params["base_url"] = srv.URL
+	req.Connections[0].Endpoint.Params["checkin_interval"] = "100ms"
+	req.Connections[0].Endpoint.Params["checkin_jitter"] = 20.0
+	if mutate != nil {
+		mutate(&req)
+	}
+	desc, _ := json.Marshal(describe(req, nil, "bob", req.Deadline))
+	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/amd64", desc, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "minion")
+	if err := os.WriteFile(path, bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logs := &bytes.Buffer{}
+	cmd := exec.Command(path)
+	cmd.Stderr = logs
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return cmd, logs
+}
+
+// waitCheckIns waits for n check-ins at core's fake, then stops the minion.
+func waitCheckIns(t *testing.T, core *fakeCore, cmd *exec.Cmd, logs *bytes.Buffer, n int) {
+	t.Helper()
+	for i := range n {
+		select {
+		case <-core.checkIns:
+		case <-time.After(10 * time.Second):
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatalf("no check-in %d:\n%s", i+1, logs.String())
+		}
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
+// A minion built with a persisted session claims it in its hello; told
+// another process took it, it starts over without claiming.
+func TestMinionClaimsPersistedSession(t *testing.T) {
+	needGo(t)
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("runs a linux/amd64 minion")
+	}
+	core := newFakeCore(t, map[int]string{2: "replaced"})
+	cmd, logs := startMinion(t, core, func(req *protocol.BuildRequest) { req.SessionID = formatUUID(core.sessionID) })
+	waitCheckIns(t, core, cmd, logs, 3)
+	core.mu.Lock()
+	hellos := core.hellos
+	core.mu.Unlock()
+	if len(hellos) != 2 || !bytes.Equal(hellos[0].SID, core.sessionID[:]) || hellos[1].SID != nil {
+		t.Fatalf("hellos %+v\n%s", hellos, logs.String())
+	}
+	for _, want := range []string{"the persisted session, claimed", "goes on in a session of its own"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log lacks %q:\n%s", want, logs.String())
+		}
 	}
 }
 

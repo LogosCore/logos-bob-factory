@@ -48,6 +48,8 @@ type description struct {
 	BuildID     string                     `json:"build_id"`
 	Crypto      *protocol.BuildCrypto      `json:"crypto"`
 	Connections []protocol.BuildConnection `json:"connections"`
+	// SessionID is the persisted session to claim; empty for none.
+	SessionID string `json:"session_id"`
 }
 
 func main() {
@@ -90,10 +92,27 @@ func run() error {
 	log.Printf("channel http %q (%s %s), check-in every %s ± %g%%", conn.Endpoint.Name, conn.method(), conn.url(),
 		sched.interval, sched.jitter)
 
+	// The persisted session the build claims, if it has one: given up for
+	// this process once another process takes it (session_replaced).
+	var claim []byte
+	if d.SessionID != "" {
+		sid, err := parseUUID(d.SessionID)
+		if err != nil {
+			return fmt.Errorf("session id: %w", err)
+		}
+		claim = sid[:]
+		log.Printf("persisted session %s: claimed in every hello", d.SessionID)
+	}
+
 	// Starting over: a stage or hello that fails, core closing the session,
-	// or the backstop, stages again after a check-in interval.
+	// another process claiming it, or the backstop, stages again after a
+	// check-in interval.
 	for {
-		err := session(conn, sched, buildID, keys)
+		err := session(conn, sched, buildID, keys, claim)
+		if errors.Is(err, errReplaced) && claim != nil {
+			claim = nil
+			log.Printf("another process holds the persisted session: this one goes on in a session of its own")
+		}
 		wait := sched.next()
 		log.Printf("%v; starting over in %s", err, wait.Round(time.Millisecond))
 		time.Sleep(wait)
@@ -102,12 +121,12 @@ func run() error {
 
 // session stages, says hello and checks in for as long as that works; it
 // returns why it stopped.
-func session(conn connection, sched schedule, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material) error {
+func session(conn connection, sched schedule, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte) error {
 	tempID, newKeys, err := stage(conn, buildID, keys)
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
-	sessionID, err := hello(conn, tempID, newKeys)
+	sessionID, err := hello(conn, tempID, newKeys, claim)
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
@@ -133,8 +152,11 @@ func session(conn connection, sched schedule, buildID [16]byte, keys protocol.AE
 		}
 		lastOK = time.Now()
 		if e, ok := coreErrItem(answer); ok {
-			if e.Code == protocol.ErrItemSessionClosed {
+			switch e.Code {
+			case protocol.ErrItemSessionClosed:
 				return fmt.Errorf("check-in %d: core closed the session", n)
+			case protocol.ErrItemSessionReplaced:
+				return fmt.Errorf("check-in %d: %w", n, errReplaced)
 			}
 			log.Printf("check-in %d: core says %s: %s; keeping the session", n, e.Code, e.Msg)
 			continue
@@ -142,6 +164,9 @@ func session(conn connection, sched schedule, buildID [16]byte, keys protocol.AE
 		log.Printf("check-in %d: get_tasks max 1, %d item(s) back (tasks are not built yet)", n, len(answer.Items))
 	}
 }
+
+// errReplaced: another process claimed the persisted session.
+var errReplaced = errors.New("another process claimed the session")
 
 // backstop is how long the minion keeps a session whose exchanges all fail:
 // core may have forgotten it, and cannot say so.
@@ -219,10 +244,12 @@ func stage(conn connection, buildID [16]byte, keys protocol.AES256CBCHMACSHA256M
 }
 
 // hello sends the host and process under the temporary id, sealed with the
-// new keys, and returns the session id.
-func hello(conn connection, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material) ([16]byte, error) {
+// new keys, claiming the persisted session when claim is set, and returns
+// the session id core gave.
+func hello(conn connection, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte) ([16]byte, error) {
 	var sessionID [16]byte
 	h := describeHost()
+	h.SID = claim
 	log.Printf("hello: pid %d, %s/%s, host %q, user %q, integrity %s, addrs %v", h.PID, h.OS, h.Arch, h.Host, h.User, h.Integrity, h.Addrs)
 	answer, err := exchange(conn, tempID, keys, h)
 	if err != nil {
@@ -240,7 +267,14 @@ func hello(conn connection, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Ma
 		return sessionID, fmt.Errorf("hello_response does not read: %v", err)
 	}
 	copy(sessionID[:], resp.SID)
-	log.Printf("session id %s", formatUUID(resp.SID))
+	switch {
+	case claim == nil:
+		log.Printf("session id %s", formatUUID(resp.SID))
+	case bytes.Equal(resp.SID, claim):
+		log.Printf("session id %s: the persisted session, claimed", formatUUID(resp.SID))
+	default:
+		log.Printf("session id %s: core did not give the persisted session, a new one instead", formatUUID(resp.SID))
+	}
 	return sessionID, nil
 }
 

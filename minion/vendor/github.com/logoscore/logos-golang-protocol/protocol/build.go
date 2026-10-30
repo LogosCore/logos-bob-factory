@@ -75,6 +75,10 @@ type BuildSchema struct {
 	// from those of its target, and the minion has only those. Optional: a
 	// factory without commands builds minions with none.
 	Commands []BuildCommand `json:"commands,omitempty"`
+	// PersistedSessions says the minions can claim a persisted session:
+	// built with a BuildRequest.SessionID, they claim it in their hello
+	// (HelloItem.SID). Optional.
+	PersistedSessions bool `json:"persisted_sessions,omitempty"`
 }
 
 // ChannelVersions is a channel kind (its module_name) and the connection

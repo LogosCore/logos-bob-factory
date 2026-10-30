@@ -34,7 +34,10 @@ when the endpoint has none). It logs each step to the console and runs until
 stopped. A failed check-in (the channel out of reach, its 404, core
 restarting) keeps the session; it starts over from the stage only when core
 answers `session_closed`, after 24 hours of nothing but failures, or when the
-stage or hello fails. `./bob-<id>.bin describe`
+stage or hello fails. Built with a persisted session ("Build with persisted
+session" on a session in core's Sessions page), it claims that session in its
+hello, so a restarted minion comes back to it; told `session_replaced` (another
+process took it), it goes on in a session of its own and stops claiming. `./bob-<id>.bin describe`
 prints the JSON description it was built with instead. The
 description is **baked in at compile time**. The minion's sources are their
 own Go module, `minion/` in this repository. For each build BOB copies that

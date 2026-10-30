@@ -117,8 +117,12 @@ type BuildRequest struct {
 	// Files are the files that values name, by id.
 	Files map[string]BuildFile `json:"files,omitempty"`
 	// Crypto is set when the factory declares a crypto suite.
-	Crypto   *BuildCrypto   `json:"crypto,omitempty"`
-	Artifact ArtifactUpload `json:"artifact"`
+	Crypto *BuildCrypto `json:"crypto,omitempty"`
+	// SessionID is the persisted session the minion claims in its hello, a
+	// lowercase UUID; set only for a factory that declares
+	// BuildSchema.PersistedSessions. The factory builds it in.
+	SessionID string         `json:"session_id,omitempty"`
+	Artifact  ArtifactUpload `json:"artifact"`
 	// Deadline is when core stops waiting for the result.
 	Deadline time.Time `json:"deadline"`
 	Actor    *Actor    `json:"actor,omitempty"`
@@ -286,6 +290,14 @@ func ValidateBuildRequest(s BuildSchema, r BuildRequest) map[string]string {
 	}
 	if r.SchemaVersion != s.Version {
 		add("schema_version", "the factory's build schema is version %d", s.Version)
+	}
+	if r.SessionID != "" {
+		switch {
+		case !s.PersistedSessions:
+			add("session_id", "the factory's minions do not claim persisted sessions")
+		case !buildIDPattern.MatchString(r.SessionID):
+			add("session_id", "must be a lowercase UUIDv4")
+		}
 	}
 
 	for id, f := range r.Files {

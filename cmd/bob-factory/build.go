@@ -41,6 +41,8 @@ var buildSchema = protocol.BuildSchema{
 	// Its minions encrypt with AES-256-CBC and HMAC-SHA256; core generates
 	// each one's keys and BOB writes them into the artifact.
 	Crypto: protocol.CryptoAES256CBCHMACSHA256,
+	// Its minions claim a persisted session when built with one.
+	PersistedSessions: true,
 	Fields: []protocol.FieldSpec{
 		{
 			Key: "greeting", Type: protocol.FieldString, Label: "Greeting", Default: "hello from BOB", MaxLength: 200,
@@ -112,8 +114,11 @@ type dummyMinion struct {
 	Badge       *protocol.BuildFile        `json:"badge,omitempty"`
 	Connections []protocol.BuildConnection `json:"connections"`
 	Crypto      *protocol.BuildCrypto      `json:"crypto,omitempty"`
-	BuiltBy     string                     `json:"built_by"`
-	BuiltAt     time.Time                  `json:"built_at"`
+	// SessionID is the persisted session the minion claims, when the build
+	// has one.
+	SessionID string    `json:"session_id,omitempty"`
+	BuiltBy   string    `json:"built_by"`
+	BuiltAt   time.Time `json:"built_at"`
 }
 
 // bob builds dummy minions, the way its management says (management.go).
@@ -231,6 +236,7 @@ func describe(req protocol.BuildRequest, badge *protocol.BuildFile, builtBy stri
 		Badge:       badge,
 		Connections: req.Connections,
 		Crypto:      req.Crypto,
+		SessionID:   req.SessionID,
 		BuiltBy:     builtBy,
 		BuiltAt:     now,
 	}
