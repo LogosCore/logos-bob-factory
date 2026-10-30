@@ -2,9 +2,10 @@
 // dummy minion. BOB writes the build's description to minion.json before
 // compiling, so it is baked into the binary (the minion.json kept here is a
 // placeholder). Run, the minion stages with core through its first HTTP
-// connection, says hello to open a session, checks in once and logs each
-// step (docs: contracts/minion-messages.md); "minion describe" prints the
-// description instead.
+// connection, says hello to open a session, then checks in with a get_tasks
+// every check-in interval of the connection, with its jitter, and logs each
+// step (docs: contracts/minion-messages.md). When anything fails it starts
+// over. "minion describe" prints the description instead.
 package main
 
 import (
@@ -22,6 +23,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -81,9 +83,24 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	sched := conn.schedule()
 	log.Printf("build %s, crypto %s", d.BuildID, d.Crypto.Suite)
-	log.Printf("channel http %q (%s %s)", conn.Endpoint.Name, conn.method(), conn.url())
+	log.Printf("channel http %q (%s %s), check-in every %s ± %g%%", conn.Endpoint.Name, conn.method(), conn.url(),
+		sched.interval, sched.jitter)
 
+	// The build is responsible for starting over: when anything fails, the
+	// process stages again after a check-in interval.
+	for {
+		err := session(conn, sched, buildID, keys)
+		wait := sched.next()
+		log.Printf("%v; starting over in %s", err, wait.Round(time.Millisecond))
+		time.Sleep(wait)
+	}
+}
+
+// session stages, says hello and checks in for as long as that works; it
+// returns why it stopped.
+func session(conn connection, sched schedule, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material) error {
 	tempID, newKeys, err := stage(conn, buildID, keys)
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
@@ -92,18 +109,36 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
-	// A check-in: a message with no items. Core records it and has nothing
+	// Check in every interval, with jitter: a get_tasks for one task at a
+	// time. Core records each check-in; with no tasks waiting it has nothing
 	// to say.
-	log.Printf("check-in under the session id")
-	answer, err := exchange(conn, sessionID, newKeys)
-	if err != nil {
-		return fmt.Errorf("check-in: %w", err)
+	one := uint64(1)
+	for n := 1; ; n++ {
+		wait := sched.next()
+		log.Printf("next check-in in %s", wait.Round(time.Millisecond))
+		time.Sleep(wait)
+		answer, err := exchange(conn, sessionID, newKeys, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &one})
+		if err != nil {
+			return fmt.Errorf("check-in %d: %w", n, err)
+		}
+		if err := coreErr(answer); err != nil {
+			return fmt.Errorf("check-in %d: %w", n, err)
+		}
+		log.Printf("check-in %d: get_tasks max 1, %d item(s) back (tasks are not built yet)", n, len(answer.Items))
 	}
-	if err := coreErr(answer); err != nil {
-		return fmt.Errorf("check-in: %w", err)
-	}
-	log.Printf("checked in. Next: tasks (not built yet)")
-	return nil
+}
+
+// schedule is when the minion checks in: every interval, spread at random
+// by up to jitter percent of it either way.
+type schedule struct {
+	interval time.Duration
+	jitter   float64
+}
+
+// next is the wait before the next check-in.
+func (s schedule) next() time.Duration {
+	spread := float64(s.interval) * s.jitter / 100
+	return time.Duration(max(0, float64(s.interval)+(mrand.Float64()*2-1)*spread))
 }
 
 // stage sends the minion's first message, a stage, under the build id with
@@ -322,6 +357,19 @@ func httpConnection(conns []protocol.BuildConnection) (connection, error) {
 
 func (c connection) param(key string) string {
 	s, _ := c.Endpoint.Params[key].(string)
+	return s
+}
+
+// schedule is the endpoint's check-in interval and jitter, or the HTTP
+// channel's defaults (60s, 20%) where it has none.
+func (c connection) schedule() schedule {
+	s := schedule{interval: 60 * time.Second, jitter: 20}
+	if d, err := time.ParseDuration(c.param("checkin_interval")); err == nil && d > 0 {
+		s.interval = d
+	}
+	if j, ok := c.Endpoint.Params["checkin_jitter"].(float64); ok && j >= 0 && j <= 100 {
+		s.jitter = j
+	}
 	return s
 }
 

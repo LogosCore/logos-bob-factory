@@ -35,6 +35,7 @@ const (
 	ItemStageResponse = "stage_response"
 	ItemHello         = "hello"
 	ItemHelloResponse = "hello_response"
+	ItemGetTasks      = "get_tasks"
 	ItemErr           = "err"
 )
 
@@ -115,6 +116,21 @@ func (h HelloItem) Validate() error {
 type HelloResponseItem struct {
 	T   string `cbor:"t"`
 	SID []byte `cbor:"sid"`
+}
+
+// GetTasksItem says the minion takes new tasks, and how many at most: nil
+// for no limit of the minion's. A message without one takes none.
+type GetTasksItem struct {
+	T   string  `cbor:"t"`
+	Max *uint64 `cbor:"max,omitempty"`
+}
+
+// Validate refuses a max of 0.
+func (g GetTasksItem) Validate() error {
+	if g.Max != nil && *g.Max == 0 {
+		return errors.New("get_tasks: max is at least 1")
+	}
+	return nil
 }
 
 // ErrItem reports a problem with a message or one of its items.

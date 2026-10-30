@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/logoscore/logos-golang-protocol/protocol"
@@ -23,7 +24,7 @@ import (
 // fakeCore is an HTTP channel and core in one: it unpacks a request and
 // answers it as core does. A stage under the build id gets a temporary id
 // and new keys, a hello under the temporary id a session id, and a check-in
-// under the session id nothing (an empty reply).
+// under the session id, a get_tasks, nothing (an empty reply).
 type fakeCore struct {
 	t         *testing.T
 	buildID   [16]byte
@@ -33,7 +34,8 @@ type fakeCore struct {
 	sessionID [16]byte
 	path      string
 	hello     protocol.HelloItem
-	checkIns  int
+	// checkIns gets one value per check-in: a get_tasks for one task.
+	checkIns chan struct{}
 }
 
 func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -81,10 +83,12 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		item = protocol.HelloResponseItem{T: protocol.ItemHelloResponse, SID: f.sessionID[:]}
 	case f.sessionID:
-		if len(msg.Items) != 0 {
-			f.t.Errorf("check-in with items %+v", msg)
+		var get protocol.GetTasksItem
+		if len(msg.Items) != 1 || protocol.UnmarshalCBOR(msg.Items[0], &get) != nil || get.T != protocol.ItemGetTasks ||
+			get.Max == nil || *get.Max != 1 {
+			f.t.Errorf("check-in %+v", msg)
 		}
-		f.checkIns++
+		f.checkIns <- struct{}{}
 		// Core's 204, as the HTTP channel passes it on: the id, no frame.
 		_, _ = w.Write(append([]byte{0}, id[:]...))
 		return
@@ -100,7 +104,7 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // The compiled minion stages through its http connection, says hello,
-// checks in, and logs it.
+// checks in every interval of the connection, and logs it.
 func TestMinionStages(t *testing.T) {
 	needGo(t)
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
@@ -112,6 +116,7 @@ func TestMinionStages(t *testing.T) {
 	_, _ = rand.Read(core.keys.MACKey)
 	_, _ = rand.Read(core.tempID[:])
 	_, _ = rand.Read(core.sessionID[:])
+	core.checkIns = make(chan struct{}, 16)
 	core.newKeys = protocol.AES256CBCHMACSHA256Material{EncKey: make([]byte, 32), MACKey: make([]byte, 32)}
 	_, _ = rand.Read(core.newKeys.EncKey)
 	_, _ = rand.Read(core.newKeys.MACKey)
@@ -122,6 +127,8 @@ func TestMinionStages(t *testing.T) {
 	material, _ := json.Marshal(core.keys)
 	req.Crypto = &protocol.BuildCrypto{Suite: protocol.CryptoAES256CBCHMACSHA256, Material: material}
 	req.Connections[0].Endpoint.Params["base_url"] = srv.URL
+	req.Connections[0].Endpoint.Params["checkin_interval"] = "100ms"
+	req.Connections[0].Endpoint.Params["checkin_jitter"] = 20.0
 	desc, _ := json.Marshal(describe(req, nil, "bob", req.Deadline))
 	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/amd64", desc, io.Discard)
 	if err != nil {
@@ -134,9 +141,21 @@ func TestMinionStages(t *testing.T) {
 	var logs bytes.Buffer
 	cmd := exec.Command(path)
 	cmd.Stderr = &logs
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("the minion failed: %v\n%s", err, logs.String())
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
 	}
+	// The minion checks in until it is stopped: wait for two check-ins.
+	for i := range 2 {
+		select {
+		case <-core.checkIns:
+		case <-time.After(10 * time.Second):
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatalf("no check-in %d:\n%s", i+1, logs.String())
+		}
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
 	out := logs.String()
 	for _, want := range []string{
 		"build 5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f",
@@ -146,14 +165,15 @@ func TestMinionStages(t *testing.T) {
 		"temporary id " + formatUUID(core.tempID),
 		"staged",
 		"session id " + formatUUID(core.sessionID),
-		"checked in.",
+		"check-in every 100ms ± 20%",
+		"check-in 1: get_tasks max 1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q:\n%s", want, out)
 		}
 	}
-	if core.hello.PID != uint64(cmd.Process.Pid) || core.hello.OS != "linux" || core.hello.Arch != "amd64" || core.checkIns != 1 {
-		t.Errorf("hello %+v, %d check-ins", core.hello, core.checkIns)
+	if core.hello.PID != uint64(cmd.Process.Pid) || core.hello.OS != "linux" || core.hello.Arch != "amd64" {
+		t.Errorf("hello %+v", core.hello)
 	}
 	if core.path != "/cdn/assets/" {
 		t.Errorf("posted to %q, want the path prefix", core.path)

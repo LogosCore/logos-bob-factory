@@ -27,8 +27,11 @@ stripped). Run, it **stages** with core through its first HTTP connection, as
 the [Minion Messages](https://logoscore.github.io/logos-docs/contracts/minion-messages/#staging)
 contract says, says **hello** under the temporary id with the new keys (its
 pid, OS and arch, hostname, user, executable, root or user, and addresses),
-which opens a session in core, checks in once under the session id, and logs
-each step to the console; `./bob-<id>.bin describe`
+which opens a session in core, then checks in under the session id with a
+`get_tasks` for one task every check-in interval of the connection, spread by
+its jitter (`checkin_interval`, `checkin_jitter`; the channel's 60s and 20%
+when the endpoint has none). It logs each step to the console and runs until
+stopped; when anything fails it starts over from the stage after an interval. `./bob-<id>.bin describe`
 prints the JSON description it was built with instead. The
 description is **baked in at compile time**. The minion's sources are their
 own Go module, `minion/` in this repository. For each build BOB copies that
@@ -45,7 +48,7 @@ artifact is
 ```console
 $ ./bob-5b0c4f6e.bin
 minion 00:15:11.276315 build 160a41b2-e202-4841-9766-5dedfb861947, crypto aes-256-cbc-hmac-sha256
-minion 00:15:11.276347 channel http "localhost-8090" (POST http://localhost:8090/)
+minion 00:15:11.276347 channel http "localhost-8090" (POST http://localhost:8090/), check-in every 1s ± 20%
 minion 00:15:11.338861 generated an RSA-2048 key pair in 62ms; public key sha256 39c61b8d6944f84a
 minion 00:15:11.338884 correlation id 8cd63702…
 minion 00:15:11.338931 message 2910971f… under 160a41b2-e202-4841-9766-5dedfb861947: 363 bytes of CBOR, a 418-byte sealed frame, 435 bytes packed for the channel
@@ -60,10 +63,12 @@ minion 00:15:11.344150 message 368b46b2… under bb1779b3-9fcc-4639-8aa4-5d52c1f
 minion 00:15:11.345990 channel answered 200 with 147 bytes in 2ms
 minion 00:15:11.346034 opened core's reply: 70 bytes of CBOR, 1 item(s)
 minion 00:15:11.346057 session id 8fba1ac4-b8e7-46ca-b96e-bdddc9e52906
-minion 00:15:11.346058 check-in under the session id
-minion 00:15:11.346070 message c4dcd5dd… under 8fba1ac4-b8e7-46ca-b96e-bdddc9e52906: 24 bytes of CBOR, a 82-byte sealed frame, 99 bytes packed for the channel
-minion 00:15:11.347591 channel answered 200 with 17 bytes in 2ms
-minion 00:15:11.347614 checked in. Next: tasks (not built yet)
+minion 00:15:11.346060 next check-in in 851ms
+minion 00:15:12.198214 message c4dcd5dd… under 8fba1ac4-b8e7-46ca-b96e-bdddc9e52906: 37 bytes of CBOR, a 98-byte sealed frame, 115 bytes packed for the channel
+minion 00:15:12.199823 channel answered 200 with 17 bytes in 2ms
+minion 00:15:12.199841 check-in 1: get_tasks max 1, 0 item(s) back (tasks are not built yet)
+minion 00:15:12.199842 next check-in in 1.033s
+…
 
 $ ./bob-5b0c4f6e.bin describe
 {
