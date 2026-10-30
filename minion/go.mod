@@ -8,6 +8,3 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.6 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 )
-
-// Until protocol v0.8.0 is published: the workspace's copy, vendored.
-replace github.com/logoscore/logos-golang-protocol => ../../logos-golang-protocol
