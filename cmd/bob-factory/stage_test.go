@@ -258,7 +258,8 @@ func TestMinionClaimsPersistedSession(t *testing.T) {
 	core.mu.Lock()
 	hellos := core.hellos
 	core.mu.Unlock()
-	if len(hellos) != 2 || !bytes.Equal(hellos[0].SID, core.sessionID[:]) || hellos[1].SID != nil {
+	if len(hellos) != 2 || !bytes.Equal(hellos[0].SID, core.sessionID[:]) || hellos[1].SID != nil ||
+		hellos[0].Sleep == nil || *hellos[0].Sleep != (protocol.Sleep{Interval: 100, Jitter: 20}) {
 		t.Fatalf("hellos %+v\n%s", hellos, logs.String())
 	}
 	for _, want := range []string{"the persisted session, claimed", "goes on in a session of its own"} {

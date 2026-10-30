@@ -36,6 +36,7 @@ const (
 	ItemHello         = "hello"
 	ItemHelloResponse = "hello_response"
 	ItemGetTasks      = "get_tasks"
+	ItemSleepUpdate   = "sleep_update"
 	ItemErr           = "err"
 )
 
@@ -94,7 +95,39 @@ type HelloItem struct {
 	// SID is the persisted session the minion claims, raw bytes; nil for a
 	// new session.
 	SID []byte `cbor:"sid,omitempty"`
+	// Sleep is the check-in schedule the minion starts with; nil when it
+	// does not say.
+	Sleep *Sleep `cbor:"sleep,omitempty"`
 }
+
+// Sleep is a minion's check-in schedule: Interval milliseconds between
+// check-ins, spread by Jitter percent of it either way. Core marks a
+// session late once a check-in is overdue by it.
+type Sleep struct {
+	Interval uint64 `cbor:"interval"`
+	Jitter   uint64 `cbor:"jitter"`
+}
+
+// Validate refuses an interval of 0 and a jitter over 100.
+func (s Sleep) Validate() error {
+	switch {
+	case s.Interval == 0:
+		return errors.New("sleep: interval is at least 1 ms")
+	case s.Jitter > 100:
+		return errors.New("sleep: jitter is 0 to 100 percent")
+	}
+	return nil
+}
+
+// SleepUpdateItem says the minion's check-in schedule changed.
+type SleepUpdateItem struct {
+	T        string `cbor:"t"`
+	Interval uint64 `cbor:"interval"`
+	Jitter   uint64 `cbor:"jitter"`
+}
+
+// Sleep is the schedule the item says.
+func (u SleepUpdateItem) Sleep() Sleep { return Sleep{Interval: u.Interval, Jitter: u.Jitter} }
 
 // HelloIntegrity holds the integrity values a hello may carry: Windows'
 // integrity levels, or root and user elsewhere.
@@ -113,6 +146,8 @@ func (h HelloItem) Validate() error {
 		return fmt.Errorf("hello: integrity %q is not one of %v", h.Integrity, HelloIntegrity)
 	case h.SID != nil && len(h.SID) != 16:
 		return errors.New("hello: sid is 16 bytes")
+	case h.Sleep != nil:
+		return h.Sleep.Validate()
 	}
 	return nil
 }

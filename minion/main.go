@@ -126,7 +126,7 @@ func session(conn connection, sched schedule, buildID [16]byte, keys protocol.AE
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
-	sessionID, err := hello(conn, tempID, newKeys, claim)
+	sessionID, err := hello(conn, tempID, newKeys, claim, sched)
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
@@ -244,12 +244,14 @@ func stage(conn connection, buildID [16]byte, keys protocol.AES256CBCHMACSHA256M
 }
 
 // hello sends the host and process under the temporary id, sealed with the
-// new keys, claiming the persisted session when claim is set, and returns
-// the session id core gave.
-func hello(conn connection, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte) ([16]byte, error) {
+// new keys, with its check-in schedule, claiming the persisted session when
+// claim is set, and returns the session id core gave.
+func hello(conn connection, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte, sched schedule) ([16]byte, error) {
 	var sessionID [16]byte
 	h := describeHost()
 	h.SID = claim
+	// The schedule it checks in by, for core to tell when it is late.
+	h.Sleep = &protocol.Sleep{Interval: uint64(max(1, sched.interval.Milliseconds())), Jitter: uint64(sched.jitter)}
 	log.Printf("hello: pid %d, %s/%s, host %q, user %q, integrity %s, addrs %v", h.PID, h.OS, h.Arch, h.Host, h.User, h.Integrity, h.Addrs)
 	answer, err := exchange(conn, tempID, keys, h)
 	if err != nil {

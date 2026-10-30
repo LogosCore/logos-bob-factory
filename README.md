@@ -26,7 +26,8 @@ For `linux-elf`, BOB compiles a real program: a static Linux binary (no cgo,
 stripped). Run, it **stages** with core through its first HTTP connection, as
 the [Minion Messages](https://logoscore.github.io/logos-docs/contracts/minion-messages/#staging)
 contract says, says **hello** under the temporary id with the new keys (its
-pid, OS and arch, hostname, user, executable, root or user, and addresses),
+pid, OS and arch, hostname, user, executable, root or user, addresses, and
+its check-in schedule, so core can tell when it is late),
 which opens a session in core, then checks in under the session id with a
 `get_tasks` for one task every check-in interval of the connection, spread by
 its jitter (`checkin_interval`, `checkin_jitter`; the channel's 60s and 20%
