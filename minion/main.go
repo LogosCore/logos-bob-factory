@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"os/user"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -289,8 +290,10 @@ func describeHost() protocol.HelloItem {
 	if u, err := user.Current(); err == nil {
 		h.User = u.Username
 	}
+	// The process's name, as the contract has it: not the path, which says
+	// only where it was saved.
 	if exe, err := os.Executable(); err == nil {
-		h.Proc = exe
+		h.Proc = filepath.Base(exe)
 	}
 	if os.Geteuid() == 0 {
 		h.Integrity = "root"
