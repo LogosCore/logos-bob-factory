@@ -32,6 +32,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -51,6 +52,10 @@ type description struct {
 	Connections []protocol.BuildConnection `json:"connections"`
 	// SessionID is the persisted session to claim; empty for none.
 	SessionID string `json:"session_id"`
+	// Commands are those the minion was built with; Greeting what its hello
+	// command answers.
+	Commands []string `json:"commands"`
+	Greeting string   `json:"greeting"`
 }
 
 func main() {
@@ -109,7 +114,7 @@ func run() error {
 	// another process claiming it, or the backstop, stages again after a
 	// check-in interval.
 	for {
-		err := session(conn, sched, buildID, keys, claim)
+		err := session(conn, sched, d, buildID, keys, claim)
 		if errors.Is(err, errReplaced) && claim != nil {
 			claim = nil
 			log.Printf("another process holds the persisted session: this one goes on in a session of its own")
@@ -122,7 +127,7 @@ func run() error {
 
 // session stages, says hello and checks in for as long as that works; it
 // returns why it stopped.
-func session(conn connection, sched schedule, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte) error {
+func session(conn connection, sched schedule, d description, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte) error {
 	tempID, newKeys, err := stage(conn, buildID, keys)
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
@@ -131,27 +136,41 @@ func session(conn connection, sched schedule, buildID [16]byte, keys protocol.AE
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
-	// Check in every interval, with jitter: a get_tasks for one task at a
-	// time. Core records each check-in; with no tasks waiting it has nothing
-	// to say. The session's keys live only in this process, so a failure on
-	// the way (the channel out of reach, its 404, a reply that does not
-	// open) keeps the session: only core's sealed session_closed, or the
-	// backstop, starts over (docs: "When an exchange fails").
-	one := uint64(1)
+	// Check in every interval, with jitter, or sooner when a task has output:
+	// with a get_tasks for one task when none runs, and what the tasks said
+	// (tasks.go). The session's keys live only in this process, so a failure
+	// on the way (the channel out of reach, its 404, a reply that does not
+	// open) keeps the session, and the message goes again as it was: only
+	// core's sealed session_closed, or the backstop, starts over (docs:
+	// "When an exchange fails").
+	tasks := newRunner(d, &sched)
 	lastOK := time.Now()
 	for n := 1; ; n++ {
-		wait := sched.next()
-		log.Printf("next check-in in %s", wait.Round(time.Millisecond))
-		time.Sleep(wait)
-		answer, err := exchange(conn, sessionID, newKeys, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &one})
+		if !tasks.pending() {
+			wait := sched.next()
+			log.Printf("next check-in in %s", wait.Round(time.Millisecond))
+			select {
+			case <-time.After(wait):
+			case <-tasks.wake:
+			}
+		}
+		items := tasks.outgoing()
+		answer, err := exchange(conn, sessionID, newKeys, items...)
 		if err != nil {
+			tasks.failed(items)
 			if since := time.Since(lastOK); since >= backstop {
 				return fmt.Errorf("check-in %d: nothing has worked for %s: %w", n, since.Round(time.Second), err)
 			}
 			log.Printf("check-in %d failed, keeping the session: %v", n, err)
+			// Not at once again: the channel may be out of reach.
+			time.Sleep(sched.next())
 			continue
 		}
 		lastOK = time.Now()
+		if tasks.delivered(items) {
+			log.Printf("check-in %d: the exit task's end is delivered: exiting", n)
+			os.Exit(0)
+		}
 		if e, ok := coreErrItem(answer); ok {
 			switch e.Code {
 			case protocol.ErrItemSessionClosed:
@@ -162,7 +181,12 @@ func session(conn connection, sched schedule, buildID [16]byte, keys protocol.AE
 			log.Printf("check-in %d: core says %s: %s; keeping the session", n, e.Code, e.Msg)
 			continue
 		}
-		log.Printf("check-in %d: get_tasks max 1, %d item(s) back (tasks are not built yet)", n, len(answer.Items))
+		tasks.take(answer)
+		if asked := slices.ContainsFunc(items, func(it any) bool { _, ok := it.(protocol.GetTasksItem); return ok }); asked {
+			log.Printf("check-in %d: get_tasks max 1, %d item(s) sent, %d back", n, len(items), len(answer.Items))
+		} else {
+			log.Printf("check-in %d: a task runs, %d item(s) sent, %d back", n, len(items), len(answer.Items))
+		}
 	}
 }
 

@@ -1,0 +1,436 @@
+package main
+
+import (
+	"context"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/logoscore/logos-golang-protocol/protocol"
+)
+
+// Tasks (docs: contracts/minion-messages.md): the minion asks for one task
+// at a time, acks it, runs it in the background and sends its output as
+// result parts: formed at each check-in from what the task wrote since, so a
+// message that fails is sent again as it was ((task, seq) stays the same).
+// It checks in sooner when it has output. A task id it saw in the last 24
+// hours runs once. The commands are the build's (description.Commands).
+
+// maxOutPerMessage keeps a message's output well under the 768 KiB limit;
+// the rest goes in the next check-ins, which come at once.
+const maxOutPerMessage = 512 << 10
+
+// lsChunk is how many directory entries one result part carries: the parts'
+// data arrays are joined (docs: "each part's data adds rows"), so a big
+// directory goes in parts that each fit a message.
+const lsChunk = 500
+
+// taskMemory is how long the minion remembers a task id.
+const taskMemory = 24 * time.Hour
+
+// task is a task the minion runs: its output not yet sent, and how it ended.
+type task struct {
+	id      []byte
+	cmd     string
+	nextSeq uint64
+	out     []byte
+	// chunks are structured output not yet sent, a result part each.
+	chunks  []map[string]any
+	ended   bool
+	ok      bool
+	exit    *int64
+	err     string
+	sentEnd bool
+	cancel  context.CancelFunc
+}
+
+// runner holds the tasks of a session and what the next message says.
+type runner struct {
+	mu       sync.Mutex
+	greeting string
+	commands []string
+	sched    *schedule
+	seen     map[string]time.Time
+	acks     [][]byte
+	errs     []protocol.ErrItem
+	sleepUpd *protocol.SleepUpdateItem
+	tasks    []*task
+	// inflight is the last message's items when it failed: sent again first.
+	inflight []any
+	// exitID: the exit task, whose end delivered stops the minion.
+	exitID []byte
+	wake   chan struct{}
+}
+
+func newRunner(d description, sched *schedule) *runner {
+	return &runner{greeting: d.Greeting, commands: d.Commands, sched: sched, seen: map[string]time.Time{}, wake: make(chan struct{}, 1)}
+}
+
+// nudge asks for an early check-in: there is output to send.
+func (r *runner) nudge() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+// pending: something waits to be sent.
+func (r *runner) pending() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.inflight) > 0 || len(r.acks) > 0 || len(r.errs) > 0 || r.sleepUpd != nil {
+		return true
+	}
+	for _, t := range r.tasks {
+		if len(t.out) > 0 || len(t.chunks) > 0 || (t.ended && !t.sentEnd) {
+			return true
+		}
+	}
+	return false
+}
+
+// outgoing is the next message's items: the failed message's again, or
+// acks, errs, a sleep_update and output, and a get_tasks when the minion is
+// free.
+func (r *runner) outgoing() []any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.inflight) > 0 {
+		return r.inflight
+	}
+	var items []any
+	if len(r.acks) > 0 {
+		items = append(items, protocol.AckItem{T: protocol.ItemAck, Tasks: r.acks})
+		r.acks = nil
+	}
+	for _, e := range r.errs {
+		items = append(items, e)
+	}
+	r.errs = nil
+	if r.sleepUpd != nil {
+		items = append(items, *r.sleepUpd)
+		r.sleepUpd = nil
+	}
+	// Parts while the message has room: output, then a chunk of data each.
+	room := maxOutPerMessage
+parts:
+	for _, t := range r.tasks {
+		for !t.sentEnd && (len(t.out) > 0 || len(t.chunks) > 0 || t.ended) {
+			part := protocol.ResultItem{T: protocol.ItemResult, Task: t.id, Seq: t.nextSeq}
+			if len(t.out) > 0 {
+				n := min(len(t.out), room)
+				if n == 0 {
+					break parts
+				}
+				part.Out, t.out, room = t.out[:n], t.out[n:], room-n
+			} else if len(t.chunks) > 0 {
+				size := cborSize(t.chunks[0])
+				if size > room && room < maxOutPerMessage {
+					break parts // the next message, which comes at once
+				}
+				part.Data, t.chunks, room = t.chunks[0], t.chunks[1:], max(room-size, 0)
+			}
+			if t.ended && len(t.out) == 0 && len(t.chunks) == 0 {
+				ok := t.ok
+				part.Done, part.OK, part.Exit, part.Err = true, &ok, t.exit, t.err
+				t.sentEnd = true
+			}
+			t.nextSeq++
+			items = append(items, part)
+			if room == 0 {
+				break parts
+			}
+		}
+	}
+	if !r.busyLocked() {
+		one := uint64(1)
+		items = append(items, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &one})
+	}
+	return items
+}
+
+func (r *runner) busyLocked() bool {
+	for _, t := range r.tasks {
+		if !t.sentEnd {
+			return true
+		}
+	}
+	return false
+}
+
+// delivered: the message went through. Tasks whose end it carried are done
+// with; the exit task's end stops the minion.
+func (r *runner) delivered(items []any) (exit bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inflight = nil
+	r.tasks = slices.DeleteFunc(r.tasks, func(t *task) bool { return t.sentEnd })
+	for _, it := range items {
+		if res, ok := it.(protocol.ResultItem); ok && res.Done && r.exitID != nil && slices.Equal(res.Task, r.exitID) {
+			return true
+		}
+	}
+	return false
+}
+
+// failed: the message did not go through; it is sent again as it was.
+func (r *runner) failed(items []any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inflight = items
+}
+
+// take reads core's items: tasks to run (each once), cancels.
+func (r *runner) take(answer protocol.CoreMessage) {
+	for i, raw := range answer.Items {
+		switch protocol.ItemType(raw) {
+		case protocol.ItemTask:
+			var t protocol.TaskItem
+			if protocol.UnmarshalCBOR(raw, &t) != nil || t.Validate() != nil {
+				r.queueErr(protocol.ErrItemBadMessage, "the task does not read", i)
+				continue
+			}
+			r.start(t)
+		case protocol.ItemCancel:
+			var c protocol.CancelItem
+			if protocol.UnmarshalCBOR(raw, &c) != nil || c.Validate() != nil {
+				r.queueErr(protocol.ErrItemBadMessage, "the cancel does not read", i)
+				continue
+			}
+			r.stop(c.Task, i)
+		}
+	}
+}
+
+func (r *runner) queueErr(code, msg string, item int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: code, Msg: msg, Item: &item})
+}
+
+// start acks a task and runs it, unless it ran already.
+func (r *runner) start(ti protocol.TaskItem) {
+	key := hex.EncodeToString(ti.Task)
+	r.mu.Lock()
+	for k, at := range r.seen {
+		if time.Since(at) > taskMemory {
+			delete(r.seen, k)
+		}
+	}
+	r.acks = append(r.acks, ti.Task)
+	if _, ran := r.seen[key]; ran {
+		r.mu.Unlock()
+		log.Printf("task %s again: acked, not run again", key[:8])
+		return
+	}
+	r.seen[key] = time.Now()
+	ctx, cancel := context.WithCancel(context.Background())
+	t := &task{id: ti.Task, cmd: ti.Cmd, cancel: cancel}
+	r.tasks = append(r.tasks, t)
+	if ti.Cmd == "exit" {
+		r.exitID = ti.Task
+	}
+	r.mu.Unlock()
+	log.Printf("task %s: %s %v", key[:8], ti.Cmd, ti.Args)
+	go func() {
+		defer cancel()
+		r.run(ctx, t, ti)
+		r.nudge()
+	}()
+}
+
+// stop cancels a running task; one the minion does not have gets an
+// unknown_task.
+func (r *runner) stop(id []byte, item int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, t := range r.tasks {
+		if slices.Equal(t.id, id) {
+			if !t.ended {
+				log.Printf("task %s: cancelled", hex.EncodeToString(id)[:8])
+				t.cancel()
+			}
+			return
+		}
+	}
+	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask, Msg: "no such task running", Item: &item})
+}
+
+// write adds output to a task (text, or a chunk of structured output), and
+// asks for an early check-in.
+func (r *runner) write(t *task, out []byte, data map[string]any) {
+	r.mu.Lock()
+	t.out = append(t.out, out...)
+	if data != nil {
+		t.chunks = append(t.chunks, data)
+	}
+	r.mu.Unlock()
+	r.nudge()
+}
+
+// cborSize is how many bytes v takes in a message.
+func cborSize(v any) int {
+	b, err := protocol.MarshalCBOR(v)
+	if err != nil {
+		return 0
+	}
+	return len(b)
+}
+
+// end records how a task ended.
+func (r *runner) end(t *task, ok bool, exit *int64, errText string) {
+	r.mu.Lock()
+	t.ended, t.ok, t.exit, t.err = true, ok, exit, errText
+	r.mu.Unlock()
+	state := "ok"
+	if !ok {
+		state = "failed: " + errText
+	}
+	log.Printf("task %s: %s %s", hex.EncodeToString(t.id)[:8], t.cmd, state)
+}
+
+// run carries out a task's command.
+func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
+	if !slices.Contains(r.commands, ti.Cmd) {
+		r.end(t, false, nil, fmt.Sprintf("this minion was not built with %q", ti.Cmd))
+		return
+	}
+	switch ti.Cmd {
+	case "hello":
+		r.write(t, []byte(r.greeting+"\n"), nil)
+		r.end(t, true, nil, "")
+	case "ls":
+		r.ls(t, ti.Args)
+	case "shell":
+		r.shell(ctx, t, ti.Args)
+	case "sleep":
+		r.sleep(t, ti.Args)
+	case "exit":
+		r.write(t, []byte("bye\n"), nil)
+		r.end(t, true, nil, "")
+	default:
+		r.end(t, false, nil, fmt.Sprintf("%q is not a command this minion knows", ti.Cmd))
+	}
+}
+
+// ls lists a directory as data: its path and an entry per file.
+func (r *runner) ls(t *task, args map[string]any) {
+	path, _ := protocol.ArgString(args, "path")
+	if path == "" {
+		path = "."
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		r.end(t, false, nil, err.Error())
+		return
+	}
+	dir, err := os.ReadDir(abs)
+	if err != nil {
+		r.end(t, false, nil, err.Error())
+		return
+	}
+	entries := make([]any, 0, len(dir))
+	for _, e := range dir {
+		entry := map[string]any{"name": e.Name(), "dir": e.IsDir()}
+		if info, err := e.Info(); err == nil {
+			entry["size"] = info.Size()
+			entry["mode"] = info.Mode().String()
+			entry["modified"] = info.ModTime().UTC().Format(time.RFC3339)
+		}
+		entries = append(entries, entry)
+	}
+	// In chunks, the path with the first: the parts' entries are joined.
+	for i := 0; i == 0 || i < len(entries); i += lsChunk {
+		chunk := map[string]any{"entries": entries[i:min(i+lsChunk, len(entries))]}
+		if i == 0 {
+			chunk["path"] = abs
+		}
+		r.write(t, nil, chunk)
+	}
+	r.end(t, true, nil, "")
+}
+
+// taskWriter feeds a running process's output to its task as it comes.
+type taskWriter struct {
+	r *runner
+	t *task
+}
+
+func (w taskWriter) Write(p []byte) (int, error) {
+	w.r.write(w.t, append([]byte(nil), p...), nil)
+	return len(p), nil
+}
+
+// shell runs a command in the system shell, its output streamed, within its
+// timeout.
+func (r *runner) shell(ctx context.Context, t *task, args map[string]any) {
+	command, _ := protocol.ArgString(args, "command")
+	timeout, ok := protocol.ArgDuration(args, "timeout")
+	if !ok || timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
+	// Its own process group, all of it killed on a cancel or the timeout: the
+	// shell's children (a sleep) would otherwise live on holding the output
+	// open, and the task would never end. WaitDelay ends it even if one that
+	// left the group still holds it.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 2 * time.Second
+	w := taskWriter{r: r, t: t}
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Start(); err != nil {
+		r.end(t, false, nil, "could not start: "+err.Error())
+		return
+	}
+	err := cmd.Wait()
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		r.end(t, false, nil, fmt.Sprintf("stopped after its timeout, %s", timeout))
+	case errors.Is(ctx.Err(), context.Canceled):
+		r.end(t, false, nil, "cancelled")
+	default:
+		var exitErr *exec.ExitError
+		if err != nil && !errors.As(err, &exitErr) {
+			r.end(t, false, nil, err.Error())
+			return
+		}
+		state := cmd.ProcessState
+		if ws, ok := state.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			// Killed by a signal: no exit code, said in err.
+			r.end(t, true, nil, "killed by "+ws.Signal().String())
+			return
+		}
+		code := int64(state.ExitCode())
+		r.end(t, true, &code, "")
+	}
+}
+
+// sleep changes the check-in schedule, and tells core.
+func (r *runner) sleep(t *task, args map[string]any) {
+	interval, ok := protocol.ArgDuration(args, "interval")
+	if !ok || interval <= 0 {
+		r.end(t, false, nil, "an interval is required")
+		return
+	}
+	jitter, ok := protocol.ArgInt(args, "jitter")
+	if !ok {
+		jitter = 10
+	}
+	r.mu.Lock()
+	r.sched.interval, r.sched.jitter = interval, float64(jitter)
+	r.sleepUpd = &protocol.SleepUpdateItem{T: protocol.ItemSleepUpdate, Interval: uint64(interval.Milliseconds()), Jitter: uint64(jitter)}
+	r.mu.Unlock()
+	r.write(t, []byte(fmt.Sprintf("check-ins every %s ± %d%%\n", interval, jitter)), nil)
+	r.end(t, true, nil, "")
+}

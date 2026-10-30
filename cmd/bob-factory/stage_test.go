@@ -25,9 +25,11 @@ import (
 // fakeCore is an HTTP channel and core in one: it unpacks a request and
 // answers it as core does. A stage under the build id gets a temporary id
 // and new keys, a hello under the temporary id a session id, and a check-in
-// under the session id, a get_tasks, nothing (an empty reply), unless
-// script says otherwise for that check-in: "404", the channel's answer to
-// any failure, or "closed", core's sealed session_closed.
+// under the session id nothing (an empty reply), unless script says
+// otherwise for that check-in: "404", the channel's answer to any failure,
+// or "closed", core's sealed session_closed; or, when it asks for tasks
+// (get_tasks, max 1) and tasks are waiting, the next of them. It keeps what
+// the check-ins carried.
 type fakeCore struct {
 	t         *testing.T
 	buildID   [16]byte
@@ -41,6 +43,9 @@ type fakeCore struct {
 	// get_tasks for one task.
 	checkIns chan int
 	script   map[int]string
+	// tasks wait for a get_tasks; received is what check-ins carried.
+	tasks    []protocol.TaskItem
+	received []cbor.RawMessage
 
 	mu      sync.Mutex
 	stages  int
@@ -101,14 +106,25 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		item = protocol.HelloResponseItem{T: protocol.ItemHelloResponse, SID: f.sessionID[:]}
 	case f.sessionID:
-		var get protocol.GetTasksItem
-		if len(msg.Items) != 1 || protocol.UnmarshalCBOR(msg.Items[0], &get) != nil || get.T != protocol.ItemGetTasks ||
-			get.Max == nil || *get.Max != 1 {
-			f.t.Errorf("check-in %+v", msg)
+		asked := false
+		for _, raw := range msg.Items {
+			if protocol.ItemType(raw) != protocol.ItemGetTasks {
+				continue
+			}
+			var get protocol.GetTasksItem
+			if asked || protocol.UnmarshalCBOR(raw, &get) != nil || get.Max == nil || *get.Max != 1 {
+				f.t.Errorf("check-in %+v", msg)
+			}
+			asked = true
 		}
 		f.mu.Lock()
 		f.checkIn++
 		n := f.checkIn
+		f.received = append(f.received, msg.Items...)
+		if asked && len(f.tasks) > 0 && f.script[n] == "" {
+			item, f.tasks = f.tasks[0], f.tasks[1:]
+			f.script[n] = "task"
+		}
 		f.mu.Unlock()
 		f.checkIns <- n
 		switch f.script[n] {
@@ -119,6 +135,8 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			item = protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemSessionClosed, Msg: "start over"}
 		case "replaced":
 			item = protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemSessionReplaced, Msg: "start over without claiming"}
+		case "task":
+			// item is the task.
 		default:
 			// Core's 204, as the HTTP channel passes it on: the id, no frame.
 			_, _ = w.Write(append([]byte{0}, id[:]...))
@@ -271,4 +289,127 @@ func TestMinionClaimsPersistedSession(t *testing.T) {
 
 func formatUUID(b [16]byte) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// The minion runs the tasks core gives it, one at a time: it acks each and
+// sends its output as results, the structured output of ls as data, a shell
+// command's exit code, and stops once the exit task's end is delivered.
+func TestMinionRunsTasks(t *testing.T) {
+	needGo(t)
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("runs a linux/amd64 minion")
+	}
+	core := newFakeCore(t, map[int]string{})
+	id := func(b byte) []byte { return bytes.Repeat([]byte{b}, 16) }
+	// A directory past a message's 256 items, and past one part.
+	big := t.TempDir()
+	for i := range 1200 {
+		if err := os.WriteFile(filepath.Join(big, fmt.Sprintf("f%04d", i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	core.tasks = []protocol.TaskItem{
+		{T: protocol.ItemTask, Task: id(1), Cmd: "hello"},
+		{T: protocol.ItemTask, Task: id(2), Cmd: "shell", Args: map[string]any{"command": "echo hi; exit 3", "timeout": uint64(5000)}},
+		{T: protocol.ItemTask, Task: id(3), Cmd: "ls", Args: map[string]any{"path": "/"}},
+		{T: protocol.ItemTask, Task: id(6), Cmd: "ls", Args: map[string]any{"path": big}},
+		{T: protocol.ItemTask, Task: id(4), Cmd: "sleep", Args: map[string]any{"interval": uint64(50), "jitter": int64(0)}},
+		{T: protocol.ItemTask, Task: id(5), Cmd: "exit"},
+	}
+	cmd, logs := startMinion(t, core, func(req *protocol.BuildRequest) { req.Commands = append(req.Commands, "shell") })
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	go func() {
+		for range core.checkIns {
+		}
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the minion exited with %v:\n%s", err, logs.String())
+		}
+	case <-time.After(20 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("the minion did not exit:\n%s", logs.String())
+	}
+
+	core.mu.Lock()
+	received := core.received
+	core.mu.Unlock()
+	acked := map[byte]bool{}
+	results := map[byte][]protocol.ResultItem{}
+	var sleepUpdate *protocol.SleepUpdateItem
+	for _, raw := range received {
+		switch protocol.ItemType(raw) {
+		case protocol.ItemAck:
+			var a protocol.AckItem
+			_ = protocol.UnmarshalCBOR(raw, &a)
+			for _, task := range a.Tasks {
+				acked[task[0]] = true
+			}
+		case protocol.ItemResult:
+			var r protocol.ResultItem
+			if err := protocol.UnmarshalCBOR(raw, &r); err != nil || r.Validate() != nil {
+				t.Fatalf("result %v %v", r, err)
+			}
+			results[r.Task[0]] = append(results[r.Task[0]], r)
+		case protocol.ItemSleepUpdate:
+			var u protocol.SleepUpdateItem
+			_ = protocol.UnmarshalCBOR(raw, &u)
+			sleepUpdate = &u
+		}
+	}
+	end := func(task byte) (protocol.ResultItem, string) {
+		t.Helper()
+		parts := results[task]
+		if !acked[task] || len(parts) == 0 || !parts[len(parts)-1].Done {
+			t.Fatalf("task %d: acked %v, %d parts:\n%s", task, acked[task], len(parts), logs.String())
+		}
+		var out []byte
+		for i, p := range parts {
+			if p.Seq != uint64(i) {
+				t.Fatalf("task %d: part %d has seq %d", task, i, p.Seq)
+			}
+			out = append(out, p.Out...)
+		}
+		return parts[len(parts)-1], string(out)
+	}
+	if last, out := end(1); !*last.OK || out != "hello from BOB\n" {
+		t.Errorf("hello: %q", out)
+	}
+	if last, out := end(2); !*last.OK || last.Exit == nil || *last.Exit != 3 || out != "hi\n" {
+		t.Errorf("shell: ok %v exit %v out %q", *last.OK, last.Exit, out)
+	}
+	if last, _ := end(3); !*last.OK {
+		t.Errorf("ls failed: %s", last.Err)
+	} else {
+		var entries []any
+		for _, p := range results[3] {
+			if e, ok := p.Data["entries"].([]any); ok {
+				entries = append(entries, e...)
+			}
+		}
+		if len(entries) == 0 {
+			t.Errorf("ls of / found nothing")
+		}
+	}
+	if last, _ := end(6); !*last.OK || len(results[6]) < 3 {
+		t.Errorf("a big ls in %d parts, want 3 or more", len(results[6]))
+	} else {
+		n := 0
+		for _, p := range results[6] {
+			if e, ok := p.Data["entries"].([]any); ok {
+				n += len(e)
+			}
+		}
+		if n != 1200 {
+			t.Errorf("a big ls joined to %d entries, want 1200", n)
+		}
+	}
+	if last, _ := end(4); !*last.OK || sleepUpdate == nil || sleepUpdate.Interval != 50 || sleepUpdate.Jitter != 0 {
+		t.Errorf("sleep: %+v %+v", last, sleepUpdate)
+	}
+	if last, out := end(5); !*last.OK || out != "bye\n" {
+		t.Errorf("exit: %q", out)
+	}
 }
