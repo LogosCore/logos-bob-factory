@@ -23,6 +23,9 @@ import (
 const (
 	// ResultDirListing is one directory's entries (DirListing).
 	ResultDirListing = "dir_listing"
+	// ResultFileDownload is a file the minion sent core (FileDownload):
+	// core keeps the file, the data says which one.
+	ResultFileDownload = "file_download"
 )
 
 // Actions.
@@ -30,11 +33,15 @@ const (
 	// ActionListDir lists a directory: core gives path; the command's
 	// result is a ResultDirListing.
 	ActionListDir = "list_dir"
+	// ActionDownloadFile sends a file to core: core gives path; the
+	// command's result is a ResultFileDownload.
+	ActionDownloadFile = "download_file"
 )
 
 // results are the results this version defines.
 var results = map[string]bool{
-	ResultDirListing: true,
+	ResultDirListing:   true,
+	ResultFileDownload: true,
 }
 
 // CommandAction is an action's contract: the params core gives when it runs a
@@ -48,7 +55,8 @@ type CommandAction struct {
 
 // actions are the actions this version defines.
 var actions = map[string]CommandAction{
-	ActionListDir: {Params: map[string]FieldType{"path": FieldString}, Result: ResultDirListing},
+	ActionListDir:      {Params: map[string]FieldType{"path": FieldString}, Result: ResultDirListing},
+	ActionDownloadFile: {Params: map[string]FieldType{"path": FieldString}, Result: ResultFileDownload},
 }
 
 // KnownResult reports whether this version defines the result.
