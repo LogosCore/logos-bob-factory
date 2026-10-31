@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -76,5 +78,37 @@ func TestTaskOnceAndUnknownCancel(t *testing.T) {
 	r.stop(other, 3)
 	if len(r.errs) != 1 || r.errs[0].Code != protocol.ErrItemUnknownTask || *r.errs[0].Item != 3 {
 		t.Fatalf("errs %+v", r.errs)
+	}
+}
+
+// An entry as a dir_listing has it: a link as the link with its target, a
+// dot name hidden, an empty file with its size of 0.
+func TestDirEntry(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".empty"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("sub", filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]protocol.DirEntry{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		got[e.Name()] = dirEntry(dir, e)
+	}
+	if e := got[".empty"]; e.Type != protocol.DirEntryFile || !e.Hidden || e.Size == nil || *e.Size != 0 || e.Modified == nil || e.Owner == "" {
+		t.Errorf(".empty: %+v", e)
+	}
+	if e := got["sub"]; e.Type != protocol.DirEntryDir || e.Size != nil || e.Hidden {
+		t.Errorf("sub: %+v", e)
+	}
+	if e := got["link"]; e.Type != protocol.DirEntryLink || e.Target != "sub" {
+		t.Errorf("link: %+v", e)
 	}
 }

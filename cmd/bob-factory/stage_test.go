@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -380,31 +381,38 @@ func TestMinionRunsTasks(t *testing.T) {
 	if last, out := end(2); !*last.OK || last.Exit == nil || *last.Exit != 3 || out != "hi\n" {
 		t.Errorf("shell: ok %v exit %v out %q", *last.OK, last.Exit, out)
 	}
+	// An ls's parts are a dir_listing: the first names the directory, every
+	// one reads as the handler says.
+	listing := func(task byte) (*protocol.DirListing, int) {
+		var first *protocol.DirListing
+		n := 0
+		for _, p := range results[task] {
+			if len(p.Data) == 0 {
+				continue
+			}
+			l, err := protocol.ReadDirListing(p.Seq, p.Data)
+			if err != nil {
+				t.Fatalf("task %d part %d: %v", task, p.Seq, err)
+			}
+			if p.Seq == 0 {
+				first = l
+			}
+			n += len(l.Entries)
+		}
+		return first, n
+	}
 	if last, _ := end(3); !*last.OK {
 		t.Errorf("ls failed: %s", last.Err)
-	} else {
-		var entries []any
-		for _, p := range results[3] {
-			if e, ok := p.Data["entries"].([]any); ok {
-				entries = append(entries, e...)
-			}
-		}
-		if len(entries) == 0 {
-			t.Errorf("ls of / found nothing")
-		}
+	} else if l, n := listing(3); l == nil || l.Path != "/" || l.Sep != "/" || l.Parent != "" || n == 0 {
+		t.Errorf("ls of /: %+v, %d entries", l, n)
+	} else if i := slices.IndexFunc(l.Entries, func(e protocol.DirEntry) bool { return e.Name == "etc" }); i < 0 ||
+		l.Entries[i].Type != protocol.DirEntryDir || l.Entries[i].Modified == nil || l.Entries[i].Owner == "" {
+		t.Errorf("ls of / has no etc folder with its time and owner: %+v", l.Entries)
 	}
 	if last, _ := end(6); !*last.OK || len(results[6]) < 3 {
 		t.Errorf("a big ls in %d parts, want 3 or more", len(results[6]))
-	} else {
-		n := 0
-		for _, p := range results[6] {
-			if e, ok := p.Data["entries"].([]any); ok {
-				n += len(e)
-			}
-		}
-		if n != 1200 {
-			t.Errorf("a big ls joined to %d entries, want 1200", n)
-		}
+	} else if l, n := listing(6); l == nil || n != 1200 {
+		t.Errorf("a big ls joined to %d entries, want 1200", n)
 	}
 	if last, _ := end(4); !*last.OK || sleepUpdate == nil || sleepUpdate.Interval != 50 || sleepUpdate.Jitter != 0 {
 		t.Errorf("sleep: %+v %+v", last, sleepUpdate)

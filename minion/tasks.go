@@ -5,11 +5,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,9 +30,10 @@ import (
 // the rest goes in the next check-ins, which come at once.
 const maxOutPerMessage = 512 << 10
 
-// lsChunk is how many directory entries one result part carries: the parts'
-// data arrays are joined (docs: "each part's data adds rows"), so a big
-// directory goes in parts that each fit a message.
+// lsChunk is how many directory entries one result part carries: a
+// dir_listing's parts join their entries (docs:
+// contracts/task-result-handlers.md), so a big directory goes in parts that
+// each fit a message.
 const lsChunk = 500
 
 // taskMemory is how long the minion remembers a task id.
@@ -42,8 +45,9 @@ type task struct {
 	cmd     string
 	nextSeq uint64
 	out     []byte
-	// chunks are structured output not yet sent, a result part each.
-	chunks  []map[string]any
+	// chunks are structured output not yet sent, a result part each,
+	// encoded (protocol.ResultData).
+	chunks  [][]byte
 	ended   bool
 	ok      bool
 	exit    *int64
@@ -132,7 +136,7 @@ parts:
 				}
 				part.Out, t.out, room = t.out[:n], t.out[n:], room-n
 			} else if len(t.chunks) > 0 {
-				size := cborSize(t.chunks[0])
+				size := len(t.chunks[0])
 				if size > room && room < maxOutPerMessage {
 					break parts // the next message, which comes at once
 				}
@@ -264,25 +268,26 @@ func (r *runner) stop(id []byte, item int) {
 	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask, Msg: "no such task running", Item: &item})
 }
 
-// write adds output to a task (text, or a chunk of structured output), and
-// asks for an early check-in.
-func (r *runner) write(t *task, out []byte, data map[string]any) {
+// write adds output to a task (text, or a chunk of structured output: a
+// map, or a struct such as protocol.DirListing), and asks for an early
+// check-in.
+func (r *runner) write(t *task, out []byte, data any) {
+	var chunk []byte
+	if data != nil {
+		b, err := protocol.ResultData(data)
+		if err != nil {
+			log.Printf("task %s: data does not encode: %v", hex.EncodeToString(t.id)[:8], err)
+		} else {
+			chunk = b
+		}
+	}
 	r.mu.Lock()
 	t.out = append(t.out, out...)
-	if data != nil {
-		t.chunks = append(t.chunks, data)
+	if chunk != nil {
+		t.chunks = append(t.chunks, chunk)
 	}
 	r.mu.Unlock()
 	r.nudge()
-}
-
-// cborSize is how many bytes v takes in a message.
-func cborSize(v any) int {
-	b, err := protocol.MarshalCBOR(v)
-	if err != nil {
-		return 0
-	}
-	return len(b)
 }
 
 // end records how a task ended.
@@ -337,25 +342,58 @@ func (r *runner) ls(t *task, args map[string]any) {
 		r.end(t, false, nil, err.Error())
 		return
 	}
-	entries := make([]any, 0, len(dir))
+	entries := make([]protocol.DirEntry, 0, len(dir))
 	for _, e := range dir {
-		entry := map[string]any{"name": e.Name(), "dir": e.IsDir()}
-		if info, err := e.Info(); err == nil {
-			entry["size"] = info.Size()
-			entry["mode"] = info.Mode().String()
-			entry["modified"] = info.ModTime().UTC().Format(time.RFC3339)
-		}
-		entries = append(entries, entry)
+		entries = append(entries, dirEntry(abs, e))
 	}
-	// In chunks, the path with the first: the parts' entries are joined.
+	parent := filepath.Dir(abs)
+	if parent == abs {
+		parent = "" // a root
+	}
+	// A dir_listing in chunks: the first names the directory, the rest add
+	// entries.
 	for i := 0; i == 0 || i < len(entries); i += lsChunk {
-		chunk := map[string]any{"entries": entries[i:min(i+lsChunk, len(entries))]}
+		part := protocol.DirListing{Entries: entries[i:min(i+lsChunk, len(entries))]}
 		if i == 0 {
-			chunk["path"] = abs
+			part.Path, part.Sep, part.Parent = abs, string(filepath.Separator), parent
 		}
-		r.write(t, nil, chunk)
+		r.write(t, nil, part)
 	}
 	r.end(t, true, nil, "")
+}
+
+// dirEntry is a directory's entry as a dir_listing has it: a link as the
+// link (its own size and time), with its target.
+func dirEntry(dir string, e os.DirEntry) protocol.DirEntry {
+	d := protocol.DirEntry{Name: e.Name(), Type: entryType(e.Type()), Hidden: strings.HasPrefix(e.Name(), ".")}
+	if info, err := e.Info(); err == nil {
+		if !info.IsDir() {
+			size := uint64(max(info.Size(), 0))
+			d.Size = &size
+		}
+		mod := info.ModTime().Unix()
+		d.Modified = &mod
+		d.Mode = info.Mode().String()
+		d.Owner, d.Group = owners(info)
+	}
+	if d.Type == protocol.DirEntryLink {
+		if target, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil {
+			d.Target = target
+		}
+	}
+	return d
+}
+
+func entryType(m fs.FileMode) string {
+	switch {
+	case m.IsDir():
+		return protocol.DirEntryDir
+	case m&fs.ModeSymlink != 0:
+		return protocol.DirEntryLink
+	case m.IsRegular():
+		return protocol.DirEntryFile
+	}
+	return protocol.DirEntryOther
 }
 
 // taskWriter feeds a running process's output to its task as it comes.
