@@ -88,17 +88,21 @@ type StageResponseItem struct {
 // PID, OS and Arch are required; OS and Arch use Go's names, as build
 // platforms do. X holds the factory's own fields.
 type HelloItem struct {
-	T         string         `cbor:"t"`
-	PID       uint64         `cbor:"pid"`
-	OS        string         `cbor:"os"`
-	Arch      string         `cbor:"arch"`
-	Host      string         `cbor:"host,omitempty"`
-	User      string         `cbor:"user,omitempty"`
-	Domain    string         `cbor:"domain,omitempty"`
-	Proc      string         `cbor:"proc,omitempty"`
-	Integrity string         `cbor:"integrity,omitempty"`
-	Addrs     []string       `cbor:"addrs,omitempty"`
-	Version   string         `cbor:"version,omitempty"`
+	T         string   `cbor:"t"`
+	PID       uint64   `cbor:"pid"`
+	OS        string   `cbor:"os"`
+	Arch      string   `cbor:"arch"`
+	Host      string   `cbor:"host,omitempty"`
+	User      string   `cbor:"user,omitempty"`
+	Domain    string   `cbor:"domain,omitempty"`
+	Proc      string   `cbor:"proc,omitempty"`
+	Integrity string   `cbor:"integrity,omitempty"`
+	Addrs     []string `cbor:"addrs,omitempty"`
+	Version   string   `cbor:"version,omitempty"`
+	// MachineID tells apart machines with the same host and user:
+	// "<source>:<value>" (machine_id.go). Every minion sends one; core takes
+	// a hello without it from minions built before it was asked for.
+	MachineID string         `cbor:"machine_id,omitempty"`
 	X         map[string]any `cbor:"x,omitempty"`
 	// SID is the persisted session the minion claims, raw bytes; nil for a
 	// new session.
@@ -154,6 +158,8 @@ func (h HelloItem) Validate() error {
 		return fmt.Errorf("hello: integrity %q is not one of %v", h.Integrity, HelloIntegrity)
 	case h.SID != nil && len(h.SID) != 16:
 		return errors.New("hello: sid is 16 bytes")
+	case h.MachineID != "" && ValidateMachineID(h.MachineID) != nil:
+		return fmt.Errorf("hello: %w", ValidateMachineID(h.MachineID))
 	case h.Sleep != nil:
 		return h.Sleep.Validate()
 	}
