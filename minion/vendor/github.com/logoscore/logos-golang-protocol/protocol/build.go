@@ -352,18 +352,19 @@ func validateBuildCommand(c BuildCommand, targets map[string]bool) error {
 	files := 0
 	for _, p := range c.Params {
 		// A file param is a task file core sends the minion with the task
-		// (docs: contracts/minion-messages.md, Core sending a file): one
+		// (docs: contracts/minion-messages.md, Core sending a file), a
+		// stream param one core streams it as it is uploaded: one of either
 		// a task at most.
-		if err := checkFieldSpec(p, true); err != nil {
+		if err := checkCommandParam(p); err != nil {
 			return fmt.Errorf("param %q: %w", p.Key, err)
 		}
 		if params[p.Key] {
 			return fmt.Errorf("duplicate param %q", p.Key)
 		}
 		params[p.Key] = true
-		if p.Type == FieldFile {
+		if p.Type == FieldFile || p.Type == FieldStream {
 			if files++; files > 1 {
-				return fmt.Errorf("param %q: a command takes one file param at most", p.Key)
+				return fmt.Errorf("param %q: a command takes one file or stream param at most", p.Key)
 			}
 		}
 	}
@@ -499,4 +500,22 @@ func ValidateFile(f FieldSpec, file BuildFile) error {
 		}
 	}
 	return fmt.Errorf("must be one of: %s", strings.Join(f.Accept, ", "))
+}
+
+// checkCommandParam checks a command's param: a field spec of a build
+// schema, or a stream, which is a command's only: a name, no default, no
+// rules of a file's.
+func checkCommandParam(p FieldSpec) error {
+	if p.Type != FieldStream {
+		return checkFieldSpec(p, true)
+	}
+	switch {
+	case !keyPattern.MatchString(p.Key):
+		return fmt.Errorf("key must match %s", keyPattern)
+	case p.Default != nil:
+		return fmt.Errorf("a stream has no default")
+	case len(p.Accept) > 0 || p.MaxSize != 0 || len(p.Options) > 0 || p.Pattern != "" || p.Min != nil || p.Max != nil:
+		return fmt.Errorf("a stream takes no rules")
+	}
+	return validateText(p.Label, p.Description)
 }

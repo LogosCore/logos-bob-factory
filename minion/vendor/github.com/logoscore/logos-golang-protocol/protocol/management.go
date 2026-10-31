@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -56,6 +57,7 @@ const (
 	FieldDatetime   FieldType = "datetime"    // RFC 3339 timestamp string
 	FieldEnumList   FieldType = "enum_list"   // JSON array of distinct option values
 	FieldFile       FieldType = "file"        // a file's id: a build file, or a command's task file; build schemas only
+	FieldStream     FieldType = "stream"      // a file's name: one core streams the minion as it is uploaded; command params only
 )
 
 // ApplyMode says whether a property change takes effect immediately or only
@@ -644,6 +646,14 @@ func ValidateValue(f FieldSpec, v any) error {
 				return fmt.Errorf("%q is listed twice", s)
 			}
 			seen[s] = true
+		}
+	case FieldStream:
+		s, ok := v.(string)
+		switch {
+		case !ok || s == "":
+			return fmt.Errorf("must be a file name")
+		case len(s) > 255 || strings.ContainsAny(s, "/\\\x00"):
+			return fmt.Errorf("a file name without a path, at most 255 bytes")
 		}
 	case FieldFile:
 		s, ok := v.(string)

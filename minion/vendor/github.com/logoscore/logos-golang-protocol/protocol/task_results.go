@@ -48,6 +48,10 @@ const (
 	// ActionStreamFile streams a file to whoever downloads it: core gives
 	// path; the command's result is a ResultFileStream.
 	ActionStreamFile = "stream_file"
+	// ActionUploadStream puts a file on the host streamed as it is
+	// uploaded: core gives path, stream and overwrite; the command's result
+	// is a ResultFileUpload.
+	ActionUploadStream = "upload_stream"
 )
 
 // results are the results this version defines.
@@ -74,6 +78,8 @@ var actions = map[string]CommandAction{
 	ActionUploadFile: {Params: map[string]FieldType{"path": FieldString, "file": FieldFile, "overwrite": FieldBool},
 		Result: ResultFileUpload},
 	ActionStreamFile: {Params: map[string]FieldType{"path": FieldString}, Result: ResultFileStream},
+	ActionUploadStream: {Params: map[string]FieldType{"path": FieldString, "stream": FieldStream, "overwrite": FieldBool},
+		Result: ResultFileUpload},
 }
 
 // KnownResult reports whether this version defines the result.

@@ -98,9 +98,14 @@ func ReadFileDownload(seq uint64, data cbor.RawMessage) (*FileDownload, error) {
 type FileOffer struct {
 	Xfer []byte `cbor:"xfer" json:"xfer"`
 	// Name is the file's name as uploaded: no path.
-	Name   string `cbor:"name" json:"name"`
-	Size   uint64 `cbor:"size" json:"size"`
-	SHA256 []byte `cbor:"sha256" json:"sha256"`
+	Name string `cbor:"name" json:"name"`
+	// Size and SHA256 are the whole's; a stream's are not known when the
+	// task goes: its first chunk says the size, its last the SHA-256.
+	Size   uint64 `cbor:"size,omitempty" json:"size,omitempty"`
+	SHA256 []byte `cbor:"sha256,omitempty" json:"sha256,omitempty"`
+	// Stream: the file comes as its uploader sends it to core (docs:
+	// contracts/minion-messages.md, Streaming a file to a minion).
+	Stream bool `cbor:"stream,omitempty" json:"stream,omitempty"`
 }
 
 // Validate checks the ids and the name.
@@ -108,8 +113,10 @@ func (o FileOffer) Validate() error {
 	switch {
 	case len(o.Xfer) != 16:
 		return errors.New("file: xfer is 16 bytes")
-	case len(o.SHA256) != 32:
+	case !o.Stream && len(o.SHA256) != 32:
 		return errors.New("file: sha256 is 32 bytes")
+	case o.Stream && (o.SHA256 != nil || o.Size != 0):
+		return errors.New("file: a stream's size and sha256 come with its chunks")
 	case o.Name == "" || strings.ContainsAny(o.Name, "/\\\x00"):
 		return fmt.Errorf("file: a name without a path (%q)", o.Name)
 	}
