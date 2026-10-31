@@ -267,6 +267,10 @@ type AckItem struct {
 	Tasks [][]byte `cbor:"tasks,omitempty"`
 	Xfer  []byte   `cbor:"xfer,omitempty"`
 	Next  *uint64  `cbor:"next,omitempty"`
+	// Hold, with Xfer: send nothing more of the transfer until an ack
+	// without it (a stream waiting for its downloader; docs:
+	// contracts/minion-messages.md, Streaming a file).
+	Hold bool `cbor:"hold,omitempty"`
 }
 
 // Validate checks the ids, and that a transfer comes with its offset.
@@ -281,6 +285,8 @@ func (a AckItem) Validate() error {
 		return errors.New("ack: xfer and next come together")
 	case a.Xfer != nil && len(a.Xfer) != 16:
 		return errors.New("ack: xfer is 16 bytes")
+	case a.Hold && a.Xfer == nil:
+		return errors.New("ack: hold comes with xfer")
 	}
 	return nil
 }

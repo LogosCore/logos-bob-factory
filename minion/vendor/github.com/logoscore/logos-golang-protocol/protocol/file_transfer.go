@@ -167,3 +167,33 @@ func ReadFileUpload(seq uint64, data cbor.RawMessage) (*FileUpload, error) {
 	}
 	return &f, nil
 }
+
+// FileStream is a file_stream task's data: the file the minion streamed in
+// transfer Xfer, its path on the host and size, and its SHA-256 when the
+// minion read it whole, in order (a stream resumed from the middle may end
+// without one). Core keeps none of it.
+type FileStream struct {
+	Xfer   []byte `cbor:"xfer" json:"xfer"`
+	Path   string `cbor:"path" json:"path"`
+	Size   uint64 `cbor:"size" json:"size"`
+	SHA256 []byte `cbor:"sha256,omitempty" json:"sha256,omitempty"`
+	// X holds a factory's own fields.
+	X map[string]any `cbor:"x,omitempty" json:"x,omitempty"`
+}
+
+// ReadFileStream decodes a file_stream part's data and checks it.
+func ReadFileStream(seq uint64, data cbor.RawMessage) (*FileStream, error) {
+	var f FileStream
+	if err := cborDec.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("file_stream: %w", err)
+	}
+	switch {
+	case len(f.Xfer) != 16:
+		return nil, errors.New("file_stream: xfer is 16 bytes")
+	case f.Path == "":
+		return nil, errors.New("file_stream: a path")
+	case f.SHA256 != nil && len(f.SHA256) != 32:
+		return nil, errors.New("file_stream: sha256 is 32 bytes")
+	}
+	return &f, nil
+}

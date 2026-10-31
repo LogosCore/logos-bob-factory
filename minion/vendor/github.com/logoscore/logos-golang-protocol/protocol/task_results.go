@@ -29,6 +29,9 @@ const (
 	// ResultFileUpload is a file core sent the minion (FileUpload): the
 	// data says where it went.
 	ResultFileUpload = "file_upload"
+	// ResultFileStream is a file the minion streamed to whoever downloaded
+	// it (FileStream): core keeps none of it, the data says which file.
+	ResultFileStream = "file_stream"
 )
 
 // Actions.
@@ -42,6 +45,9 @@ const (
 	// ActionUploadFile puts a file on the host: core gives path, file (a
 	// task file) and overwrite; the command's result is a ResultFileUpload.
 	ActionUploadFile = "upload_file"
+	// ActionStreamFile streams a file to whoever downloads it: core gives
+	// path; the command's result is a ResultFileStream.
+	ActionStreamFile = "stream_file"
 )
 
 // results are the results this version defines.
@@ -49,6 +55,7 @@ var results = map[string]bool{
 	ResultDirListing:   true,
 	ResultFileDownload: true,
 	ResultFileUpload:   true,
+	ResultFileStream:   true,
 }
 
 // CommandAction is an action's contract: the params core gives when it runs a
@@ -66,6 +73,7 @@ var actions = map[string]CommandAction{
 	ActionDownloadFile: {Params: map[string]FieldType{"path": FieldString}, Result: ResultFileDownload},
 	ActionUploadFile: {Params: map[string]FieldType{"path": FieldString, "file": FieldFile, "overwrite": FieldBool},
 		Result: ResultFileUpload},
+	ActionStreamFile: {Params: map[string]FieldType{"path": FieldString}, Result: ResultFileStream},
 }
 
 // KnownResult reports whether this version defines the result.
