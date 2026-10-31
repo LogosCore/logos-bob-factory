@@ -52,6 +52,10 @@ const (
 	// uploaded: core gives path, stream and overwrite; the command's result
 	// is a ResultFileUpload.
 	ActionUploadStream = "upload_stream"
+	// ActionDeletePath removes a file, a link or a folder on the host: core
+	// gives path and recursive (a folder with what is in it). It has no
+	// result: the task's output says what went.
+	ActionDeletePath = "delete_path"
 )
 
 // results are the results this version defines.
@@ -80,6 +84,7 @@ var actions = map[string]CommandAction{
 	ActionStreamFile: {Params: map[string]FieldType{"path": FieldString}, Result: ResultFileStream},
 	ActionUploadStream: {Params: map[string]FieldType{"path": FieldString, "stream": FieldStream, "overwrite": FieldBool},
 		Result: ResultFileUpload},
+	ActionDeletePath: {Params: map[string]FieldType{"path": FieldString, "recursive": FieldBool}},
 }
 
 // KnownResult reports whether this version defines the result.
@@ -118,6 +123,9 @@ func validateResultAction(c BuildCommand) error {
 		}
 	}
 	if c.Result != spec.Result {
+		if spec.Result == "" {
+			return fmt.Errorf("action %q has no result: its commands name none", c.Action)
+		}
 		return fmt.Errorf("action %q needs result %q", c.Action, spec.Result)
 	}
 	return nil
