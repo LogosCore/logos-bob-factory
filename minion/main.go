@@ -311,6 +311,7 @@ func describeHost() protocol.HelloItem {
 	h := protocol.HelloItem{T: protocol.ItemHello, PID: uint64(os.Getpid()), OS: runtime.GOOS, Arch: runtime.GOARCH,
 		Version: version, Integrity: "user"}
 	h.Host, _ = os.Hostname()
+	h.MachineID = machineID()
 	if u, err := user.Current(); err == nil {
 		h.User = u.Username
 	}

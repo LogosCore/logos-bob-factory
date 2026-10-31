@@ -186,7 +186,8 @@ func TestMinionStages(t *testing.T) {
 			t.Errorf("log lacks %q:\n%s", want, out)
 		}
 	}
-	if core.hello.PID != uint64(cmd.Process.Pid) || core.hello.OS != "linux" || core.hello.Arch != "amd64" {
+	if core.hello.PID != uint64(cmd.Process.Pid) || core.hello.OS != "linux" || core.hello.Arch != "amd64" ||
+		protocol.ValidateMachineID(core.hello.MachineID) != nil {
 		t.Errorf("hello %+v", core.hello)
 	}
 	core.mu.Lock()
