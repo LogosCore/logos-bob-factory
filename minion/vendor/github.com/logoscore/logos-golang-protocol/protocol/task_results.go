@@ -22,14 +22,23 @@ const HandlerDirListing = "dir_listing"
 // handlerIDPattern is what a handler's id matches.
 var handlerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
 
+// handlerParams are each handler's own params: what core gives when it
+// runs a command of the handler itself (a folder opened in a listing).
+var handlerParams = map[string]map[string]FieldType{
+	HandlerDirListing: {"path": FieldString},
+}
+
 // KnownHandler reports whether this version of the protocol defines the
 // handler. A command may name one it does not: its data is then shown raw.
 func KnownHandler(id string) bool {
-	return id == HandlerDirListing
+	_, ok := handlerParams[id]
+	return ok
 }
 
 // validateHandler checks a command's handler: its id, and for a handler
-// this version defines, the command's params against its contract.
+// this version defines, the command's params against its contract. The
+// command has the handler's params, of their types; any other param it
+// takes has a default, so core can run it with the handler's params alone.
 func validateHandler(c BuildCommand) error {
 	if c.Handler == "" {
 		return nil
@@ -37,10 +46,24 @@ func validateHandler(c BuildCommand) error {
 	if !handlerIDPattern.MatchString(c.Handler) {
 		return fmt.Errorf("handler must match %s", handlerIDPattern)
 	}
-	if c.Handler == HandlerDirListing {
-		i := slices.IndexFunc(c.Params, func(p FieldSpec) bool { return p.Key == "path" })
-		if i < 0 || c.Params[i].Type != FieldString {
-			return fmt.Errorf("handler %q takes a string param \"path\"", HandlerDirListing)
+	own, known := handlerParams[c.Handler]
+	if !known {
+		return nil
+	}
+	keys := make([]string, 0, len(own))
+	for k := range own {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		i := slices.IndexFunc(c.Params, func(p FieldSpec) bool { return p.Key == k })
+		if i < 0 || c.Params[i].Type != own[k] {
+			return fmt.Errorf("handler %q takes a %s param %q", c.Handler, own[k], k)
+		}
+	}
+	for _, p := range c.Params {
+		if _, ok := own[p.Key]; !ok && p.Default == nil {
+			return fmt.Errorf("param %q needs a default: core runs a %s command with the handler's params alone", p.Key, c.Handler)
 		}
 	}
 	return nil
