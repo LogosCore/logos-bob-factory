@@ -32,7 +32,7 @@ const maxOutPerMessage = 512 << 10
 
 // lsChunk is how many directory entries one result part carries: a
 // dir_listing's parts join their entries (docs:
-// contracts/task-result-handlers.md), so a big directory goes in parts that
+// contracts/task-results-and-actions.md), so a big directory goes in parts that
 // each fit a message.
 const lsChunk = 500
 

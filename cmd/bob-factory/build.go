@@ -82,7 +82,8 @@ var buildSchema = protocol.BuildSchema{
 		{ID: "exit", Label: "Exit", Required: true, Description: "Stops the minion for good."},
 		{ID: "hello", Label: "Say hello", Default: true, Description: "Answers with the build's greeting."},
 		{
-			ID: "ls", Label: "List a directory", Default: true, Handler: protocol.HandlerDirListing,
+			ID: "ls", Label: "List a directory", Default: true,
+			Result: protocol.ResultDirListing, Action: protocol.ActionListDir,
 			Params: []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Default: "."}},
 		},
 		{

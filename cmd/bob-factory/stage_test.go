@@ -383,7 +383,7 @@ func TestMinionRunsTasks(t *testing.T) {
 		t.Errorf("shell: ok %v exit %v out %q", *last.OK, last.Exit, out)
 	}
 	// An ls's parts are a dir_listing: the first names the directory, every
-	// one reads as the handler says.
+	// one reads as the dir_listing result says.
 	listing := func(task byte) (*protocol.DirListing, int) {
 		var first *protocol.DirListing
 		n := 0
