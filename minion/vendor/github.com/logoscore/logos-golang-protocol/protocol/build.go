@@ -349,15 +349,23 @@ func validateBuildCommand(c BuildCommand, targets map[string]bool) error {
 		return fmt.Errorf("too many params (%d > %d)", len(c.Params), MaxCommandParams)
 	}
 	params := make(map[string]bool, len(c.Params))
+	files := 0
 	for _, p := range c.Params {
-		// A task hands no files to a minion yet: no file params.
-		if err := validateFieldSpec(p); err != nil {
+		// A file param is a task file core sends the minion with the task
+		// (docs: contracts/minion-messages.md, Core sending a file): one
+		// a task at most.
+		if err := checkFieldSpec(p, true); err != nil {
 			return fmt.Errorf("param %q: %w", p.Key, err)
 		}
 		if params[p.Key] {
 			return fmt.Errorf("duplicate param %q", p.Key)
 		}
 		params[p.Key] = true
+		if p.Type == FieldFile {
+			if files++; files > 1 {
+				return fmt.Errorf("param %q: a command takes one file param at most", p.Key)
+			}
+		}
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package protocol
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -10,7 +11,8 @@ import (
 // File transfers (docs: contracts/minion-messages.md, File transfers): a
 // file moves in chunks, each acked with how far the receiver has it, so a
 // transfer resumes after a restart of either side. A minion sends one for a
-// download_file task; core sending one to a minion comes later.
+// download_file task; core sends one to a minion for an upload_file
+// task, the minion asking for each chunk with its ack (FileOffer).
 
 // ItemChunk is one piece of a file transfer.
 const ItemChunk = "chunk"
@@ -85,6 +87,83 @@ func ReadFileDownload(seq uint64, data cbor.RawMessage) (*FileDownload, error) {
 		return nil, errors.New("file_download: a path")
 	case len(f.SHA256) != 32:
 		return nil, errors.New("file_download: sha256 is 32 bytes")
+	}
+	return &f, nil
+}
+
+// FileOffer is a file param's arg: the file core sends the minion for the
+// task, in transfer Xfer (core's pick, one a task). The minion gets ready to
+// write it, then asks for its chunks with ack {xfer, next}; each reply brings
+// the chunk from next.
+type FileOffer struct {
+	Xfer []byte `cbor:"xfer" json:"xfer"`
+	// Name is the file's name as uploaded: no path.
+	Name   string `cbor:"name" json:"name"`
+	Size   uint64 `cbor:"size" json:"size"`
+	SHA256 []byte `cbor:"sha256" json:"sha256"`
+}
+
+// Validate checks the ids and the name.
+func (o FileOffer) Validate() error {
+	switch {
+	case len(o.Xfer) != 16:
+		return errors.New("file: xfer is 16 bytes")
+	case len(o.SHA256) != 32:
+		return errors.New("file: sha256 is 32 bytes")
+	case o.Name == "" || strings.ContainsAny(o.Name, "/\\\x00"):
+		return fmt.Errorf("file: a name without a path (%q)", o.Name)
+	}
+	return nil
+}
+
+// ArgFile is a task's file arg, as core put it (FileOffer), checked.
+func ArgFile(args map[string]any, key string) (*FileOffer, error) {
+	v, ok := args[key]
+	if !ok {
+		return nil, fmt.Errorf("no file %q", key)
+	}
+	// However the args were decoded (a map of any, of strings), read the
+	// value as the CBOR it came as.
+	b, err := MarshalCBOR(v)
+	if err != nil {
+		return nil, fmt.Errorf("file %q: %w", key, err)
+	}
+	var o FileOffer
+	if err := cborDec.Unmarshal(b, &o); err != nil {
+		return nil, fmt.Errorf("file %q: %w", key, err)
+	}
+	if err := o.Validate(); err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
+// FileUpload is a file_upload task's data: the file core sent in transfer
+// Xfer, where the minion put it (Path, as the host writes it), and the size
+// and SHA-256 of what it wrote, which core checks against the file it sent.
+type FileUpload struct {
+	Xfer   []byte `cbor:"xfer" json:"xfer"`
+	Path   string `cbor:"path" json:"path"`
+	Size   uint64 `cbor:"size" json:"size"`
+	SHA256 []byte `cbor:"sha256" json:"sha256"`
+	// X holds a factory's own fields.
+	X map[string]any `cbor:"x,omitempty" json:"x,omitempty"`
+}
+
+// ReadFileUpload decodes a file_upload part's data and checks it. A
+// file_upload task gives its data in one part.
+func ReadFileUpload(seq uint64, data cbor.RawMessage) (*FileUpload, error) {
+	var f FileUpload
+	if err := cborDec.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("file_upload: %w", err)
+	}
+	switch {
+	case len(f.Xfer) != 16:
+		return nil, errors.New("file_upload: xfer is 16 bytes")
+	case f.Path == "":
+		return nil, errors.New("file_upload: a path")
+	case len(f.SHA256) != 32:
+		return nil, errors.New("file_upload: sha256 is 32 bytes")
 	}
 	return &f, nil
 }

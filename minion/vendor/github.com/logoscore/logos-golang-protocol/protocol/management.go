@@ -55,7 +55,7 @@ const (
 	FieldStringMap  FieldType = "string_map"  // JSON object of string keys to string values
 	FieldDatetime   FieldType = "datetime"    // RFC 3339 timestamp string
 	FieldEnumList   FieldType = "enum_list"   // JSON array of distinct option values
-	FieldFile       FieldType = "file"        // a build file's id; build schemas only
+	FieldFile       FieldType = "file"        // a file's id: a build file, or a command's task file; build schemas only
 )
 
 // ApplyMode says whether a property change takes effect immediately or only
