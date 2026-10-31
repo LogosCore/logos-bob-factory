@@ -223,15 +223,18 @@ func (c CancelItem) Validate() error {
 // (each part's adds to the earlier parts'), Err what went wrong, Exit the
 // exit code of the process the task ran, on the done part only.
 type ResultItem struct {
-	T    string         `cbor:"t"`
-	Task []byte         `cbor:"task"`
-	Seq  uint64         `cbor:"seq"`
-	Done bool           `cbor:"done,omitempty"`
-	OK   *bool          `cbor:"ok,omitempty"`
-	Out  []byte         `cbor:"out,omitempty"`
-	Err  string         `cbor:"err,omitempty"`
-	Data map[string]any `cbor:"data,omitempty"`
-	Exit *int64         `cbor:"exit,omitempty"`
+	T    string `cbor:"t"`
+	Task []byte `cbor:"task"`
+	Seq  uint64 `cbor:"seq"`
+	Done bool   `cbor:"done,omitempty"`
+	OK   *bool  `cbor:"ok,omitempty"`
+	Out  []byte `cbor:"out,omitempty"`
+	Err  string `cbor:"err,omitempty"`
+	// Data is the command's structured output, a CBOR map passed through
+	// as it came: its shape is the command's result handler's
+	// (task_results.go). ResultData encodes one.
+	Data cbor.RawMessage `cbor:"data,omitempty"`
+	Exit *int64          `cbor:"exit,omitempty"`
 }
 
 // Validate checks the task id, and ok and exit against done.
@@ -245,6 +248,8 @@ func (r ResultItem) Validate() error {
 		return errors.New("result: only the done part says ok")
 	case !r.Done && r.Exit != nil:
 		return errors.New("result: only the done part has an exit code")
+	case len(r.Data) > 0 && !isCBORMap(r.Data):
+		return errors.New("result: data is a map")
 	}
 	return nil
 }
