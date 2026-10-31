@@ -36,6 +36,10 @@ const maxOutPerMessage = 512 << 10
 // each fit a message.
 const lsChunk = 500
 
+// streamPoll is how often the minion checks in while a stream that ran is
+// held (docs: contracts/minion-messages.md, Streaming a file).
+const streamPoll = time.Second
+
 // taskMemory is how long the minion remembers a task id.
 const taskMemory = 24 * time.Hour
 
@@ -239,7 +243,7 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 		case protocol.ItemAck:
 			var a protocol.AckItem
 			if protocol.UnmarshalCBOR(raw, &a) == nil && a.Validate() == nil && a.Xfer != nil {
-				r.acked(a.Xfer, *a.Next)
+				r.acked(a.Xfer, *a.Next, a.Hold)
 			}
 		case protocol.ItemErr:
 			var e protocol.ErrItem
@@ -278,18 +282,45 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 	}
 }
 
-// acked takes how far core has a file: all of it ends the transfer.
-func (r *runner) acked(xfer []byte, next uint64) {
+// acked takes how far core has a file: all of it ends the transfer. For a
+// stream it is where to send from (it may go back: a download resumed
+// from earlier), and hold says to wait; the whole without hold ends it.
+func (r *runner) acked(xfer []byte, next uint64, hold bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, t := range r.tasks {
-		if x := t.xfer; x != nil && slices.Equal(x.id, xfer) && !x.over {
-			x.acked, x.waiting = min(next, x.total), false
-			if x.acked == x.total && x.hashed == x.total {
-				x.finish("")
+		x := t.xfer
+		if x == nil || !slices.Equal(x.id, xfer) || x.over {
+			continue
+		}
+		x.acked, x.waiting = min(next, x.total), false
+		if x.stream {
+			x.announced, x.held = true, hold
+			if !hold {
+				x.started = true
+				if x.acked == x.total {
+					x.finish("")
+				}
 			}
+			continue
+		}
+		if x.acked == x.total && x.hashed == x.total {
+			x.finish("")
 		}
 	}
+}
+
+// pollEvery is how soon to check in while a stream that ran is held: its
+// downloader may come back, or catch up, any moment. Zero: the schedule.
+func (r *runner) pollEvery() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, t := range r.tasks {
+		if x := t.xfer; x != nil && x.stream && x.started && x.held && !x.over {
+			return streamPoll
+		}
+	}
+	return 0
 }
 
 // refused ends a transfer core does not take, or does not send.
@@ -422,6 +453,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.ls(t, ti.Args)
 	case "download":
 		r.download(ctx, t, ti.Args)
+	case "stream_download":
+		r.sendFile(ctx, t, ti.Args, true)
 	case "upload":
 		r.upload(ctx, t, ti.Args)
 	case "shell":

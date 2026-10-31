@@ -42,9 +42,25 @@ type transfer struct {
 	end  chan struct{}
 	err  string
 	over bool
+
+	// A stream (stream.go): announced once core acked the empty first
+	// chunk; held while core's last ack said hold; started once an ack
+	// without hold came. gap: a chunk was read past what is hashed (a
+	// download resumed ahead), so the whole's SHA-256 is not known.
+	stream    bool
+	announced bool
+	held      bool
+	started   bool
+	gap       bool
 }
 
 func (r *runner) download(ctx context.Context, t *task, args map[string]any) {
+	r.sendFile(ctx, t, args, false)
+}
+
+// sendFile sends a file core asked for: as a download, or as a stream
+// (stream.go), which ends with other data.
+func (r *runner) sendFile(ctx context.Context, t *task, args map[string]any, stream bool) {
 	path, _ := protocol.ArgString(args, "path")
 	if path == "" {
 		r.end(t, false, nil, "no path")
@@ -72,7 +88,7 @@ func (r *runner) download(ctx context.Context, t *task, args map[string]any) {
 	}
 	id := make([]byte, 16)
 	_, _ = rand.Read(id)
-	x := &transfer{id: id, path: abs, file: f, total: uint64(info.Size()), sum: sha256.New(), end: make(chan struct{})}
+	x := &transfer{id: id, path: abs, file: f, total: uint64(info.Size()), sum: sha256.New(), end: make(chan struct{}), stream: stream}
 	r.mu.Lock()
 	t.xfer = x
 	r.mu.Unlock()
@@ -93,7 +109,18 @@ func (r *runner) download(ctx context.Context, t *task, args map[string]any) {
 		r.end(t, false, nil, failed)
 		return
 	}
-	r.write(t, nil, protocol.FileDownload{Xfer: id, Path: abs, Size: x.total, SHA256: x.sum.Sum(nil)})
+	if stream {
+		r.mu.Lock()
+		var sum []byte
+		if !x.gap && x.hashed == x.total {
+			sum = x.sum.Sum(nil)
+		}
+		r.mu.Unlock()
+		r.write(t, []byte(fmt.Sprintf("%s: %d bytes streamed\n", abs, x.total)),
+			protocol.FileStream{Xfer: id, Path: abs, Size: x.total, SHA256: sum})
+	} else {
+		r.write(t, nil, protocol.FileDownload{Xfer: id, Path: abs, Size: x.total, SHA256: x.sum.Sum(nil)})
+	}
 	r.end(t, true, nil, "")
 }
 
@@ -108,12 +135,19 @@ func (x *transfer) finish(err string) {
 
 // sending: the transfer has a chunk to put in the next message.
 func (x *transfer) sending() bool {
-	return x != nil && !x.over && !x.waiting
+	return x != nil && !x.over && !x.waiting && !x.held
 }
 
 // chunk is the next chunk, of at most room bytes, read from the file and
 // hashed on its first read. Under r.mu.
 func (x *transfer) chunk(t *task, room int) (protocol.ChunkItem, error) {
+	if x.stream && !x.announced {
+		// A stream announces the file first, without data, until core
+		// acks it.
+		total := x.total
+		x.waiting = true
+		return protocol.ChunkItem{T: protocol.ItemChunk, Xfer: x.id, Total: &total, Task: t.id, Name: x.path, Data: []byte{}}, nil
+	}
 	n := min(uint64(min(room, protocol.MaxChunkData)), x.total-x.acked)
 	data := make([]byte, n)
 	if _, err := x.file.ReadAt(data, int64(x.acked)); err != nil && !errors.Is(err, io.EOF) {
@@ -121,7 +155,12 @@ func (x *transfer) chunk(t *task, room int) (protocol.ChunkItem, error) {
 	} else if errors.Is(err, io.EOF) {
 		return protocol.ChunkItem{}, fmt.Errorf("%s got shorter while sent", x.path)
 	}
-	if end := x.acked + n; end > x.hashed {
+	if x.acked > x.hashed {
+		// Read ahead of the hash (a stream resumed from further on): the
+		// whole's SHA-256 is not known.
+		x.gap = true
+	}
+	if end := x.acked + n; !x.gap && end > x.hashed {
 		x.sum.Write(data[x.hashed-x.acked:])
 		x.hashed = end
 	}
@@ -130,7 +169,7 @@ func (x *transfer) chunk(t *task, room int) (protocol.ChunkItem, error) {
 		total := x.total
 		c.Total, c.Task, c.Name = &total, t.id, x.path
 	}
-	if x.acked+n == x.total {
+	if x.acked+n == x.total && !x.gap && x.hashed == x.total {
 		c.SHA256 = x.sum.Sum(nil)
 	}
 	x.waiting = true

@@ -93,6 +93,12 @@ var buildSchema = protocol.BuildSchema{
 			Params: []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true}},
 		},
 		{
+			ID: "stream_download", Label: "Stream a file",
+			Description: "Streams a file of any size from the minion's host to whoever downloads it; core keeps none of it.",
+			Result:      protocol.ResultFileStream, Action: protocol.ActionStreamFile,
+			Params: []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true}},
+		},
+		{
 			ID: "upload", Label: "Upload a file",
 			Description: "Puts a file from core on the minion's host.",
 			Result:      protocol.ResultFileUpload, Action: protocol.ActionUploadFile,

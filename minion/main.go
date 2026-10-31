@@ -148,6 +148,9 @@ func session(conn connection, sched schedule, d description, buildID [16]byte, k
 	for n := 1; ; n++ {
 		if !tasks.pending() {
 			wait := sched.next()
+			if p := tasks.pollEvery(); p > 0 && p < wait {
+				wait = p
+			}
 			log.Printf("next check-in in %s", wait.Round(time.Millisecond))
 			select {
 			case <-time.After(wait):
