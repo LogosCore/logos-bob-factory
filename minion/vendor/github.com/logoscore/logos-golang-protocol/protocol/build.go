@@ -136,10 +136,14 @@ type BuildCommand struct {
 	// Params are what a task of the command takes: field specs as a
 	// management action's, file aside.
 	Params []FieldSpec `json:"params,omitempty"`
-	// Handler is the core result handler whose shape the command's data
-	// follows (HandlerDirListing); empty: no declared shape
-	// (task_results.go).
-	Handler string `json:"handler,omitempty"`
+	// Result is what the command's data is: one of core's results
+	// (ResultDirListing), which says its shape and how it is shown; empty:
+	// no declared shape, shown raw (task_results.go).
+	Result string `json:"result,omitempty"`
+	// Action is what core can ask the command to do itself: one of core's
+	// actions (ActionListDir), which says the params it gives and the
+	// result it needs; empty: core never runs it on its own.
+	Action string `json:"action,omitempty"`
 }
 
 // For reports whether a build of target id can have the command.
@@ -330,7 +334,7 @@ func validateBuildCommand(c BuildCommand, targets map[string]bool) error {
 	if err := validateText(c.Label, c.Description); err != nil {
 		return err
 	}
-	if err := validateHandler(c); err != nil {
+	if err := validateResultAction(c); err != nil {
 		return err
 	}
 	for i, t := range c.Targets {

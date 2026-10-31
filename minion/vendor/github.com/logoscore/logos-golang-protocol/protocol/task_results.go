@@ -3,70 +3,103 @@ package protocol
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/fxamacker/cbor/v2"
 )
 
-// Task result handlers (docs: contracts/task-result-handlers.md): named
-// shapes of a task's data, defined here and the same for every factory. A
-// build command names one (BuildCommand.Handler); its minion sends the
-// data in that shape, and core checks the parts, joins them, and shows
-// them with the handler's view.
+// Task results and actions (docs: contracts/task-results-and-actions.md):
+// the vocabulary a build command picks from, defined here and in core,
+// the same for every factory. A command's result (BuildCommand.Result)
+// says what its data is: its minion sends the data in that shape, and core
+// checks the parts, joins them and shows them with the result's view. A
+// command's action (BuildCommand.Action) says what core can ask it to do
+// itself: the params core gives, and the result the command must have. A
+// factory picks from these only: a name this version does not know is
+// refused, so a typo shows when the factory starts, not as raw data.
 
-// HandlerDirListing is one directory's entries (DirListing).
-const HandlerDirListing = "dir_listing"
+// Results.
+const (
+	// ResultDirListing is one directory's entries (DirListing).
+	ResultDirListing = "dir_listing"
+)
 
-// handlerIDPattern is what a handler's id matches.
-var handlerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+// Actions.
+const (
+	// ActionListDir lists a directory: core gives path; the command's
+	// result is a ResultDirListing.
+	ActionListDir = "list_dir"
+)
 
-// handlerParams are each handler's own params: what core gives when it
-// runs a command of the handler itself (a folder opened in a listing).
-var handlerParams = map[string]map[string]FieldType{
-	HandlerDirListing: {"path": FieldString},
+// results are the results this version defines.
+var results = map[string]bool{
+	ResultDirListing: true,
 }
 
-// KnownHandler reports whether this version of the protocol defines the
-// handler. A command may name one it does not: its data is then shown raw.
-func KnownHandler(id string) bool {
-	_, ok := handlerParams[id]
-	return ok
+// CommandAction is an action's contract: the params core gives when it runs a
+// command of the action (each of a type), and the result the command's data
+// must be, so what core does with it next works (a folder listed opens in
+// the file browser).
+type CommandAction struct {
+	Params map[string]FieldType
+	Result string
 }
 
-// validateHandler checks a command's handler: its id, and for a handler
-// this version defines, the command's params against its contract. The
-// command has the handler's params, of their types; any other param it
-// takes has a default, so core can run it with the handler's params alone.
-func validateHandler(c BuildCommand) error {
-	if c.Handler == "" {
+// actions are the actions this version defines.
+var actions = map[string]CommandAction{
+	ActionListDir: {Params: map[string]FieldType{"path": FieldString}, Result: ResultDirListing},
+}
+
+// KnownResult reports whether this version defines the result.
+func KnownResult(id string) bool { return results[id] }
+
+// KnownAction is an action's contract, if this version defines it.
+func KnownAction(id string) (CommandAction, bool) {
+	a, ok := actions[id]
+	return a, ok
+}
+
+// validateResultAction checks a command's result and action: each one this
+// version defines; the action's params taken, of their types; every other
+// param with a default, so core can run the command with the action's
+// params alone; and the result the action needs.
+func validateResultAction(c BuildCommand) error {
+	if c.Result != "" && !results[c.Result] {
+		return fmt.Errorf("result %q is not one core knows (%s)", c.Result, strings.Join(keysOf(results), ", "))
+	}
+	if c.Action == "" {
 		return nil
 	}
-	if !handlerIDPattern.MatchString(c.Handler) {
-		return fmt.Errorf("handler must match %s", handlerIDPattern)
+	spec, ok := actions[c.Action]
+	if !ok {
+		return fmt.Errorf("action %q is not one core knows (%s)", c.Action, strings.Join(keysOf(actions), ", "))
 	}
-	own, known := handlerParams[c.Handler]
-	if !known {
-		return nil
-	}
-	keys := make([]string, 0, len(own))
-	for k := range own {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	for _, k := range keys {
+	for _, k := range keysOf(spec.Params) {
 		i := slices.IndexFunc(c.Params, func(p FieldSpec) bool { return p.Key == k })
-		if i < 0 || c.Params[i].Type != own[k] {
-			return fmt.Errorf("handler %q takes a %s param %q", c.Handler, own[k], k)
+		if i < 0 || c.Params[i].Type != spec.Params[k] {
+			return fmt.Errorf("action %q takes a %s param %q", c.Action, spec.Params[k], k)
 		}
 	}
 	for _, p := range c.Params {
-		if _, ok := own[p.Key]; !ok && p.Default == nil {
-			return fmt.Errorf("param %q needs a default: core runs a %s command with the handler's params alone", p.Key, c.Handler)
+		if _, own := spec.Params[p.Key]; !own && p.Default == nil {
+			return fmt.Errorf("param %q needs a default: core runs a %s command with the action's params alone", p.Key, c.Action)
 		}
 	}
+	if c.Result != spec.Result {
+		return fmt.Errorf("action %q needs result %q", c.Action, spec.Result)
+	}
 	return nil
+}
+
+// keysOf is a map's keys, sorted.
+func keysOf[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 // DirListing is a dir_listing part's data: Path, Sep and Parent in the

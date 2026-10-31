@@ -237,7 +237,7 @@ type ResultItem struct {
 	Out  []byte `cbor:"out,omitempty"`
 	Err  string `cbor:"err,omitempty"`
 	// Data is the command's structured output, a CBOR map passed through
-	// as it came: its shape is the command's result handler's
+	// as it came: its shape is the command's result's
 	// (task_results.go). ResultData encodes one.
 	Data cbor.RawMessage `cbor:"data,omitempty"`
 	Exit *int64          `cbor:"exit,omitempty"`
