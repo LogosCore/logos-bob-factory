@@ -2,7 +2,7 @@ module github.com/logoscore/logos-bob-factory/minion
 
 go 1.25.7
 
-require github.com/logoscore/logos-golang-protocol v0.10.0
+require github.com/logoscore/logos-golang-protocol v0.11.0
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.6 // indirect

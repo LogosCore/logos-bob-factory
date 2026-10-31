@@ -310,10 +310,18 @@ func ValidateBuildSchema(s BuildSchema) error {
 	return nil
 }
 
+// CommandHelp is core's own command, in every session's console: it lists
+// the commands the session's minion takes, or one command's params. Core
+// answers it; it never goes to a minion, and a schema may not declare it.
+const CommandHelp = "help"
+
 // validateBuildCommand checks a command; targets are the schema's target ids.
 func validateBuildCommand(c BuildCommand, targets map[string]bool) error {
 	if !commandIDPattern.MatchString(c.ID) {
 		return fmt.Errorf("id must match %s", commandIDPattern)
+	}
+	if c.ID == CommandHelp {
+		return fmt.Errorf("%q is core's own command: a factory does not declare it", CommandHelp)
 	}
 	if err := validateText(c.Label, c.Description); err != nil {
 		return err
