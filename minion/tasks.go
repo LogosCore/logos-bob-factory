@@ -54,6 +54,8 @@ type task struct {
 	err     string
 	sentEnd bool
 	cancel  context.CancelFunc
+	// xfer is the file a download sends (download.go); nil for others.
+	xfer *transfer
 }
 
 // runner holds the tasks of a session and what the next message says.
@@ -94,7 +96,7 @@ func (r *runner) pending() bool {
 		return true
 	}
 	for _, t := range r.tasks {
-		if len(t.out) > 0 || len(t.chunks) > 0 || (t.ended && !t.sentEnd) {
+		if len(t.out) > 0 || len(t.chunks) > 0 || (t.ended && !t.sentEnd) || t.xfer.sending() {
 			return true
 		}
 	}
@@ -154,6 +156,19 @@ parts:
 			}
 		}
 	}
+	// A file's next chunk, one per message, in the room left.
+	for _, t := range r.tasks {
+		if !t.xfer.sending() || room == 0 {
+			continue
+		}
+		c, err := t.xfer.chunk(t, room)
+		if err != nil {
+			t.xfer.finish(err.Error())
+			continue
+		}
+		items = append(items, c)
+		room -= len(c.Data)
+	}
 	if !r.busyLocked() {
 		one := uint64(1)
 		items = append(items, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &one})
@@ -177,6 +192,13 @@ func (r *runner) delivered(items []any) (exit bool) {
 	defer r.mu.Unlock()
 	r.inflight = nil
 	r.tasks = slices.DeleteFunc(r.tasks, func(t *task) bool { return t.sentEnd })
+	// A chunk delivered: the next goes from where core's ack says, taken
+	// with the answer; none said, this one again.
+	for _, t := range r.tasks {
+		if t.xfer != nil {
+			t.xfer.waiting = false
+		}
+	}
 	for _, it := range items {
 		if res, ok := it.(protocol.ResultItem); ok && res.Done && r.exitID != nil && slices.Equal(res.Task, r.exitID) {
 			return true
@@ -192,10 +214,24 @@ func (r *runner) failed(items []any) {
 	r.inflight = items
 }
 
-// take reads core's items: tasks to run (each once), cancels.
-func (r *runner) take(answer protocol.CoreMessage) {
+// take reads core's items: tasks to run (each once), cancels, and how far
+// core has a file being sent, or why it does not take it (an err naming one
+// of the sent items, a chunk).
+func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 	for i, raw := range answer.Items {
 		switch protocol.ItemType(raw) {
+		case protocol.ItemAck:
+			var a protocol.AckItem
+			if protocol.UnmarshalCBOR(raw, &a) == nil && a.Validate() == nil && a.Xfer != nil {
+				r.acked(a.Xfer, *a.Next)
+			}
+		case protocol.ItemErr:
+			var e protocol.ErrItem
+			if protocol.UnmarshalCBOR(raw, &e) == nil && e.Item != nil && *e.Item >= 0 && *e.Item < len(sent) {
+				if c, ok := sent[*e.Item].(protocol.ChunkItem); ok {
+					r.refused(c.Xfer, e.Code+": "+e.Msg)
+				}
+			}
 		case protocol.ItemTask:
 			var t protocol.TaskItem
 			if protocol.UnmarshalCBOR(raw, &t) != nil || t.Validate() != nil {
@@ -210,6 +246,31 @@ func (r *runner) take(answer protocol.CoreMessage) {
 				continue
 			}
 			r.stop(c.Task, i)
+		}
+	}
+}
+
+// acked takes how far core has a file: all of it ends the transfer.
+func (r *runner) acked(xfer []byte, next uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, t := range r.tasks {
+		if x := t.xfer; x != nil && slices.Equal(x.id, xfer) && !x.over {
+			x.acked, x.waiting = min(next, x.total), false
+			if x.acked == x.total && x.hashed == x.total {
+				x.finish("")
+			}
+		}
+	}
+}
+
+// refused ends a transfer core does not take.
+func (r *runner) refused(xfer []byte, why string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, t := range r.tasks {
+		if x := t.xfer; x != nil && slices.Equal(x.id, xfer) {
+			x.finish("core refused the file: " + why)
 		}
 	}
 }
@@ -314,6 +375,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.end(t, true, nil, "")
 	case "ls":
 		r.ls(t, ti.Args)
+	case "download":
+		r.download(ctx, t, ti.Args)
 	case "shell":
 		r.shell(ctx, t, ti.Args)
 	case "sleep":

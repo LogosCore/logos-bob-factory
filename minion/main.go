@@ -178,10 +178,11 @@ func session(conn connection, sched schedule, d description, buildID [16]byte, k
 			case protocol.ErrItemSessionReplaced:
 				return fmt.Errorf("check-in %d: %w", n, errReplaced)
 			}
+			// About one of the items (a chunk core does not take): the
+			// tasks see it with the rest of the answer.
 			log.Printf("check-in %d: core says %s: %s; keeping the session", n, e.Code, e.Msg)
-			continue
 		}
-		tasks.take(answer)
+		tasks.take(answer, items)
 		if asked := slices.ContainsFunc(items, func(it any) bool { _, ok := it.(protocol.GetTasksItem); return ok }); asked {
 			log.Printf("check-in %d: get_tasks max 1, %d item(s) sent, %d back", n, len(items), len(answer.Items))
 		} else {

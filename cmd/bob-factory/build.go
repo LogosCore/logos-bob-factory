@@ -89,7 +89,8 @@ var buildSchema = protocol.BuildSchema{
 		{
 			ID: "download", Label: "Download a file",
 			Description: "Sends a file from the minion's host to core.",
-			Params:      []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true}},
+			Result:      protocol.ResultFileDownload, Action: protocol.ActionDownloadFile,
+			Params: []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true}},
 		},
 		{
 			ID: "shell", Label: "Run a shell command",
