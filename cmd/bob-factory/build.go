@@ -93,6 +93,18 @@ var buildSchema = protocol.BuildSchema{
 			Params: []protocol.FieldSpec{{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true}},
 		},
 		{
+			ID: "upload", Label: "Upload a file",
+			Description: "Puts a file from core on the minion's host.",
+			Result:      protocol.ResultFileUpload, Action: protocol.ActionUploadFile,
+			Params: []protocol.FieldSpec{
+				{Key: "file", Type: protocol.FieldFile, Label: "File", Required: true},
+				{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true,
+					Description: "Where it goes on the host; a folder takes it under its own name."},
+				{Key: "overwrite", Type: protocol.FieldBool, Label: "Overwrite", Default: false,
+					Description: "Replace a file already there."},
+			},
+		},
+		{
 			ID: "shell", Label: "Run a shell command",
 			Description: "Runs a command in the system shell and answers with its output.",
 			Params: []protocol.FieldSpec{

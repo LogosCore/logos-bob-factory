@@ -56,6 +56,8 @@ type task struct {
 	cancel  context.CancelFunc
 	// xfer is the file a download sends (download.go); nil for others.
 	xfer *transfer
+	// recv is the file an upload receives (upload.go); nil for others.
+	recv *receiving
 }
 
 // runner holds the tasks of a session and what the next message says.
@@ -96,7 +98,7 @@ func (r *runner) pending() bool {
 		return true
 	}
 	for _, t := range r.tasks {
-		if len(t.out) > 0 || len(t.chunks) > 0 || (t.ended && !t.sentEnd) || t.xfer.sending() {
+		if len(t.out) > 0 || len(t.chunks) > 0 || (t.ended && !t.sentEnd) || t.xfer.sending() || t.recv.asking() || t.recv.telling() {
 			return true
 		}
 	}
@@ -169,6 +171,13 @@ parts:
 		items = append(items, c)
 		room -= len(c.Data)
 	}
+	// A file core sends: the ask for its next chunk, which core's answer
+	// brings.
+	for _, t := range r.tasks {
+		if t.recv.asking() || t.recv.telling() {
+			items = append(items, t.recv.ask())
+		}
+	}
 	if !r.busyLocked() {
 		one := uint64(1)
 		items = append(items, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &one})
@@ -197,6 +206,13 @@ func (r *runner) delivered(items []any) (exit bool) {
 	for _, t := range r.tasks {
 		if t.xfer != nil {
 			t.xfer.waiting = false
+		}
+	}
+	// An ask answered by no chunk (core had no room in its reply) is asked
+	// again; take, after this, clears it too when a chunk came.
+	for _, t := range r.tasks {
+		if t.recv != nil {
+			t.recv.asked = false
 		}
 	}
 	for _, it := range items {
@@ -228,10 +244,22 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 		case protocol.ItemErr:
 			var e protocol.ErrItem
 			if protocol.UnmarshalCBOR(raw, &e) == nil && e.Item != nil && *e.Item >= 0 && *e.Item < len(sent) {
-				if c, ok := sent[*e.Item].(protocol.ChunkItem); ok {
-					r.refused(c.Xfer, e.Code+": "+e.Msg)
+				switch it := sent[*e.Item].(type) {
+				case protocol.ChunkItem:
+					r.refused(it.Xfer, e.Code+": "+e.Msg)
+				case protocol.AckItem:
+					if it.Xfer != nil {
+						r.refused(it.Xfer, e.Code+": "+e.Msg)
+					}
 				}
 			}
+		case protocol.ItemChunk:
+			var c protocol.ChunkItem
+			if protocol.UnmarshalCBOR(raw, &c) != nil || c.Validate() != nil {
+				r.queueErr(protocol.ErrItemBadMessage, "the chunk does not read", i)
+				continue
+			}
+			r.chunk(c, i)
 		case protocol.ItemTask:
 			var t protocol.TaskItem
 			if protocol.UnmarshalCBOR(raw, &t) != nil || t.Validate() != nil {
@@ -264,7 +292,7 @@ func (r *runner) acked(xfer []byte, next uint64) {
 	}
 }
 
-// refused ends a transfer core does not take.
+// refused ends a transfer core does not take, or does not send.
 func (r *runner) refused(xfer []byte, why string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -272,7 +300,24 @@ func (r *runner) refused(xfer []byte, why string) {
 		if x := t.xfer; x != nil && slices.Equal(x.id, xfer) {
 			x.finish("core refused the file: " + why)
 		}
+		if x := t.recv; x != nil && slices.Equal(x.offer.Xfer, xfer) {
+			x.finish("core did not send the file: " + why)
+		}
 	}
+}
+
+// chunk takes a chunk of a file core sends; one for no transfer the minion
+// has gets an unknown_task.
+func (r *runner) chunk(c protocol.ChunkItem, item int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, t := range r.tasks {
+		if x := t.recv; x != nil && slices.Equal(x.offer.Xfer, c.Xfer) {
+			x.take(c)
+			return
+		}
+	}
+	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask, Msg: "no such transfer", Item: &item})
 }
 
 func (r *runner) queueErr(code, msg string, item int) {
@@ -377,6 +422,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.ls(t, ti.Args)
 	case "download":
 		r.download(ctx, t, ti.Args)
+	case "upload":
+		r.upload(ctx, t, ti.Args)
 	case "shell":
 		r.shell(ctx, t, ti.Args)
 	case "sleep":
