@@ -468,6 +468,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.upload(ctx, t, ti.Args, "file")
 	case "stream_upload":
 		r.upload(ctx, t, ti.Args, "stream")
+	case "rm":
+		r.rm(t, ti.Args)
 	case "shell":
 		r.shell(ctx, t, ti.Args)
 	case "sleep":

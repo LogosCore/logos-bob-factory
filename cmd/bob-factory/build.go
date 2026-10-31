@@ -124,6 +124,16 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 		{
+			ID: "rm", Label: "Delete a file or folder",
+			Description: "Removes a file, a link (not what it points to) or a folder on the minion's host; never a filesystem's root.",
+			Action:      protocol.ActionDeletePath,
+			Params: []protocol.FieldSpec{
+				{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true, Order: 1},
+				{Key: "recursive", Type: protocol.FieldBool, Label: "With what is in it", Default: false, Order: 2,
+					Description: "A folder that is not empty goes with everything in it."},
+			},
+		},
+		{
 			ID: "shell", Label: "Run a shell command",
 			Description: "Runs a command in the system shell and answers with its output.",
 			Params: []protocol.FieldSpec{
