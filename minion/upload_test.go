@@ -149,3 +149,63 @@ func TestUploadBadSum(t *testing.T) {
 		t.Fatalf("left %d entries", len(entries))
 	}
 }
+
+// A stream core sends: the offer says no size or SHA-256; core holds the
+// minion while it has nothing, and the minion asks nothing until released;
+// the first chunk says the size, the last the SHA-256.
+func TestUploadStream(t *testing.T) {
+	core := newFakeCore(t, protocol.MaxChunkData+300, "big.iso")
+	offer := core.offer
+	core.offer = protocol.FileOffer{Xfer: offer.Xfer, Name: offer.Name, Stream: true}
+	dir := t.TempDir()
+	r := newRunner(description{Commands: []string{"stream_upload"}}, &schedule{interval: time.Second})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: core.task, Cmd: "stream_upload",
+		Args: map[string]any{"stream": core.offer, "path": dir, "overwrite": false}})
+
+	// The first ask, answered with hold: nothing more is asked.
+	var asked bool
+	for tries := 0; !asked && tries < 5; tries++ {
+		items := nextMessage(t, r)
+		r.delivered(items)
+		for _, it := range items {
+			if a, ok := it.(protocol.AckItem); ok && a.Xfer != nil {
+				asked = true
+			}
+		}
+	}
+	if !asked {
+		t.Fatal("no ask")
+	}
+	zero := uint64(0)
+	r.take(coreSays(t, protocol.AckItem{T: protocol.ItemAck, Xfer: offer.Xfer, Next: &zero, Hold: true}), nil)
+	if r.pending() {
+		t.Fatal("held: still asking")
+	}
+	// Released: it asks, and takes the file as core sends it.
+	r.take(coreSays(t, protocol.AckItem{T: protocol.ItemAck, Xfer: offer.Xfer, Next: &zero}), nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		ended := len(r.tasks) == 1 && r.tasks[0].ended && !r.tasks[0].recv.telling()
+		r.mu.Unlock()
+		if ended {
+			break
+		}
+		if !r.pending() {
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		items := r.outgoing()
+		r.delivered(items)
+		r.take(core.answer(t, items), items)
+	}
+	task := waitEnd(t, r, time.Second)
+	got, _ := os.ReadFile(filepath.Join(dir, "big.iso"))
+	if !task.ok || !bytes.Equal(got, core.body) {
+		t.Fatalf("ended %+v, %d bytes written", task, len(got))
+	}
+	f, err := protocol.ReadFileUpload(0, task.chunks[0])
+	if err != nil || f.Size != uint64(len(core.body)) || !bytes.Equal(f.SHA256, offer.SHA256) {
+		t.Fatalf("data: %+v %v", f, err)
+	}
+}

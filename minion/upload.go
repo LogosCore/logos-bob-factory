@@ -37,6 +37,11 @@ type receiving struct {
 	asked bool
 	// told: the last ack, saying the minion has all of it, went.
 	told bool
+	// A stream (docs: contracts/minion-messages.md, Streaming a file to a
+	// minion): sized once its first chunk said the size; held while core's
+	// last ack said it has nothing yet.
+	sized bool
+	held  bool
 	// end is closed when the file is all there, or the transfer failed
 	// (err).
 	end  chan struct{}
@@ -44,10 +49,14 @@ type receiving struct {
 	over bool
 }
 
-func (r *runner) upload(ctx context.Context, t *task, args map[string]any) {
-	offer, err := protocol.ArgFile(args, "file")
+func (r *runner) upload(ctx context.Context, t *task, args map[string]any, key string) {
+	offer, err := protocol.ArgFile(args, key)
 	if err != nil {
 		r.end(t, false, nil, err.Error())
+		return
+	}
+	if offer.Stream != (key == "stream") {
+		r.end(t, false, nil, fmt.Sprintf("%s: core sent a stream where a file was wanted, or the other way round", key))
 		return
 	}
 	path, _ := protocol.ArgString(args, "path")
@@ -73,8 +82,8 @@ func (r *runner) upload(ctx context.Context, t *task, args map[string]any) {
 			_ = os.Remove(tmp.Name())
 		}
 	}()
-	x := &receiving{offer: *offer, file: tmp, sum: sha256.New(), end: make(chan struct{})}
-	if offer.Size == 0 {
+	x := &receiving{offer: *offer, file: tmp, sum: sha256.New(), end: make(chan struct{}), sized: !offer.Stream}
+	if x.sized && offer.Size == 0 {
 		x.over = true
 		close(x.end)
 	}
@@ -93,9 +102,9 @@ func (r *runner) upload(ctx context.Context, t *task, args map[string]any) {
 		r.mu.Unlock()
 	}
 	r.mu.Lock()
-	failed, sum := x.err, x.sum.Sum(nil)
+	failed, sum, size, want := x.err, x.sum.Sum(nil), x.offer.Size, x.offer.SHA256
 	r.mu.Unlock()
-	if failed == "" && !bytes.Equal(sum, offer.SHA256) {
+	if failed == "" && !bytes.Equal(sum, want) {
 		failed = "the file's SHA-256 is not the one core said"
 	}
 	if failed == "" {
@@ -106,8 +115,8 @@ func (r *runner) upload(ctx context.Context, t *task, args map[string]any) {
 		return
 	}
 	keep = true
-	r.write(t, []byte(fmt.Sprintf("%s: %d bytes\n", dest, offer.Size)),
-		protocol.FileUpload{Xfer: offer.Xfer, Path: dest, Size: offer.Size, SHA256: sum})
+	r.write(t, []byte(fmt.Sprintf("%s: %d bytes\n", dest, size)),
+		protocol.FileUpload{Xfer: offer.Xfer, Path: dest, Size: size, SHA256: sum})
 	r.end(t, true, nil, "")
 }
 
@@ -169,7 +178,7 @@ func (x *receiving) finish(err string) {
 
 // asking: the transfer wants the next chunk asked for.
 func (x *receiving) asking() bool {
-	return x != nil && !x.over && !x.asked
+	return x != nil && !x.over && !x.asked && !x.held
 }
 
 // telling: the file is all there, and core is not told yet: its progress
@@ -188,11 +197,22 @@ func (x *receiving) ask() protocol.AckItem {
 }
 
 // take writes a chunk core sent: one from where the file is, once; the
-// first's total and the last's SHA-256 must be the offer's. Under r.mu.
+// first's total and the last's SHA-256 must be the offer's. A stream's
+// first says its size, and its last its SHA-256. Under r.mu.
 func (x *receiving) take(c protocol.ChunkItem) {
 	x.asked = false
 	if x.over || c.Off != x.have {
 		return
+	}
+	if !x.sized {
+		if c.Total == nil {
+			x.finish("the stream's first chunk does not say its size")
+			return
+		}
+		x.offer.Size, x.sized = *c.Total, true
+	}
+	if x.offer.Stream && c.SHA256 != nil && x.offer.SHA256 == nil {
+		x.offer.SHA256 = c.SHA256
 	}
 	switch {
 	case c.Total != nil && *c.Total != x.offer.Size:

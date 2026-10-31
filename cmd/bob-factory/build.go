@@ -111,6 +111,19 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 		{
+			ID: "stream_upload", Label: "Stream a file up",
+			Description: "Puts a file of any size on the minion's host, streamed as it is uploaded; core keeps none of it.",
+			Result:      protocol.ResultFileUpload, Action: protocol.ActionUploadStream,
+			Params: []protocol.FieldSpec{
+				{Key: "stream", Type: protocol.FieldStream, Label: "File", Required: true,
+					Description: "The file's name: you upload it once the task is queued, from the browser or with curl."},
+				{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true,
+					Description: "Where it goes on the host; a folder takes it under its own name."},
+				{Key: "overwrite", Type: protocol.FieldBool, Label: "Overwrite", Default: false,
+					Description: "Replace a file already there."},
+			},
+		},
+		{
 			ID: "shell", Label: "Run a shell command",
 			Description: "Runs a command in the system shell and answers with its output.",
 			Params: []protocol.FieldSpec{

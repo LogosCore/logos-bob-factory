@@ -289,6 +289,11 @@ func (r *runner) acked(xfer []byte, next uint64, hold bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, t := range r.tasks {
+		// A stream core sends: hold says it has nothing yet.
+		if rx := t.recv; rx != nil && slices.Equal(rx.offer.Xfer, xfer) && !rx.over {
+			rx.held, rx.asked = hold, false
+			continue
+		}
 		x := t.xfer
 		if x == nil || !slices.Equal(x.id, xfer) || x.over {
 			continue
@@ -317,6 +322,10 @@ func (r *runner) pollEvery() time.Duration {
 	defer r.mu.Unlock()
 	for _, t := range r.tasks {
 		if x := t.xfer; x != nil && x.stream && x.started && x.held && !x.over {
+			return streamPoll
+		}
+		// A stream core sends, held once it began.
+		if rx := t.recv; rx != nil && rx.held && rx.have > 0 && !rx.over {
 			return streamPoll
 		}
 	}
@@ -456,7 +465,9 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 	case "stream_download":
 		r.sendFile(ctx, t, ti.Args, true)
 	case "upload":
-		r.upload(ctx, t, ti.Args)
+		r.upload(ctx, t, ti.Args, "file")
+	case "stream_upload":
+		r.upload(ctx, t, ti.Args, "stream")
 	case "shell":
 		r.shell(ctx, t, ti.Args)
 	case "sleep":
