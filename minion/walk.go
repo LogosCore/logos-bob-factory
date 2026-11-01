@@ -26,16 +26,16 @@ const walkReport = 2 * time.Second
 // entered (deeper than depth, past max_folders, another file system,
 // hidden when not wanted). Links are not followed. A depth or max_folders
 // of 0 is no limit.
-func (r *runner) walk(ctx context.Context, t *task, args map[string]any) {
-	path, _ := protocol.ArgString(args, "path")
+func (r *runner) walk(ctx context.Context, t *task, args protocol.Args) {
+	path, _ := protocol.ArgString(args, walkPath)
 	if path == "" {
 		path = "."
 	}
-	depth, _ := protocol.ArgInt(args, "depth")
+	depth, _ := protocol.ArgInt(args, walkDepth)
 	// 0, or none: no limit.
-	most, _ := protocol.ArgInt(args, "max_folders")
-	hidden := argBool(args, "hidden", true)
-	oneFS := argBool(args, "one_fs", true)
+	most, _ := protocol.ArgInt(args, walkMaxFolders)
+	hidden := argBool(args, walkHidden, true)
+	oneFS := argBool(args, walkOneFS, true)
 
 	root, err := filepath.Abs(path)
 	if err != nil {
@@ -85,11 +85,11 @@ func (r *runner) walk(ctx context.Context, t *task, args map[string]any) {
 			// not read says so.
 			w.Unread++
 			if errors.Is(err, fs.ErrPermission) {
-				r.list(t, f.path, sep, parent, nil, false, err.Error())
+				r.list(t, f.path, sep, parent, nil, false, protocol.ListingErrDenied)
 			}
 			continue
 		}
-		entries := make([]protocol.DirEntry, 0, len(dir))
+		entries := make([]entry, 0, len(dir))
 		for _, e := range dir {
 			entries = append(entries, dirEntry(f.path, e))
 			// A link to a folder is a link: not followed.
@@ -112,7 +112,7 @@ func (r *runner) walk(ctx context.Context, t *task, args map[string]any) {
 			}
 			queue = append(queue, folder{filepath.Join(f.path, e.Name()), f.level + 1})
 		}
-		r.list(t, f.path, sep, parent, entries, err != nil, "")
+		r.list(t, f.path, sep, parent, entries, err != nil, 0)
 		w.Folders++
 		w.Entries += uint64(len(entries))
 		if time.Since(reported) >= walkReport {
@@ -147,7 +147,7 @@ func (r *runner) waitBacklog(ctx context.Context, t *task) bool {
 }
 
 // argBool is a bool arg, or def when the task has none.
-func argBool(args map[string]any, key string, def bool) bool {
+func argBool(args protocol.Args, key uint64, def bool) bool {
 	if v, ok := args[key].(bool); ok {
 		return v
 	}

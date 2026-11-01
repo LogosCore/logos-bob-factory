@@ -40,8 +40,8 @@ func chunkIn(items []any) (protocol.ChunkItem, int, bool) {
 
 func startDownload(t *testing.T, path string) *runner {
 	t.Helper()
-	r := newRunner(description{Commands: []string{"download"}}, &schedule{interval: time.Second})
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: bytes.Repeat([]byte{5}, 16), Cmd: "download", Args: map[string]any{"path": path}})
+	r := newRunner(description{Ops: []uint64{opDownload}}, &schedule{interval: time.Second})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: bytes.Repeat([]byte{5}, 16), Cmd: opDownload, Args: protocol.Args{downloadPath: path}})
 	return r
 }
 
@@ -110,7 +110,7 @@ func TestDownload(t *testing.T) {
 	if !task.ok || len(task.chunks) != 1 {
 		t.Fatalf("ended %+v", task)
 	}
-	f, err := protocol.ReadFileDownload(0, task.chunks[0])
+	f, err := protocol.ReadFileDownload(0, asCore(t, protocol.ResultFileDownload, task.chunks[0]))
 	sum := sha256.Sum256(body)
 	if err != nil || f.Path != path || f.Size != uint64(len(body)) || !bytes.Equal(f.SHA256, sum[:]) {
 		t.Fatalf("its data: %+v %v", f, err)

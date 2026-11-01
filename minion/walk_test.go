@@ -35,10 +35,10 @@ func walkTree(t *testing.T) string {
 
 // runWalk walks with args, and returns its listings' folders (in the order
 // sent), the folders not read, and where it stood last.
-func runWalk(t *testing.T, args map[string]any) ([]string, []string, protocol.DirWalk, bool) {
+func runWalk(t *testing.T, args protocol.Args) ([]string, []string, protocol.DirWalk, bool) {
 	t.Helper()
-	r := newRunner(description{Commands: []string{"walk"}}, &schedule{interval: time.Second})
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: "walk", Args: args})
+	r := newRunner(description{Ops: []uint64{opWalk}}, &schedule{interval: time.Second})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: opWalk, Args: args})
 	// The walk waits while its pieces are not sent: send them as it goes.
 	var parts []protocol.ResultItem
 	deadline := time.Now().Add(10 * time.Second)
@@ -59,14 +59,14 @@ func runWalk(t *testing.T, args map[string]any) ([]string, []string, protocol.Di
 			if l.Part != 0 {
 				continue
 			}
-			if l.Err != "" {
+			if l.Err != 0 {
 				unread = append(unread, l.Path)
 			} else {
 				folders = append(folders, l.Path)
 			}
 		}
 		if len(p.Data) > 0 {
-			w, err := protocol.ReadDirWalk(p.Seq, p.Data)
+			w, err := protocol.ReadDirWalk(p.Seq, asCore(t, protocol.ResultDirWalk, p.Data))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -91,7 +91,7 @@ func TestWalk(t *testing.T) {
 
 	// Two levels down, breadth first: root, its folders, then theirs; the
 	// link is an entry, not a folder walked; a11 is deeper than it goes.
-	folders, unread, w, ok := runWalk(t, map[string]any{"path": root, "depth": int64(2)})
+	folders, unread, w, ok := runWalk(t, protocol.Args{walkPath: root, walkDepth: int64(2)})
 	if !ok {
 		t.Fatal("the walk failed")
 	}
@@ -106,13 +106,13 @@ func TestWalk(t *testing.T) {
 	}
 
 	// No limits at all: every folder but the one it may not read.
-	folders, _, w, _ = runWalk(t, map[string]any{"path": root, "depth": int64(0), "max_folders": int64(0)})
+	folders, _, w, _ = runWalk(t, protocol.Args{walkPath: root, walkDepth: int64(0), walkMaxFolders: int64(0)})
 	if len(folders) != 7 || w.Skipped != 0 {
 		t.Fatalf("no limits: %v %+v", rel(folders), w)
 	}
 
 	// Without hidden folders, and at most two folders.
-	folders, _, w, _ = runWalk(t, map[string]any{"path": root, "depth": int64(0), "hidden": false, "max_folders": int64(2)})
+	folders, _, w, _ = runWalk(t, protocol.Args{walkPath: root, walkDepth: int64(0), walkHidden: false, walkMaxFolders: int64(2)})
 	if got := rel(folders); !slices.Equal(got, []string{".", "a"}) || w.Folders != 2 || w.Skipped == 0 {
 		t.Fatalf("hidden off, two at most: %v %+v", got, w)
 	}

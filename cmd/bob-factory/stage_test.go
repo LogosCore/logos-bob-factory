@@ -148,7 +148,7 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, _ := protocol.MarshalCBOR(item)
-	answer, _ := protocol.MarshalCBOR(protocol.CoreMessage{V: protocol.MinionMessageV2, Re: msg.ID, Items: []cbor.RawMessage{raw}})
+	answer, _ := protocol.MarshalCBOR(protocol.CoreMessage{V: protocol.MinionMessageV3, Re: msg.ID, Items: []cbor.RawMessage{raw}})
 	replyFrame, _ := protocol.SealFrame(keys, id, protocol.FrameCoreToMinion, answer)
 	out := append([]byte{0}, id[:]...)
 	_, _ = w.Write(append(out, replyFrame...))
@@ -187,7 +187,7 @@ func TestMinionStages(t *testing.T) {
 		}
 	}
 	if core.hello.PID != uint64(cmd.Process.Pid) || core.hello.OS != "linux" || core.hello.Arch != "amd64" ||
-		protocol.ValidateMachineID(core.hello.MachineID) != nil {
+		protocol.ValidateMachineID(core.hello.MachineID()) != nil || core.hello.Integrity == 0 || len(core.hello.Addrs) == 0 {
 		t.Errorf("hello %+v", core.hello)
 	}
 	core.mu.Lock()
@@ -311,12 +311,12 @@ func TestMinionRunsTasks(t *testing.T) {
 		}
 	}
 	core.tasks = []protocol.TaskItem{
-		{T: protocol.ItemTask, Task: id(1), Cmd: "hello"},
-		{T: protocol.ItemTask, Task: id(2), Cmd: "shell", Args: map[string]any{"command": "echo hi; exit 3", "timeout": uint64(5000)}},
-		{T: protocol.ItemTask, Task: id(3), Cmd: "ls", Args: map[string]any{"path": "/"}},
-		{T: protocol.ItemTask, Task: id(6), Cmd: "ls", Args: map[string]any{"path": big}},
-		{T: protocol.ItemTask, Task: id(4), Cmd: "sleep", Args: map[string]any{"interval": uint64(50), "jitter": int64(0)}},
-		{T: protocol.ItemTask, Task: id(5), Cmd: "exit"},
+		{T: protocol.ItemTask, Task: id(1), Cmd: op("hello")},
+		{T: protocol.ItemTask, Task: id(2), Cmd: op("shell"), Args: args("shell", map[string]any{"command": "echo hi; exit 3", "timeout": uint64(5000)})},
+		{T: protocol.ItemTask, Task: id(3), Cmd: op("ls"), Args: args("ls", map[string]any{"path": "/"})},
+		{T: protocol.ItemTask, Task: id(6), Cmd: op("ls"), Args: args("ls", map[string]any{"path": big})},
+		{T: protocol.ItemTask, Task: id(4), Cmd: op("sleep"), Args: args("sleep", map[string]any{"interval": uint64(50), "jitter": int64(0)})},
+		{T: protocol.ItemTask, Task: id(5), Cmd: op("exit")},
 	}
 	cmd, logs := startMinion(t, core, func(req *protocol.BuildRequest) { req.Commands = append(req.Commands, "shell") })
 	done := make(chan error, 1)
@@ -396,7 +396,8 @@ func TestMinionRunsTasks(t *testing.T) {
 					t.Fatalf("task %d part %d piece %d: %v", task, p.Seq, i, err)
 				}
 				if l.ID == 0 && l.Part == 0 {
-					first = &p.Ls[i]
+					named := l.Named("linux")
+					first = &named
 				}
 				n += len(l.Entries)
 				pieces++
@@ -409,8 +410,9 @@ func TestMinionRunsTasks(t *testing.T) {
 	} else if l, n, _ := listing(3); l == nil || l.Path != "/" || l.Sep != "/" || l.Parent != "" || n == 0 {
 		t.Errorf("ls of /: %+v, %d entries", l, n)
 	} else if i := slices.IndexFunc(l.Entries, func(e protocol.DirEntry) bool { return e.Name == "etc" }); i < 0 ||
-		l.Entries[i].Type != protocol.DirEntryDir || l.Entries[i].Modified == nil || l.Entries[i].Owner == "" {
-		t.Errorf("ls of / has no etc folder with its time and owner: %+v", l.Entries)
+		l.Entries[i].Type != protocol.DirEntryDir || l.Entries[i].Modified == nil || l.Entries[i].Owner == "" ||
+		l.Entries[i].Mode == "" || l.Entries[i].Mode[0] != 'd' {
+		t.Errorf("ls of / has no etc folder with its time, owner and mode: %+v", l.Entries)
 	}
 	if last, _ := end(6); !*last.OK {
 		t.Errorf("a big ls failed: %s", last.Err)
@@ -423,4 +425,24 @@ func TestMinionRunsTasks(t *testing.T) {
 	if last, out := end(5); !*last.OK || out != "bye\n" {
 		t.Errorf("exit: %q", out)
 	}
+}
+
+// op is a command's number in BOB's schema.
+func op(id string) uint64 {
+	for _, c := range buildSchema.Commands {
+		if c.ID == id {
+			return uint64(c.Op)
+		}
+	}
+	panic("no command " + id)
+}
+
+// args are a task's args by their params' numbers, as core sends them.
+func args(command string, byKey map[string]any) protocol.Args {
+	for _, c := range buildSchema.Commands {
+		if c.ID == command {
+			return protocol.WireArgs(c.Params, byKey)
+		}
+	}
+	panic("no command " + command)
 }

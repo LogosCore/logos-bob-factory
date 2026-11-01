@@ -52,9 +52,9 @@ type description struct {
 	Connections []protocol.BuildConnection `json:"connections"`
 	// SessionID is the persisted session to claim; empty for none.
 	SessionID string `json:"session_id"`
-	// Commands are those the minion was built with; Greeting what its hello
-	// command answers.
-	Commands []string `json:"commands"`
+	// Ops are the numbers of the commands the minion was built with
+	// (ops.go); Greeting what its hello command answers.
+	Ops      []uint64 `json:"ops"`
 	Greeting string   `json:"greeting"`
 }
 
@@ -281,7 +281,7 @@ func hello(conn connection, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Ma
 	h.SID = claim
 	// The schedule it checks in by, for core to tell when it is late.
 	h.Sleep = &protocol.Sleep{Interval: uint64(max(1, sched.interval.Milliseconds())), Jitter: uint64(sched.jitter)}
-	log.Printf("hello: pid %d, %s/%s, host %q, user %q, integrity %s, addrs %v", h.PID, h.OS, h.Arch, h.Host, h.User, h.Integrity, h.Addrs)
+	log.Printf("hello: pid %d, %s/%s, host %q, user %q, integrity %d, addrs %v", h.PID, h.OS, h.Arch, h.Host, h.User, h.Integrity, h.Addrs)
 	answer, err := exchange(conn, tempID, keys, h)
 	if err != nil {
 		return sessionID, err
@@ -313,9 +313,9 @@ func hello(conn connection, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Ma
 // process.
 func describeHost() protocol.HelloItem {
 	h := protocol.HelloItem{T: protocol.ItemHello, PID: uint64(os.Getpid()), OS: runtime.GOOS, Arch: runtime.GOARCH,
-		Version: version, Integrity: "user"}
+		Version: version, Integrity: protocol.IntegrityUser}
 	h.Host, _ = os.Hostname()
-	h.MachineID = machineID()
+	h.MachineSource, h.MachineValue = machineID()
 	if u, err := user.Current(); err == nil {
 		h.User = u.Username
 	}
@@ -325,12 +325,16 @@ func describeHost() protocol.HelloItem {
 		h.Proc = filepath.Base(exe)
 	}
 	if os.Geteuid() == 0 {
-		h.Integrity = "root"
+		h.Integrity = protocol.IntegrityRoot
 	}
 	if addrs, err := net.InterfaceAddrs(); err == nil {
 		for _, a := range addrs {
 			if ipn, ok := a.(*net.IPNet); ok && !ipn.IP.IsLoopback() && !ipn.IP.IsLinkLocalUnicast() {
-				h.Addrs = append(h.Addrs, ipn.IP.String())
+				ip := ipn.IP
+				if v4 := ip.To4(); v4 != nil {
+					ip = v4
+				}
+				h.Addrs = append(h.Addrs, ip)
 			}
 		}
 	}
@@ -343,7 +347,7 @@ func describeHost() protocol.HelloItem {
 func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
 	var answer protocol.CoreMessage
 	msgID := protocol.NewMessageID()
-	msg := protocol.MinionMessage{V: protocol.MinionMessageV2, ID: msgID}
+	msg := protocol.MinionMessage{V: protocol.MinionMessageV3, ID: msgID}
 	for _, it := range items {
 		raw, err := protocol.MarshalCBOR(it)
 		if err != nil {

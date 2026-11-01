@@ -50,3 +50,13 @@ func device(info fs.FileInfo) (uint64, bool) {
 	}
 	return uint64(st.Dev), true //nolint:unconvert // Dev is int32 on some platforms
 }
+
+// modeBits is a file's st_mode: its type and permission bits, as a listing
+// sends them (protocol.LsEntry.Mode).
+func modeBits(info fs.FileInfo) uint32 {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0
+	}
+	return uint32(st.Mode) //nolint:unconvert // Mode is uint16 on some platforms
+}

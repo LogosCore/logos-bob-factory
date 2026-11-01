@@ -67,11 +67,11 @@ func newFakeCore(t *testing.T, size int, name string) *fakeCore {
 }
 
 // runUpload runs an upload against core until it ends.
-func runUpload(t *testing.T, core *fakeCore, args map[string]any) *task {
+func runUpload(t *testing.T, core *fakeCore, args protocol.Args) *task {
 	t.Helper()
-	args["file"] = core.offer
-	r := newRunner(description{Commands: []string{"upload"}}, &schedule{interval: time.Second})
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: core.task, Cmd: "upload", Args: args})
+	args[uploadArgFile] = core.offer
+	r := newRunner(description{Ops: []uint64{opUpload}}, &schedule{interval: time.Second})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: core.task, Cmd: opUpload, Args: args})
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		r.mu.Lock()
@@ -98,7 +98,7 @@ func TestUpload(t *testing.T) {
 	core := newFakeCore(t, protocol.MaxChunkData*2+777, "tool.bin")
 	core.drop = protocol.MaxChunkData
 	dir := t.TempDir()
-	task := runUpload(t, core, map[string]any{"path": dir, "overwrite": false})
+	task := runUpload(t, core, protocol.Args{uploadArgPath: dir, uploadArgOverwrite: false})
 	if !task.ok || len(task.chunks) != 1 || !core.toldAll {
 		t.Fatalf("ended %+v, told all %v", task, core.toldAll)
 	}
@@ -107,7 +107,7 @@ func TestUpload(t *testing.T) {
 	if err != nil || !bytes.Equal(got, core.body) {
 		t.Fatalf("written: %v", err)
 	}
-	f, err := protocol.ReadFileUpload(0, task.chunks[0])
+	f, err := protocol.ReadFileUpload(0, asCore(t, protocol.ResultFileUpload, task.chunks[0]))
 	if err != nil || f.Path != dest || f.Size != uint64(len(core.body)) || !bytes.Equal(f.SHA256, core.offer.SHA256) {
 		t.Fatalf("data: %+v %v", f, err)
 	}
@@ -123,11 +123,11 @@ func TestUploadExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := newFakeCore(t, 10, "a.txt")
-	task := runUpload(t, core, map[string]any{"path": dest, "overwrite": false})
+	task := runUpload(t, core, protocol.Args{uploadArgPath: dest, uploadArgOverwrite: false})
 	if task.ok || !strings.Contains(task.err, "exists") {
 		t.Fatalf("ended %+v", task)
 	}
-	task = runUpload(t, newFakeCore(t, 10, "a.txt"), map[string]any{"path": dest, "overwrite": true})
+	task = runUpload(t, newFakeCore(t, 10, "a.txt"), protocol.Args{uploadArgPath: dest, uploadArgOverwrite: true})
 	if got, _ := os.ReadFile(dest); !task.ok || len(got) != 10 {
 		t.Fatalf("overwritten: %+v, %d bytes", task, len(got))
 	}
@@ -141,7 +141,7 @@ func TestUploadBadSum(t *testing.T) {
 	dir := t.TempDir()
 	core := newFakeCore(t, 100, "a.bin")
 	core.offer.SHA256 = make([]byte, 32)
-	task := runUpload(t, core, map[string]any{"path": filepath.Join(dir, "a.bin"), "overwrite": false})
+	task := runUpload(t, core, protocol.Args{uploadArgPath: filepath.Join(dir, "a.bin"), uploadArgOverwrite: false})
 	if task.ok || !strings.Contains(task.err, "SHA-256") {
 		t.Fatalf("ended %+v", task)
 	}
@@ -158,9 +158,9 @@ func TestUploadStream(t *testing.T) {
 	offer := core.offer
 	core.offer = protocol.FileOffer{Xfer: offer.Xfer, Name: offer.Name, Stream: true}
 	dir := t.TempDir()
-	r := newRunner(description{Commands: []string{"stream_upload"}}, &schedule{interval: time.Second})
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: core.task, Cmd: "stream_upload",
-		Args: map[string]any{"stream": core.offer, "path": dir, "overwrite": false}})
+	r := newRunner(description{Ops: []uint64{opStreamUpload}}, &schedule{interval: time.Second})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: core.task, Cmd: opStreamUpload,
+		Args: protocol.Args{streamUploadStream: core.offer, uploadArgPath: dir, uploadArgOverwrite: false}})
 
 	// The first ask, answered with hold: nothing more is asked.
 	var asked bool
@@ -204,7 +204,7 @@ func TestUploadStream(t *testing.T) {
 	if !task.ok || !bytes.Equal(got, core.body) {
 		t.Fatalf("ended %+v, %d bytes written", task, len(got))
 	}
-	f, err := protocol.ReadFileUpload(0, task.chunks[0])
+	f, err := protocol.ReadFileUpload(0, asCore(t, protocol.ResultFileUpload, task.chunks[0]))
 	if err != nil || f.Size != uint64(len(core.body)) || !bytes.Equal(f.SHA256, offer.SHA256) {
 		t.Fatalf("data: %+v %v", f, err)
 	}

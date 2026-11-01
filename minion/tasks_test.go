@@ -13,7 +13,7 @@ import (
 
 func newTestRunner() *runner {
 	s := &schedule{interval: time.Second}
-	return newRunner(description{Commands: []string{"shell", "ls", "hello"}, Greeting: "hi"}, s)
+	return newRunner(description{Ops: []uint64{opShell, opLs, opHello}, Greeting: "hi"}, s)
 }
 
 // waitEnd waits for a task to end, and returns it.
@@ -39,7 +39,7 @@ func waitEnd(t *testing.T, r *runner, within time.Duration) *task {
 func TestShellCancelKillsTheGroup(t *testing.T) {
 	r := newTestRunner()
 	id := make([]byte, 16)
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: id, Cmd: "shell", Args: map[string]any{"command": "echo started; sleep 30; echo never"}})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: id, Cmd: opShell, Args: protocol.Args{shellCommand: "echo started; sleep 30; echo never"}})
 	time.Sleep(300 * time.Millisecond)
 	r.stop(id, 0)
 	task := waitEnd(t, r, 5*time.Second)
@@ -51,8 +51,8 @@ func TestShellCancelKillsTheGroup(t *testing.T) {
 // The timeout stops it the same way.
 func TestShellTimeout(t *testing.T) {
 	r := newTestRunner()
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: "shell",
-		Args: map[string]any{"command": "sleep 30", "timeout": uint64(300)}})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: opShell,
+		Args: protocol.Args{shellCommand: "sleep 30", shellTimeout: uint64(300)}})
 	task := waitEnd(t, r, 5*time.Second)
 	if task.ok || !strings.Contains(task.err, "timeout") {
 		t.Fatalf("ok %v err %q", task.ok, task.err)
@@ -64,7 +64,7 @@ func TestShellTimeout(t *testing.T) {
 func TestTaskOnceAndUnknownCancel(t *testing.T) {
 	r := newTestRunner()
 	id := make([]byte, 16)
-	hello := protocol.TaskItem{T: protocol.ItemTask, Task: id, Cmd: "hello"}
+	hello := protocol.TaskItem{T: protocol.ItemTask, Task: id, Cmd: opHello}
 	r.start(hello)
 	waitEnd(t, r, 2*time.Second)
 	r.start(hello)
@@ -95,7 +95,7 @@ func TestDirEntry(t *testing.T) {
 	if err := os.Symlink("sub", filepath.Join(dir, "link")); err != nil {
 		t.Fatal(err)
 	}
-	got := map[string]protocol.DirEntry{}
+	got := map[string]entry{}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -103,13 +103,14 @@ func TestDirEntry(t *testing.T) {
 	for _, e := range entries {
 		got[e.Name()] = dirEntry(dir, e)
 	}
-	if e := got[".empty"]; e.Type != protocol.DirEntryFile || !e.Hidden || e.Size == nil || *e.Size != 0 || e.Modified == nil || e.Owner == "" {
+	if e := got[".empty"]; e.Type != protocol.EntryFile || !e.Hidden || e.Size == nil || *e.Size != 0 || e.Modified == nil || e.owner == "" ||
+		protocol.RenderMode("linux", e.Mode) != "-rw-------" {
 		t.Errorf(".empty: %+v", e)
 	}
-	if e := got["sub"]; e.Type != protocol.DirEntryDir || e.Size != nil || e.Hidden {
+	if e := got["sub"]; e.Type != protocol.EntryDir || e.Size != nil || e.Hidden || protocol.RenderMode("linux", e.Mode) != "drwx------" {
 		t.Errorf("sub: %+v", e)
 	}
-	if e := got["link"]; e.Type != protocol.DirEntryLink || e.Target != "sub" {
+	if e := got["link"]; e.Type != protocol.EntryLink || e.Target != "sub" || protocol.RenderMode("linux", e.Mode)[0] != 'l' {
 		t.Errorf("link: %+v", e)
 	}
 }
@@ -146,10 +147,10 @@ func TestLsSendsAListing(t *testing.T) {
 		}
 	}
 	r := newTestRunner()
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: "ls", Args: map[string]any{"path": dir}})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: opLs, Args: protocol.Args{lsPath: dir}})
 	waitEnd(t, r, 5*time.Second)
 	parts := drain(r)
-	var pieces []protocol.ListingPiece
+	var pieces []protocol.LsPiece
 	for i, p := range parts {
 		if len(p.Data) > 0 {
 			t.Fatalf("part %d has data", i)
@@ -167,8 +168,12 @@ func TestLsSendsAListing(t *testing.T) {
 	}
 	n := 0
 	for i, p := range pieces {
-		if p.ID != 0 || p.Part != uint64(i) || p.Partial || p.Err != "" {
+		if p.ID != 0 || p.Part != uint64(i) || p.Partial || p.Err != 0 {
 			t.Fatalf("piece %d: id %d part %d", i, p.ID, p.Part)
+		}
+		// Every entry is the test's: one owner, named once a piece.
+		if len(p.Owners) != 1 {
+			t.Fatalf("piece %d: owners %v", i, p.Owners)
 		}
 		n += len(p.Entries)
 	}
@@ -187,20 +192,30 @@ func TestLsUnreadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := newTestRunner()
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: "ls", Args: map[string]any{"path": dir}})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: opLs, Args: protocol.Args{lsPath: dir}})
 	waitEnd(t, r, 5*time.Second)
 	parts := drain(r)
 	last := parts[len(parts)-1]
 	if !last.Done || *last.OK {
 		t.Fatalf("the task did not fail: %+v", last)
 	}
-	var pieces []protocol.ListingPiece
+	var pieces []protocol.LsPiece
 	for _, p := range parts {
 		pieces = append(pieces, p.Ls...)
 	}
-	if len(pieces) != 1 || pieces[0].Err == "" || !pieces[0].Last || pieces[0].Path != dir {
+	if len(pieces) != 1 || pieces[0].Err != protocol.ListingErrDenied || !pieces[0].Last || pieces[0].Path != dir {
 		t.Fatalf("pieces %+v", pieces)
 	}
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+// asCore is a part's data as core keeps it: named (protocol.NamedResultData).
+func asCore(t *testing.T, result string, data []byte) []byte {
+	t.Helper()
+	named, err := protocol.NamedResultData(result, data)
+	if err != nil {
+		t.Fatalf("%s data: %v", result, err)
+	}
+	return named
+}

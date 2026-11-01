@@ -24,7 +24,7 @@ import (
 // result parts: formed at each check-in from what the task wrote since, so a
 // message that fails is sent again as it was ((task, seq) stays the same).
 // It checks in sooner when it has output. A task id it saw in the last 24
-// hours runs once. The commands are the build's (description.Commands).
+// hours runs once. The commands are the build's (description.Ops).
 
 // maxOutPerMessage keeps a message's output well under the 768 KiB limit;
 // the rest goes in the next check-ins, which come at once.
@@ -45,7 +45,7 @@ const taskMemory = 24 * time.Hour
 // task is a task the minion runs: its output not yet sent, and how it ended.
 type task struct {
 	id      []byte
-	cmd     string
+	cmd     uint64
 	nextSeq uint64
 	out     []byte
 	// chunks are structured output not yet sent, a result part each,
@@ -53,7 +53,7 @@ type task struct {
 	chunks [][]byte
 	// pieces are listings not yet sent, with their encoded sizes; listings
 	// the task has started, numbering the next.
-	pieces   []protocol.ListingPiece
+	pieces   []protocol.LsPiece
 	sizes    []int
 	listings uint64
 	ended    bool
@@ -72,7 +72,7 @@ type task struct {
 type runner struct {
 	mu       sync.Mutex
 	greeting string
-	commands []string
+	ops      []uint64
 	sched    *schedule
 	seen     map[string]time.Time
 	acks     [][]byte
@@ -87,7 +87,7 @@ type runner struct {
 }
 
 func newRunner(d description, sched *schedule) *runner {
-	return &runner{greeting: d.Greeting, commands: d.Commands, sched: sched, seen: map[string]time.Time{}, wake: make(chan struct{}, 1)}
+	return &runner{greeting: d.Greeting, ops: d.Ops, sched: sched, seen: map[string]time.Time{}, wake: make(chan struct{}, 1)}
 }
 
 // nudge asks for an early check-in: there is output to send.
@@ -399,11 +399,11 @@ func (r *runner) start(ti protocol.TaskItem) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &task{id: ti.Task, cmd: ti.Cmd, cancel: cancel}
 	r.tasks = append(r.tasks, t)
-	if ti.Cmd == "exit" {
+	if ti.Cmd == opExit {
 		r.exitID = ti.Task
 	}
 	r.mu.Unlock()
-	log.Printf("task %s: %s %v", key[:8], ti.Cmd, ti.Args)
+	log.Printf("task %s: command %d %v", key[:8], ti.Cmd, ti.Args)
 	go func() {
 		defer cancel()
 		r.run(ctx, t, ti)
@@ -434,7 +434,7 @@ func (r *runner) stop(id []byte, item int) {
 func (r *runner) write(t *task, out []byte, data any) {
 	var chunk []byte
 	if data != nil {
-		b, err := protocol.ResultData(data)
+		b, err := protocol.WireResultData(data)
 		if err != nil {
 			log.Printf("task %s: data does not encode: %v", hex.EncodeToString(t.id)[:8], err)
 		} else {
@@ -450,22 +450,33 @@ func (r *runner) write(t *task, out []byte, data any) {
 	r.nudge()
 }
 
+// entry is a directory's entry as the minion reads it: as a listing sends
+// it, with its owner and group by name, which each piece numbers once.
+type entry struct {
+	protocol.LsEntry
+	owner, group string
+}
+
 // list adds a directory's listing to a task's result, in pieces of lsChunk
-// entries: the first names the directory, the last says so. err: it could
-// not be read at all; partial: not all of it.
-func (r *runner) list(t *task, path, sep, parent string, entries []protocol.DirEntry, partial bool, errText string) {
+// entries: the first names the directory, the last says so. errCode: it
+// could not be read at all (a protocol.ListingErr); partial: not all of it.
+func (r *runner) list(t *task, path, sep, parent string, entries []entry, partial bool, errCode int) {
 	r.mu.Lock()
 	id := t.listings
 	t.listings++
 	for i, part := 0, uint64(0); i == 0 || i < len(entries); i, part = i+lsChunk, part+1 {
-		p := protocol.ListingPiece{ID: id, Part: part, Entries: entries[i:min(i+lsChunk, len(entries))]}
+		p := protocol.LsPiece{ID: id, Part: part}
+		for _, e := range entries[i:min(i+lsChunk, len(entries))] {
+			e.Owner, e.Group = p.Owner(e.owner), p.Owner(e.group)
+			p.Entries = append(p.Entries, e.LsEntry)
+		}
 		if part == 0 {
-			p.Path, p.Sep, p.Parent, p.Err = path, sep, parent, errText
+			p.Path, p.Sep, p.Parent, p.Err = path, sep, parent, errCode
 		}
 		p.Last = i+lsChunk >= len(entries)
 		p.Partial = p.Last && partial
 		size := 64
-		if b, err := protocol.ResultData(p); err == nil {
+		if b, err := protocol.MarshalCBOR(p); err == nil {
 			size = len(b)
 		}
 		t.pieces, t.sizes = append(t.pieces, p), append(t.sizes, size)
@@ -483,50 +494,50 @@ func (r *runner) end(t *task, ok bool, exit *int64, errText string) {
 	if !ok {
 		state = "failed: " + errText
 	}
-	log.Printf("task %s: %s %s", hex.EncodeToString(t.id)[:8], t.cmd, state)
+	log.Printf("task %s: command %d %s", hex.EncodeToString(t.id)[:8], t.cmd, state)
 }
 
 // run carries out a task's command.
 func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
-	if !slices.Contains(r.commands, ti.Cmd) {
-		r.end(t, false, nil, fmt.Sprintf("this minion was not built with %q", ti.Cmd))
+	if !slices.Contains(r.ops, ti.Cmd) {
+		r.end(t, false, nil, fmt.Sprintf("this minion was not built with command %d", ti.Cmd))
 		return
 	}
 	switch ti.Cmd {
-	case "hello":
+	case opHello:
 		r.write(t, []byte(r.greeting+"\n"), nil)
 		r.end(t, true, nil, "")
-	case "ls":
+	case opLs:
 		r.ls(t, ti.Args)
-	case "download":
+	case opDownload:
 		r.download(ctx, t, ti.Args)
-	case "stream_download":
+	case opStreamDownload:
 		r.sendFile(ctx, t, ti.Args, true)
-	case "upload":
-		r.upload(ctx, t, ti.Args, "file")
-	case "stream_upload":
-		r.upload(ctx, t, ti.Args, "stream")
-	case "rm":
+	case opUpload:
+		r.upload(ctx, t, ti.Args, false)
+	case opStreamUpload:
+		r.upload(ctx, t, ti.Args, true)
+	case opRm:
 		r.rm(t, ti.Args)
-	case "walk":
+	case opWalk:
 		r.walk(ctx, t, ti.Args)
-	case "shell":
+	case opShell:
 		r.shell(ctx, t, ti.Args)
-	case "sleep":
+	case opSleep:
 		r.sleep(t, ti.Args)
-	case "exit":
+	case opExit:
 		r.write(t, []byte("bye\n"), nil)
 		r.end(t, true, nil, "")
 	default:
-		r.end(t, false, nil, fmt.Sprintf("%q is not a command this minion knows", ti.Cmd))
+		r.end(t, false, nil, fmt.Sprintf("command %d is not one this minion knows", ti.Cmd))
 	}
 }
 
 // ls lists a directory: a listing (docs: contracts/minion-messages.md,
 // Listings), from which core makes the task's dir_listing. A directory it
 // cannot read is a listing that says so, and the task fails.
-func (r *runner) ls(t *task, args map[string]any) {
-	path, _ := protocol.ArgString(args, "path")
+func (r *runner) ls(t *task, args protocol.Args) {
+	path, _ := protocol.ArgString(args, lsPath)
 	if path == "" {
 		path = "."
 	}
@@ -544,24 +555,24 @@ func (r *runner) ls(t *task, args map[string]any) {
 	if err != nil && len(dir) == 0 {
 		// Not a directory at all is no listing: only one it may not read.
 		if errors.Is(err, fs.ErrPermission) {
-			r.list(t, abs, sep, parent, nil, false, err.Error())
+			r.list(t, abs, sep, parent, nil, false, protocol.ListingErrDenied)
 		}
 		r.end(t, false, nil, err.Error())
 		return
 	}
-	entries := make([]protocol.DirEntry, 0, len(dir))
+	entries := make([]entry, 0, len(dir))
 	for _, e := range dir {
 		entries = append(entries, dirEntry(abs, e))
 	}
 	// Entries read before an error: what there is, said partial.
-	r.list(t, abs, sep, parent, entries, err != nil, "")
+	r.list(t, abs, sep, parent, entries, err != nil, 0)
 	r.end(t, true, nil, "")
 }
 
-// dirEntry is a directory's entry as a dir_listing has it: a link as the
-// link (its own size and time), with its target.
-func dirEntry(dir string, e os.DirEntry) protocol.DirEntry {
-	d := protocol.DirEntry{Name: e.Name(), Type: entryType(e.Type()), Hidden: strings.HasPrefix(e.Name(), ".")}
+// dirEntry is a directory's entry as a listing sends it: a link as the link
+// (its own size, time and mode), with its target.
+func dirEntry(dir string, e os.DirEntry) entry {
+	d := entry{LsEntry: protocol.LsEntry{Name: e.Name(), Type: entryType(e.Type()), Hidden: strings.HasPrefix(e.Name(), ".")}}
 	if info, err := e.Info(); err == nil {
 		if !info.IsDir() {
 			size := uint64(max(info.Size(), 0))
@@ -569,10 +580,10 @@ func dirEntry(dir string, e os.DirEntry) protocol.DirEntry {
 		}
 		mod := info.ModTime().Unix()
 		d.Modified = &mod
-		d.Mode = info.Mode().String()
-		d.Owner, d.Group = owners(info)
+		d.Mode = modeBits(info)
+		d.owner, d.group = owners(info)
 	}
-	if d.Type == protocol.DirEntryLink {
+	if d.Type == protocol.EntryLink {
 		if target, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil {
 			d.Target = target
 		}
@@ -580,16 +591,16 @@ func dirEntry(dir string, e os.DirEntry) protocol.DirEntry {
 	return d
 }
 
-func entryType(m fs.FileMode) string {
+func entryType(m fs.FileMode) int {
 	switch {
 	case m.IsDir():
-		return protocol.DirEntryDir
+		return protocol.EntryDir
 	case m&fs.ModeSymlink != 0:
-		return protocol.DirEntryLink
+		return protocol.EntryLink
 	case m.IsRegular():
-		return protocol.DirEntryFile
+		return protocol.EntryFile
 	}
-	return protocol.DirEntryOther
+	return protocol.EntryOther
 }
 
 // taskWriter feeds a running process's output to its task as it comes.
@@ -605,9 +616,9 @@ func (w taskWriter) Write(p []byte) (int, error) {
 
 // shell runs a command in the system shell, its output streamed, within its
 // timeout.
-func (r *runner) shell(ctx context.Context, t *task, args map[string]any) {
-	command, _ := protocol.ArgString(args, "command")
-	timeout, ok := protocol.ArgDuration(args, "timeout")
+func (r *runner) shell(ctx context.Context, t *task, args protocol.Args) {
+	command, _ := protocol.ArgString(args, shellCommand)
+	timeout, ok := protocol.ArgDuration(args, shellTimeout)
 	if !ok || timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -651,13 +662,13 @@ func (r *runner) shell(ctx context.Context, t *task, args map[string]any) {
 }
 
 // sleep changes the check-in schedule, and tells core.
-func (r *runner) sleep(t *task, args map[string]any) {
-	interval, ok := protocol.ArgDuration(args, "interval")
+func (r *runner) sleep(t *task, args protocol.Args) {
+	interval, ok := protocol.ArgDuration(args, sleepInterval)
 	if !ok || interval <= 0 {
 		r.end(t, false, nil, "an interval is required")
 		return
 	}
-	jitter, ok := protocol.ArgInt(args, "jitter")
+	jitter, ok := protocol.ArgInt(args, sleepJitter)
 	if !ok {
 		jitter = 10
 	}

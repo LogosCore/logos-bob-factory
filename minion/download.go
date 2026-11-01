@@ -54,14 +54,18 @@ type transfer struct {
 	gap       bool
 }
 
-func (r *runner) download(ctx context.Context, t *task, args map[string]any) {
+func (r *runner) download(ctx context.Context, t *task, args protocol.Args) {
 	r.sendFile(ctx, t, args, false)
 }
 
 // sendFile sends a file core asked for: as a download, or as a stream
 // (stream.go), which ends with other data.
-func (r *runner) sendFile(ctx context.Context, t *task, args map[string]any, stream bool) {
-	path, _ := protocol.ArgString(args, "path")
+func (r *runner) sendFile(ctx context.Context, t *task, args protocol.Args, stream bool) {
+	key := uint64(downloadPath)
+	if stream {
+		key = streamDownloadPath
+	}
+	path, _ := protocol.ArgString(args, key)
 	if path == "" {
 		r.end(t, false, nil, "no path")
 		return

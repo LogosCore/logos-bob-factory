@@ -12,9 +12,9 @@ import (
 // (docs: contracts/task-results-and-actions.md, delete_path): a folder with
 // what is in it only when recursive says so; never a filesystem's root. The
 // output says what went.
-func (r *runner) rm(t *task, args map[string]any) {
-	path, _ := protocol.ArgString(args, "path")
-	recursive, _ := args["recursive"].(bool)
+func (r *runner) rm(t *task, args protocol.Args) {
+	path, _ := protocol.ArgString(args, rmPath)
+	recursive, _ := args[rmRecursive].(bool)
 	if path == "" {
 		r.end(t, false, nil, "no path")
 		return

@@ -18,8 +18,8 @@ func startStream(t *testing.T, body []byte) (*runner, string) {
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := newRunner(description{Commands: []string{"stream_download"}}, &schedule{interval: time.Second})
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: bytes.Repeat([]byte{4}, 16), Cmd: "stream_download", Args: map[string]any{"path": path}})
+	r := newRunner(description{Ops: []uint64{opStreamDownload}}, &schedule{interval: time.Second})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: bytes.Repeat([]byte{4}, 16), Cmd: opStreamDownload, Args: protocol.Args{downloadPath: path}})
 	return r, path
 }
 
@@ -95,7 +95,7 @@ func TestStream(t *testing.T) {
 	if !task.ok || len(task.chunks) != 1 {
 		t.Fatalf("ended %+v", task)
 	}
-	f, err := protocol.ReadFileStream(0, task.chunks[0])
+	f, err := protocol.ReadFileStream(0, asCore(t, protocol.ResultFileStream, task.chunks[0]))
 	sum := sha256.Sum256(body)
 	if err != nil || f.Size != uint64(len(body)) || !bytes.Equal(f.SHA256, sum[:]) {
 		t.Fatalf("data: %+v %v", f, err)
@@ -121,7 +121,7 @@ func TestStreamResumedAhead(t *testing.T) {
 	}
 	r.take(streamAck(t, c.Xfer, 5000, false), nil)
 	task := waitEnd(t, r, 2*time.Second)
-	f, err := protocol.ReadFileStream(0, task.chunks[0])
+	f, err := protocol.ReadFileStream(0, asCore(t, protocol.ResultFileStream, task.chunks[0]))
 	if err != nil || f.SHA256 != nil {
 		t.Fatalf("data: %+v %v", f, err)
 	}

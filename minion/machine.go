@@ -10,7 +10,7 @@ import (
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
-// The hello's machine_id (docs: contracts/minion-messages.md, Machine
+// The hello's machine id (docs: contracts/minion-messages/sessions/, Machine
 // identity): the first of these the minion can read, all by reading files,
 // nothing run, nothing written:
 //
@@ -29,24 +29,26 @@ import (
 // in a test.
 var machineRoot = ""
 
-func machineID() string {
+// machineID is the hello's machine id: its source (a protocol Machine
+// source) and value.
+func machineID() (int, string) {
 	if v := readTrimmed("/sys/class/dmi/id/product_uuid"); v != "" && !protocol.PlaceholderMachineUUID(v) {
-		return protocol.MachineID(protocol.MachineSMBIOSUUID, v)
+		return protocol.MachineSMBIOSUUID, v
 	}
 	if id := containerID(); id != "" {
-		return protocol.MachineID(protocol.MachineContainer, id)
+		return protocol.MachineContainer, id
 	}
 	for _, f := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
 		if v := readTrimmed(f); v != "" && !protocol.PlaceholderMachineUUID(v) {
-			return protocol.MachineID(protocol.MachineLinuxMachineID, v)
+			return protocol.MachineLinuxMachineID, v
 		}
 	}
 	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
-		return protocol.MachineID(protocol.MachineHostname, h)
+		return protocol.MachineHostname, h
 	}
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
-	return protocol.MachineID(protocol.MachineEphemeral, hex.EncodeToString(b))
+	return protocol.MachineEphemeral, hex.EncodeToString(b)
 }
 
 func readTrimmed(path string) string {

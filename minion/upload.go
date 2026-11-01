@@ -49,18 +49,24 @@ type receiving struct {
 	over bool
 }
 
-func (r *runner) upload(ctx context.Context, t *task, args map[string]any, key string) {
-	offer, err := protocol.ArgFile(args, key)
+// upload puts a file core sends on the host: upload's, or stream_upload's
+// (stream).
+func (r *runner) upload(ctx context.Context, t *task, args protocol.Args, stream bool) {
+	fileArg, pathArg, overwriteArg := uint64(uploadArgFile), uint64(uploadArgPath), uint64(uploadArgOverwrite)
+	if stream {
+		fileArg, pathArg, overwriteArg = streamUploadStream, streamUploadPath, streamUploadOverwrite
+	}
+	offer, err := protocol.ArgFile(args, fileArg)
 	if err != nil {
 		r.end(t, false, nil, err.Error())
 		return
 	}
-	if offer.Stream != (key == "stream") {
-		r.end(t, false, nil, fmt.Sprintf("%s: core sent a stream where a file was wanted, or the other way round", key))
+	if offer.Stream != stream {
+		r.end(t, false, nil, "core sent a stream where a file was wanted, or the other way round")
 		return
 	}
-	path, _ := protocol.ArgString(args, "path")
-	overwrite, _ := args["overwrite"].(bool)
+	path, _ := protocol.ArgString(args, pathArg)
+	overwrite, _ := args[overwriteArg].(bool)
 	if path == "" {
 		r.end(t, false, nil, "no path")
 		return
