@@ -33,7 +33,7 @@ func TestCommands(t *testing.T) {
 	for _, c := range buildSchema.TargetCommands(target) {
 		ids = append(ids, c.ID)
 	}
-	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell" {
+	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell connect" {
 		t.Errorf("linux-elf: %s", got)
 	}
 }
@@ -87,7 +87,7 @@ func TestDescribe(t *testing.T) {
 	if m.Format != "logos.bob-dummy.v1" || m.BuildID != req.BuildID || m.Platform != "linux/amd64" ||
 		m.Greeting != "hello from BOB" || m.KillDate != "2027-01-31T00:00:00Z" ||
 		!reflect.DeepEqual(m.Punches, []string{"jab", "hook"}) || !m.BuiltAt.Equal(at) ||
-		!reflect.DeepEqual(m.Ops, []int{1, 2, 3, 4}) {
+		!reflect.DeepEqual(m.Ops, []int{1, 2, 3, 4, 12}) {
 		t.Fatalf("minion %+v", m)
 	}
 	if m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.Badge.URL != "" || badge.URL == "" {

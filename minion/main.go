@@ -1,8 +1,8 @@
 // Command minion is the program BOB compiles for its linux-elf target: a
 // dummy minion. BOB writes the build's description to minion.json before
 // compiling, so it is baked into the binary (the minion.json kept here is a
-// placeholder). Run, the minion stages with core through its first HTTP
-// connection, says hello to open a session, then checks in with a get_tasks
+// placeholder). Run, the minion stages with core through the first of its
+// connections it can use (conns.go), says hello to open a session, then checks in with a get_tasks
 // every check-in interval of the connection, with its jitter, and logs each
 // step (docs: contracts/minion-messages.md). It keeps its session through
 // failures on the way, and starts over when core closes the session, after
@@ -89,28 +89,17 @@ func run() error {
 	if err := json.Unmarshal(d.Crypto.Material, &keys); err != nil {
 		return fmt.Errorf("the build's keys: %w", err)
 	}
-	conn, err := httpConnection(d.Connections)
+	tr, err := newTransport(d.Connections)
 	if err != nil {
 		return err
 	}
-	sched := conn.schedule()
+	// The schedule is the first connection's; a connect leaves it as it is.
+	sched := tr.conn().schedule()
 	log.Printf("build %s, crypto %s", d.BuildID, d.Crypto.Suite)
 	// A reverse-persistent connection keeps a WebSocket open: core pushes
 	// tasks over it; check-ins go on, on the schedule, to restate the
 	// allowance.
-	var link *wsLink
-	ex := func(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
-		return exchange(conn, id, keys, items...)
-	}
-	if conn.ConnectionKind() == protocol.KindReversePersistent {
-		link = newWSLink(conn)
-		ex = link.exchange
-		log.Printf("channel http %q (WebSocket %s), check-in every %s ± %g%%", conn.Endpoint.Name, conn.wsURL(),
-			sched.interval, sched.jitter)
-	} else {
-		log.Printf("channel http %q (%s %s), check-in every %s ± %g%%", conn.Endpoint.Name, conn.method(), conn.url(),
-			sched.interval, sched.jitter)
-	}
+	log.Printf("%s of %d, check-in every %s ± %g%%", tr.describe(), len(tr.conns), sched.interval, sched.jitter)
 
 	// The persisted session the build claims, if it has one: given up for
 	// this process once another process takes it (session_replaced).
@@ -128,7 +117,7 @@ func run() error {
 	// another process claiming it, or the backstop, stages again after a
 	// check-in interval.
 	for {
-		err := session(ex, link, sched, d, buildID, keys, claim)
+		err := session(tr, sched, d, buildID, keys, claim)
 		if errors.Is(err, errReplaced) && claim != nil {
 			claim = nil
 			log.Printf("another process holds the persisted session: this one goes on in a session of its own")
@@ -145,16 +134,15 @@ func run() error {
 // request, or over the WebSocket.
 type exchanger func(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error)
 
-func session(ex exchanger, link *wsLink, sched schedule, d description, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte) error {
-	if link != nil {
-		// A new session starts on a new WebSocket.
-		defer link.close()
-	}
+func session(tr *transport, sched schedule, d description, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte) error {
+	// A new session starts on a new WebSocket.
+	defer tr.closeLink()
+	ex := tr.exchange
 	tempID, newKeys, err := stage(ex, buildID, keys)
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
-	sessionID, err := hello(ex, tempID, newKeys, claim, sched)
+	sessionID, err := hello(ex, tempID, newKeys, claim, sched, tr.place())
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
@@ -166,64 +154,16 @@ func session(ex exchanger, link *wsLink, sched schedule, d description, buildID 
 	// core's sealed session_closed, or the backstop, starts over (docs:
 	// "When an exchange fails").
 	tasks := newRunner(d, &sched)
-	var pushes chan protocol.CoreMessage
-	var lost chan struct{}
-	if link != nil {
-		pushes, lost = link.pushes, link.lost
-	}
 	// A WebSocket that closed is opened again at once, then after 1s,
 	// doubling up to the endpoint's ws_reconnect_backoff: the check-in that
 	// reopens it links it to the session again.
 	backoff := time.Second
 	lastOK := time.Now()
-	for n := 1; ; n++ {
-		// On a WebSocket the first check-in goes at once: it links the
-		// connection to the session and sets the allowance core pushes
-		// tasks within.
-		if !tasks.pending() && (link == nil || n > 1) {
-			wait := sched.next()
-			if p := tasks.pollEvery(); p > 0 && p < wait {
-				wait = p
-			}
-			log.Printf("next check-in in %s", wait.Round(time.Millisecond))
-			timer := time.NewTimer(wait)
-		waiting:
-			for {
-				select {
-				case <-timer.C:
-					break waiting
-				case <-tasks.wake:
-					timer.Stop()
-					break waiting
-				case <-lost:
-					timer.Stop()
-					log.Printf("the WebSocket closed: connecting again in %s", backoff)
-					time.Sleep(backoff)
-					backoff = min(2*backoff, link.conn.wsBackoff())
-					break waiting
-				case push := <-pushes:
-					// What core starts over the WebSocket: tasks within the
-					// allowance, cancels. Their acks go with the next message.
-					if e, ok := coreErrItem(push); ok && e.Code == protocol.ErrItemSessionClosed {
-						timer.Stop()
-						return errors.New("core closed the session")
-					}
-					tasks.take(push, nil)
-				}
-			}
-		}
-		items := tasks.outgoing()
-		answer, err := ex(sessionID, newKeys, items...)
-		if err != nil {
-			tasks.failed(items)
-			if since := time.Since(lastOK); since >= backstop {
-				return fmt.Errorf("check-in %d: nothing has worked for %s: %w", n, since.Round(time.Second), err)
-			}
-			log.Printf("check-in %d failed, keeping the session: %v", n, err)
-			// Not at once again: the channel may be out of reach.
-			time.Sleep(sched.next())
-			continue
-		}
+	// back is the move back a connect with a duration owes; nil for none.
+	var back *revert
+	// answered takes core's answer to items: false when the session ends
+	// (err says why).
+	answered := func(n int, items []any, answer protocol.CoreMessage) error {
 		lastOK = time.Now()
 		backoff = time.Second
 		if tasks.delivered(items) {
@@ -242,6 +182,146 @@ func session(ex exchanger, link *wsLink, sched schedule, d description, buildID 
 			log.Printf("check-in %d: core says err %d: %s; keeping the session", n, e.Code, e.Msg)
 		}
 		tasks.take(answer, items)
+		return nil
+	}
+	// move goes to the connection at place: a check-in through it, with a
+	// conn_update saying why, taken like any check-in's answer (on a
+	// WebSocket it links it and sets the allowance at once). It fails,
+	// changing nothing, when the new connection does not answer: what the
+	// check-in carried goes again through the one in use.
+	move := func(n, place int, why string) error {
+		from := tr.place()
+		rest := tasks.outgoing()
+		update := protocol.ConnUpdateItem{T: protocol.ItemConnUpdate, Conn: uint64(place), Reason: why} //nolint:gosec // a small place
+		items := append([]any{update}, rest...)
+		answer, err := tr.try(place, sessionID, newKeys, items...)
+		if err != nil {
+			tasks.failed(rest)
+			return fmt.Errorf("connection %d did not answer, staying on %d: %w", place, from, err)
+		}
+		logSwitch(from, place, why)
+		log.Printf("now on %s", tr.describe())
+		return answered(n, items, answer)
+	}
+	// switchTo carries out a connect: the session's own errors end it.
+	var ended error
+	switchTo := func(n int, req switchReq) {
+		if err := tr.check(req.place); err != nil {
+			req.done <- err
+			return
+		}
+		from := tr.place()
+		why := "operator"
+		if req.dur > 0 {
+			why = fmt.Sprintf("operator, for %s", req.dur)
+		}
+		err := move(n, req.place, why)
+		switch {
+		case err == nil:
+			back = nil
+			if req.dur > 0 {
+				back = &revert{place: from, at: time.Now().Add(req.dur), after: req.dur}
+			}
+			req.done <- nil
+		case tr.place() == req.place:
+			// Moved, and then the session ended.
+			req.done <- nil
+			ended = err
+		default:
+			req.done <- err
+		}
+	}
+	for n := 1; ; n++ {
+		if ended != nil {
+			return ended
+		}
+		// A connect waiting, or a move back that is due, goes first.
+		select {
+		case req := <-tasks.switches:
+			switchTo(n, req)
+			continue
+		default:
+		}
+		if back != nil && !time.Now().Before(back.at) {
+			if err := move(n, back.place, fmt.Sprintf("back after %s", back.after)); err != nil {
+				if tr.place() == back.place {
+					return err
+				}
+				log.Printf("moving back: %v; trying again at the next check-in", err)
+				back.at = time.Now().Add(sched.next())
+			} else {
+				back = nil
+			}
+			continue
+		}
+		// On a WebSocket the first check-in goes at once: it links the
+		// connection to the session and sets the allowance core pushes
+		// tasks within.
+		if !tasks.pending() && (tr.ws == nil || n > 1) {
+			wait := sched.next()
+			if p := tasks.pollEvery(); p > 0 && p < wait {
+				wait = p
+			}
+			var due <-chan time.Time
+			if back != nil {
+				due = time.After(time.Until(back.at))
+			}
+			log.Printf("next check-in in %s", wait.Round(time.Millisecond))
+			timer := time.NewTimer(wait)
+		waiting:
+			for {
+				select {
+				case <-timer.C:
+					break waiting
+				case <-tasks.wake:
+					timer.Stop()
+					break waiting
+				case <-due:
+					timer.Stop()
+					break waiting
+				case req := <-tasks.switches:
+					timer.Stop()
+					switchTo(n, req)
+					break waiting
+				case <-tr.lost():
+					timer.Stop()
+					log.Printf("the WebSocket closed: connecting again in %s", backoff)
+					time.Sleep(backoff)
+					backoff = min(2*backoff, tr.conn().wsBackoff())
+					break waiting
+				case push := <-tr.pushes():
+					// What core starts over the WebSocket: tasks within the
+					// allowance, cancels. Their acks go with the next message.
+					if e, ok := coreErrItem(push); ok && e.Code == protocol.ErrItemSessionClosed {
+						timer.Stop()
+						return errors.New("core closed the session")
+					}
+					tasks.take(push, nil)
+				}
+			}
+		}
+		if ended != nil || (back != nil && !time.Now().Before(back.at)) {
+			continue
+		}
+		// A connect that came meanwhile goes first.
+		if len(tasks.switches) > 0 {
+			continue
+		}
+		items := tasks.outgoing()
+		answer, err := tr.exchange(sessionID, newKeys, items...)
+		if err != nil {
+			tasks.failed(items)
+			if since := time.Since(lastOK); since >= backstop {
+				return fmt.Errorf("check-in %d: nothing has worked for %s: %w", n, since.Round(time.Second), err)
+			}
+			log.Printf("check-in %d failed, keeping the session: %v", n, err)
+			// Not at once again: the channel may be out of reach.
+			time.Sleep(sched.next())
+			continue
+		}
+		if err := answered(n, items, answer); err != nil {
+			return err
+		}
 		if asked := slices.ContainsFunc(items, func(it any) bool { _, ok := it.(protocol.GetTasksItem); return ok }); asked {
 			log.Printf("check-in %d: get_tasks max 1, %d item(s) sent, %d back", n, len(items), len(answer.Items))
 		} else {
@@ -331,10 +411,12 @@ func stage(ex exchanger, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Mate
 // hello sends the host and process under the temporary id, sealed with the
 // new keys, with its check-in schedule, claiming the persisted session when
 // claim is set, and returns the session id core gave.
-func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte, sched schedule) ([16]byte, error) {
+func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte, sched schedule, conn int) ([16]byte, error) {
 	var sessionID [16]byte
 	h := describeHost()
 	h.SID = claim
+	// The connection it says hello through, by its place in the build's.
+	h.Conn = uint64(conn) //nolint:gosec // a small place
 	// The schedule it checks in by, for core to tell when it is late.
 	h.Sleep = &protocol.Sleep{Interval: uint64(max(1, sched.interval.Milliseconds())), Jitter: uint64(sched.jitter)}
 	log.Printf("hello: pid %d, %s/%s, host %q, user %q, integrity %d, addrs %v", h.PID, h.OS, h.Arch, h.Host, h.User, h.Integrity, h.Addrs)
@@ -506,16 +588,6 @@ func item(answer protocol.CoreMessage, t int) []byte {
 // BOB's own parameters for it.
 type connection struct {
 	protocol.BuildConnection
-}
-
-// httpConnection is the first connection through an http channel.
-func httpConnection(conns []protocol.BuildConnection) (connection, error) {
-	for _, c := range conns {
-		if c.Endpoint.Channel.ModuleName == "http" {
-			return connection{c}, nil
-		}
-	}
-	return connection{}, errors.New("built without an http connection")
 }
 
 func (c connection) param(key string) string {

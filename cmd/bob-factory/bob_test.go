@@ -42,7 +42,7 @@ func TestBuildDummyMinion(t *testing.T) {
 		t.Fatalf("the binary printed %s: %v", artifact, err)
 	}
 	if m.BuildID != req.BuildID || m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.BuiltBy != "bob bob-test test" ||
-		m.Connections[0].Values["path_prefix"] != "/cdn/assets/" || !slices.Equal(m.Ops, []int{1, 2, 3, 4}) {
+		m.Connections[0].Values["path_prefix"] != "/cdn/assets/" || !slices.Equal(m.Ops, []int{1, 2, 3, 4, 12}) {
 		t.Fatalf("minion %+v", m)
 	}
 	if strings.Contains(string(artifact), badge.URL) || !strings.Contains(res.Log, "dummy minion of build 5b0c4f6e") {

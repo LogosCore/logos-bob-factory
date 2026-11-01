@@ -84,10 +84,13 @@ type runner struct {
 	// exitID: the exit task, whose end delivered stops the minion.
 	exitID []byte
 	wake   chan struct{}
+	// switches are connect tasks asking the session to move (conns.go).
+	switches chan switchReq
 }
 
 func newRunner(d description, sched *schedule) *runner {
-	return &runner{greeting: d.Greeting, ops: d.Ops, sched: sched, seen: map[string]time.Time{}, wake: make(chan struct{}, 1)}
+	return &runner{greeting: d.Greeting, ops: d.Ops, sched: sched, seen: map[string]time.Time{}, wake: make(chan struct{}, 1),
+		switches: make(chan switchReq, 1)}
 }
 
 // nudge asks for an early check-in: there is output to send.
@@ -525,6 +528,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.shell(ctx, t, ti.Args)
 	case opSleep:
 		r.sleep(t, ti.Args)
+	case opConnect:
+		r.connect(ctx, t, ti.Args)
 	case opExit:
 		r.write(t, []byte("bye\n"), nil)
 		r.end(t, true, nil, "")
