@@ -82,8 +82,8 @@ func newWSChannel(t *testing.T, keys protocol.AES256CBCHMACSHA256Material) *wsCh
 }
 
 func wsTestConnection(url string) connection {
-	return connection{protocol.BuildConnection{Kind: protocol.KindReversePersistent,
-		Endpoint: protocol.ChannelEndpointExport{Params: map[string]any{"base_url": url, "request_timeout": "5s"}}}}
+	return connection{protocol.BuildConnection{
+		Endpoint: protocol.ChannelEndpointExport{Kind: protocol.KindReversePersistent, Params: map[string]any{"base_url": url, "request_timeout": "5s"}}}}
 }
 
 // Over the WebSocket each message gets the reply naming it, and what core

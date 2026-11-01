@@ -19,27 +19,26 @@ import (
 // parameters, and commands of each kind (required, picked by default, picked
 // by the operator), so the build flow can be worked out end to end before a
 // real factory exists. Version 2: the JSON-only targets dummy and dummy-lite
-// are gone.
+// are gone. Version 3: connection parameters by kind.
 var buildSchema = protocol.BuildSchema{
-	SchemaVersion: protocol.BuildSchemaV2,
-	Version:       2,
+	SchemaVersion: protocol.BuildSchemaV3,
+	Version:       3,
 	Channels: []protocol.BuildChannel{{
+		ModuleName: "http", Versions: []int{3},
 		// Requests first (a build that names no kind polls), and a WebSocket
-		// core pushes tasks over.
-		ChannelVersions: protocol.ChannelVersions{ModuleName: "http", Versions: []int{2},
-			Kinds: []string{protocol.KindReverseCall, protocol.KindReversePersistent}},
-		Fields: []protocol.FieldSpec{
-			{
-				Key: "method", Type: protocol.FieldEnum, Label: "Method", Default: "POST", Group: "HTTP", Order: 1,
-				Description: "The HTTP method the minion sends its messages with.",
-				Options:     []protocol.EnumOption{{Value: "GET"}, {Value: "POST"}, {Value: "PUT"}},
-			},
-			{
-				Key: "path_prefix", Type: protocol.FieldString, Format: protocol.FormatPath, Label: "Path prefix", Default: "/",
-				Group: "HTTP", Order: 2,
-				Description: "Every request path starts with it, e.g. /cdn/assets/ when the front forwards only that path.",
-				Pattern:     `^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`, MaxLength: 256,
-			},
+		// core pushes tasks over, whose handshake is always a GET.
+		Kinds: []protocol.BuildKind{
+			{Kind: protocol.KindReverseCall, Fields: []protocol.FieldSpec{
+				{
+					Key: "method", Type: protocol.FieldEnum, Label: "Method", Default: "POST", Group: "HTTP", Order: 1,
+					Description: "The HTTP method the minion sends its messages with.",
+					Options:     []protocol.EnumOption{{Value: "GET"}, {Value: "POST"}, {Value: "PUT"}},
+				},
+				pathPrefix("Every request path starts with it, e.g. /cdn/assets/ when the front forwards only that path."),
+			}},
+			{Kind: protocol.KindReversePersistent, Fields: []protocol.FieldSpec{
+				pathPrefix("The WebSocket's path starts with it, e.g. /cdn/assets/ when the front forwards only that path."),
+			}},
 		},
 	}},
 	// Its minions encrypt with AES-256-CBC and HMAC-SHA256; core generates
@@ -162,6 +161,15 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 	},
+}
+
+// pathPrefix is BOB's path prefix parameter, described for its kind.
+func pathPrefix(help string) protocol.FieldSpec {
+	return protocol.FieldSpec{
+		Key: "path_prefix", Type: protocol.FieldString, Format: protocol.FormatPath, Label: "Path prefix", Default: "/",
+		Group: "HTTP", Order: 2, Description: help,
+		Pattern: `^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`, MaxLength: 256,
+	}
 }
 
 // dummyMinion is BOB's artifact.

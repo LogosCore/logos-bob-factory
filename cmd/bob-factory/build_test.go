@@ -55,11 +55,11 @@ func coreRequest(t *testing.T) protocol.BuildRequest {
 		Commands: buildSchema.DefaultCommands(target),
 		Connections: []protocol.BuildConnection{{
 			Endpoint: protocol.ChannelEndpointExport{
-				Format: protocol.ChannelEndpointExportV1, Name: "edge-eu",
-				Channel: protocol.ExportChannel{ModuleName: "http", SchemaVersion: 2},
+				Format: protocol.ChannelEndpointExportV2, Name: "edge-eu", Kind: protocol.KindReverseCall,
+				Channel: protocol.ExportChannel{ModuleName: "http", SchemaVersion: 3},
 				Params:  map[string]any{"base_url": "https://edge-eu.example.com"},
 			},
-			Values: protocol.ResolveFieldValues(http.Fields, map[string]any{"path_prefix": "/cdn/assets/"}),
+			Values: protocol.ResolveFieldValues(http.KindFields(protocol.KindReverseCall), map[string]any{"path_prefix": "/cdn/assets/"}),
 		}},
 		Files: map[string]protocol.BuildFile{"badge-1": {
 			ID: "badge-1", Name: "badge.png", Size: 3, SHA256: strings.Repeat("ab", 32), MediaType: "image/png",
