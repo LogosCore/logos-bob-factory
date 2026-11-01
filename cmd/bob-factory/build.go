@@ -141,9 +141,9 @@ var buildSchema = protocol.BuildSchema{
 			Params: []protocol.FieldSpec{
 				{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true, Order: 1},
 				{Key: "depth", Type: protocol.FieldInt, Label: "Depth", Default: 0, Order: 2,
-					Description: "How many levels of folders under it to go down; 0 for all (max_folders still stops it)."},
-				{Key: "max_folders", Type: protocol.FieldInt, Label: "At most", Default: 10000, Order: 3,
-					Description: "Folders to list before it stops."},
+					Description: "How many levels of folders under it to go down; 0 for all."},
+				{Key: "max_folders", Type: protocol.FieldInt, Label: "At most", Default: 0, Order: 3,
+					Description: "Folders to list before it stops; 0 for no limit (stop it from its task)."},
 				{Key: "hidden", Type: protocol.FieldBool, Label: "Into hidden folders", Default: true, Order: 4},
 				{Key: "one_fs", Type: protocol.FieldBool, Label: "Stay on its file system", Default: true, Order: 5,
 					Description: "Folders on another file system (a mount, /proc) are not entered."},

@@ -24,17 +24,16 @@ const walkReport = 2 * time.Second
 // contracts/minion-messages.md, Listings), and says where it stands as a
 // dir_walk: the folders and entries so far, those not read, those not
 // entered (deeper than depth, past max_folders, another file system,
-// hidden when not wanted). Links are not followed.
+// hidden when not wanted). Links are not followed. A depth or max_folders
+// of 0 is no limit.
 func (r *runner) walk(ctx context.Context, t *task, args map[string]any) {
 	path, _ := protocol.ArgString(args, "path")
 	if path == "" {
 		path = "."
 	}
 	depth, _ := protocol.ArgInt(args, "depth")
-	most, ok := protocol.ArgInt(args, "max_folders")
-	if !ok || most <= 0 {
-		most = 10000
-	}
+	// 0, or none: no limit.
+	most, _ := protocol.ArgInt(args, "max_folders")
 	hidden := argBool(args, "hidden", true)
 	oneFS := argBool(args, "one_fs", true)
 
@@ -69,7 +68,7 @@ func (r *runner) walk(ctx context.Context, t *task, args map[string]any) {
 			r.end(t, false, nil, "cancelled")
 			return
 		}
-		if int64(w.Folders+w.Unread) >= most {
+		if most > 0 && int64(w.Folders+w.Unread) >= most {
 			w.Skipped += uint64(len(queue))
 			break
 		}

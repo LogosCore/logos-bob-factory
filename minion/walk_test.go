@@ -105,6 +105,12 @@ func TestWalk(t *testing.T) {
 		t.Fatalf("where it stood: %+v", w)
 	}
 
+	// No limits at all: every folder but the one it may not read.
+	folders, _, w, _ = runWalk(t, map[string]any{"path": root, "depth": int64(0), "max_folders": int64(0)})
+	if len(folders) != 7 || w.Skipped != 0 {
+		t.Fatalf("no limits: %v %+v", rel(folders), w)
+	}
+
 	// Without hidden folders, and at most two folders.
 	folders, _, w, _ = runWalk(t, map[string]any{"path": root, "depth": int64(0), "hidden": false, "max_folders": int64(2)})
 	if got := rel(folders); !slices.Equal(got, []string{".", "a"}) || w.Folders != 2 || w.Skipped == 0 {
