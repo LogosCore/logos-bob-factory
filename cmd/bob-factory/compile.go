@@ -51,7 +51,8 @@ func compile(ctx context.Context, src, target, platform string, minion []byte, l
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(dir)
+	// A build's scratch copy: one left behind (a busy file) is only space.
+	defer func() { _ = os.RemoveAll(dir) }()
 	if err := os.CopyFS(dir, os.DirFS(src)); err != nil {
 		return nil, fmt.Errorf("copy the minion sources: %w", err)
 	}
@@ -68,7 +69,8 @@ func compile(ctx context.Context, src, target, platform string, minion []byte, l
 		"GOOS="+pair[0], "GOARCH="+pair[1], "CGO_ENABLED=0",
 		"GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local", "GOPROXY=off",
 	)
-	fmt.Fprintf(log, "$ GOOS=%s GOARCH=%s CGO_ENABLED=0 go %s\n", pair[0], pair[1], strings.Join(cmd.Args[1:], " "))
+	// The build log's own line: a write it refuses fails the compile below.
+	_, _ = fmt.Fprintf(log, "$ GOOS=%s GOARCH=%s CGO_ENABLED=0 go %s\n", pair[0], pair[1], strings.Join(cmd.Args[1:], " "))
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {

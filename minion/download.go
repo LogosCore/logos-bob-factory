@@ -76,7 +76,7 @@ func (r *runner) sendFile(ctx context.Context, t *task, args map[string]any, str
 		r.end(t, false, nil, err.Error())
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only: nothing to lose on close
 	info, err := f.Stat()
 	if err != nil {
 		r.end(t, false, nil, err.Error())

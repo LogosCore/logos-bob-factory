@@ -65,10 +65,10 @@ func main() {
 	}
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.SetPrefix("minion ")
-	if err := run(); err != nil {
-		log.Printf("failed: %v", err)
-		os.Exit(1)
-	}
+	// run goes on until the process is stopped: it returns only when it
+	// cannot start (a description or keys it cannot read).
+	log.Printf("failed: %v", run())
+	os.Exit(1)
 }
 
 // run stages, says hello under the temporary id with the new keys, and
@@ -518,7 +518,7 @@ func (c connection) send(body []byte) ([]byte, int, time.Duration, error) {
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("reach the channel: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read to its end, or the exchange failed anyway
 	reply, err := io.ReadAll(io.LimitReader(resp.Body, protocol.MaxMinionMessageSize+1024))
 	return reply, resp.StatusCode, time.Since(start), err
 }
