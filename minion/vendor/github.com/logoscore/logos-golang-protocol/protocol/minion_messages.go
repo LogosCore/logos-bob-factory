@@ -241,6 +241,9 @@ type ResultItem struct {
 	// (task_results.go). ResultData encodes one.
 	Data cbor.RawMessage `cbor:"data,omitempty"`
 	Exit *int64          `cbor:"exit,omitempty"`
+	// Ls is what the task saw of the host's file system: listings, in
+	// pieces (ListingPiece), beside or instead of out and data.
+	Ls []ListingPiece `cbor:"ls,omitempty"`
 }
 
 // Validate checks the task id, and ok and exit against done.
@@ -256,6 +259,11 @@ func (r ResultItem) Validate() error {
 		return errors.New("result: only the done part has an exit code")
 	case len(r.Data) > 0 && !isCBORMap(r.Data):
 		return errors.New("result: data is a map")
+	}
+	for _, p := range r.Ls {
+		if err := p.Validate(); err != nil {
+			return fmt.Errorf("result: %w", err)
+		}
 	}
 	return nil
 }

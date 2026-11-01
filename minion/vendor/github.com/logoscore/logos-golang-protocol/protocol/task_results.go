@@ -32,6 +32,10 @@ const (
 	// ResultFileStream is a file the minion streamed to whoever downloaded
 	// it (FileStream): core keeps none of it, the data says which file.
 	ResultFileStream = "file_stream"
+	// ResultDirWalk is a walk through a directory and what is under it
+	// (DirWalk): its listings go to core as they come (ResultItem.Ls), the
+	// data says where it stands.
+	ResultDirWalk = "dir_walk"
 )
 
 // Actions.
@@ -56,6 +60,10 @@ const (
 	// gives path and recursive (a folder with what is in it). It has no
 	// result: the task's output says what went.
 	ActionDeletePath = "delete_path"
+	// ActionWalkDir lists a directory and the folders under it, as deep as
+	// the command goes: core gives path; the command's result is a
+	// ResultDirWalk.
+	ActionWalkDir = "walk_dir"
 )
 
 // results are the results this version defines.
@@ -64,6 +72,7 @@ var results = map[string]bool{
 	ResultFileDownload: true,
 	ResultFileUpload:   true,
 	ResultFileStream:   true,
+	ResultDirWalk:      true,
 }
 
 // CommandAction is an action's contract: the params core gives when it runs a
@@ -85,6 +94,7 @@ var actions = map[string]CommandAction{
 	ActionUploadStream: {Params: map[string]FieldType{"path": FieldString, "stream": FieldStream, "overwrite": FieldBool},
 		Result: ResultFileUpload},
 	ActionDeletePath: {Params: map[string]FieldType{"path": FieldString, "recursive": FieldBool}},
+	ActionWalkDir:    {Params: map[string]FieldType{"path": FieldString}, Result: ResultDirWalk},
 }
 
 // KnownResult reports whether this version defines the result.
@@ -203,15 +213,8 @@ func ReadDirListing(seq uint64, data cbor.RawMessage) (*DirListing, error) {
 	} else if l.Path != "" || l.Sep != "" || l.Parent != "" {
 		return nil, errors.New("dir_listing: only the first part has path, sep and parent")
 	}
-	for i, e := range l.Entries {
-		switch {
-		case e.Name == "" || e.Name == "." || e.Name == "..":
-			return nil, fmt.Errorf("dir_listing: entry %d: a name, not %q", i, e.Name)
-		case strings.ContainsAny(e.Name, "/\x00"):
-			return nil, fmt.Errorf("dir_listing: entry %d: a name without / (%q)", i, e.Name)
-		case e.Type == "":
-			return nil, fmt.Errorf("dir_listing: entry %d (%q): no type", i, e.Name)
-		}
+	if err := validateEntries(l.Entries); err != nil {
+		return nil, fmt.Errorf("dir_listing: %w", err)
 	}
 	return &l, nil
 }
@@ -232,4 +235,98 @@ func ResultData(v any) (cbor.RawMessage, error) {
 // isCBORMap reports whether b starts a CBOR map (major type 5).
 func isCBORMap(b []byte) bool {
 	return len(b) > 0 && b[0]>>5 == 5
+}
+
+// validateEntries checks a directory's entries: each a name and a type.
+func validateEntries(entries []DirEntry) error {
+	for i, e := range entries {
+		switch {
+		case e.Name == "" || e.Name == "." || e.Name == "..":
+			return fmt.Errorf("entry %d: a name, not %q", i, e.Name)
+		case strings.ContainsAny(e.Name, "/\x00"):
+			return fmt.Errorf("entry %d: a name without / (%q)", i, e.Name)
+		case e.Type == "":
+			return fmt.Errorf("entry %d (%q): no type", i, e.Name)
+		}
+	}
+	return nil
+}
+
+// ListingPiece is a piece of what a task saw of the host's file system, on
+// a result part (ResultItem.Ls; docs: contracts/minion-messages.md,
+// Listings): a directory's listing, numbered ID within its task, in pieces
+// numbered Part from 0, the last with Last. The first piece names the
+// directory (Path, Sep, Parent), every piece adds entries. Any command can
+// send listings; core keeps them in its file system snapshot as they come,
+// outside the task's output and data.
+type ListingPiece struct {
+	ID   uint64 `cbor:"id"`
+	Part uint64 `cbor:"part"`
+	Last bool   `cbor:"last,omitempty"`
+	// Path is the directory listed, absolute, as the host writes it; Sep
+	// the host's separator ("/" or "\"); Parent the directory above it,
+	// empty at a root. On part 0 only.
+	Path    string     `cbor:"path,omitempty"`
+	Sep     string     `cbor:"sep,omitempty"`
+	Parent  string     `cbor:"parent,omitempty"`
+	Entries []DirEntry `cbor:"entries,omitempty"`
+	// Partial: some entries could not be read; the listing is not the
+	// whole directory, so core takes what it has and says nothing of the
+	// rest.
+	Partial bool `cbor:"partial,omitempty"`
+	// Err: the directory could not be read at all (permission denied); on
+	// a single last piece, with no entries.
+	Err string `cbor:"err,omitempty"`
+}
+
+// Validate checks a piece: the first names its directory, the rest do
+// not; an unreadable directory is one piece with no entries.
+func (p ListingPiece) Validate() error {
+	if p.Part == 0 {
+		switch {
+		case p.Path == "":
+			return errors.New("listing: the first piece names the directory (path)")
+		case p.Sep != "/" && p.Sep != `\`:
+			return errors.New(`listing: sep is "/" or "\"`)
+		}
+	} else if p.Path != "" || p.Sep != "" || p.Parent != "" {
+		return errors.New("listing: only the first piece has path, sep and parent")
+	}
+	if p.Err != "" && (p.Part != 0 || !p.Last || len(p.Entries) > 0) {
+		return errors.New("listing: an unreadable directory is one last piece, without entries")
+	}
+	if err := validateEntries(p.Entries); err != nil {
+		return fmt.Errorf("listing %d: %w", p.ID, err)
+	}
+	return nil
+}
+
+// DirWalk is a dir_walk part's data: where the walk stands. Each part says
+// it whole (the latest part's is the walk's): the directory it began at,
+// the folders listed and their entries, those it could not read, those it
+// did not enter (deeper than it goes, another file system, past its
+// limit), and the folder it is reading, none once it ended.
+type DirWalk struct {
+	// Root is the directory walked, absolute, as the host writes it.
+	Root    string `cbor:"root" json:"root"`
+	Folders uint64 `cbor:"folders" json:"folders"`
+	Entries uint64 `cbor:"entries" json:"entries"`
+	Unread  uint64 `cbor:"unread,omitempty" json:"unread,omitempty"`
+	Skipped uint64 `cbor:"skipped,omitempty" json:"skipped,omitempty"`
+	Current string `cbor:"current,omitempty" json:"current,omitempty"`
+	// X holds a factory's own fields.
+	X map[string]any `cbor:"x,omitempty" json:"x,omitempty"`
+}
+
+// ReadDirWalk decodes a dir_walk part's data and checks it: every part
+// names the directory walked.
+func ReadDirWalk(_ uint64, data cbor.RawMessage) (*DirWalk, error) {
+	var w DirWalk
+	if err := cborDec.Unmarshal(data, &w); err != nil {
+		return nil, fmt.Errorf("dir_walk: %w", err)
+	}
+	if w.Root == "" {
+		return nil, errors.New("dir_walk: root names the directory walked")
+	}
+	return &w, nil
 }
