@@ -41,3 +41,12 @@ func name(kind string, id uint32) string {
 	names.Store(key, n)
 	return n
 }
+
+// device is the file system a file is on; ok false where the host does not say.
+func device(info fs.FileInfo) (uint64, bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return uint64(st.Dev), true //nolint:unconvert // Dev is int32 on some platforms
+}

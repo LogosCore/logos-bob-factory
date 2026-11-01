@@ -33,7 +33,7 @@ func TestCommands(t *testing.T) {
 	for _, c := range buildSchema.TargetCommands(target) {
 		ids = append(ids, c.ID)
 	}
-	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm shell" {
+	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell" {
 		t.Errorf("linux-elf: %s", got)
 	}
 }

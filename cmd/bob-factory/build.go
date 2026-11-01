@@ -134,6 +134,22 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 		{
+			ID: "walk", Label: "Walk a directory",
+			Description: "Lists a directory and the folders under it, breadth first, into core's file browser as it goes; links are not followed.",
+			Action:      protocol.ActionWalkDir,
+			Result:      protocol.ResultDirWalk,
+			Params: []protocol.FieldSpec{
+				{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true, Order: 1},
+				{Key: "depth", Type: protocol.FieldInt, Label: "Depth", Default: 5, Order: 2,
+					Description: "How many levels of folders under it to go down; 0 for all."},
+				{Key: "max_folders", Type: protocol.FieldInt, Label: "At most", Default: 10000, Order: 3,
+					Description: "Folders to list before it stops."},
+				{Key: "hidden", Type: protocol.FieldBool, Label: "Into hidden folders", Default: true, Order: 4},
+				{Key: "one_fs", Type: protocol.FieldBool, Label: "Stay on its file system", Default: true, Order: 5,
+					Description: "Folders on another file system (a mount, /proc) are not entered."},
+			},
+		},
+		{
 			ID: "shell", Label: "Run a shell command",
 			Description: "Runs a command in the system shell and answers with its output.",
 			Params: []protocol.FieldSpec{
