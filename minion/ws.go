@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/logoscore/logos-golang-protocol/protocol"
@@ -22,6 +23,10 @@ import (
 // has nothing to say), and the messages core starts, tasks pushed within the
 // minion's get_tasks allowance and cancels. The session goes on over it as
 // it would through requests; when it drops, the next exchange opens another.
+// While it is open the minion does not check in on a schedule: core pushes
+// what it has, the channel closes the socket when its own to core closes
+// (so the minion connects again and its first message links the new one),
+// and the minion pings every wsPing to find a link that died silently.
 
 // wsLink is the minion's WebSocket to the channel.
 type wsLink struct {
@@ -97,7 +102,35 @@ func (l *wsLink) open() (*websocket.Conn, error) {
 	l.ws = ws
 	log.Printf("WebSocket open to %s", l.conn.wsURL())
 	go l.read(ws)
+	go l.ping(ws)
 	return ws, nil
+}
+
+// wsPing is how often the minion pings the channel over its WebSocket.
+var wsPing = 30 * time.Second
+
+// ping pings the channel every wsPing until ws closes; one not answered
+// within the connection's request timeout closes ws, which the session
+// sees as lost.
+func (l *wsLink) ping(ws *websocket.Conn) {
+	t := time.NewTicker(wsPing)
+	defer t.Stop()
+	for range t.C {
+		l.mu.Lock()
+		current := l.ws == ws
+		l.mu.Unlock()
+		if !current {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), l.conn.timeout())
+		err := ws.Ping(ctx)
+		cancel()
+		if err != nil {
+			log.Printf("WebSocket ping not answered: %v", err)
+			_ = ws.CloseNow()
+			return
+		}
+	}
 }
 
 // read takes what comes over ws until it closes: replies to their waiters,

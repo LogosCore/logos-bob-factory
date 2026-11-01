@@ -159,6 +159,9 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	// reopens it links it to the session again.
 	backoff := time.Second
 	lastOK := time.Now()
+	// retrying: the last exchange failed, so the next goes on the schedule
+	// even over a WebSocket.
+	retrying := false
 	// back is the move back a connect with a duration owes; nil for none.
 	var back *revert
 	// answered takes core's answer to items: false when the session ends
@@ -256,7 +259,9 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		}
 		// On a WebSocket the first check-in goes at once: it links the
 		// connection to the session and sets the allowance core pushes
-		// tasks within.
+		// tasks within. After that, while it stays open, nothing goes on a
+		// schedule: only what there is to send (output, acks), what core
+		// pushes, and a failed exchange's retry.
 		if !tasks.pending() && (tr.ws == nil || n > 1) {
 			wait := sched.next()
 			if p := tasks.pollEvery(); p > 0 && p < wait {
@@ -266,8 +271,16 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			if back != nil {
 				due = time.After(time.Until(back.at))
 			}
-			log.Printf("next check-in in %s", wait.Round(time.Millisecond))
+			scheduled := tr.ws == nil || retrying || tasks.pollEvery() > 0
+			if scheduled {
+				log.Printf("next check-in in %s", wait.Round(time.Millisecond))
+			} else {
+				log.Printf("WebSocket open: no check-in until there is something to send")
+			}
 			timer := time.NewTimer(wait)
+			if !scheduled {
+				timer.Stop()
+			}
 		waiting:
 			for {
 				select {
@@ -285,6 +298,8 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 					break waiting
 				case <-tr.lost():
 					timer.Stop()
+					// It worked until now: the backstop counts from here.
+					lastOK = time.Now()
 					log.Printf("the WebSocket closed: connecting again in %s", backoff)
 					time.Sleep(backoff)
 					backoff = min(2*backoff, tr.conn().wsBackoff())
@@ -297,6 +312,11 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 						return errors.New("core closed the session")
 					}
 					tasks.take(push, nil)
+					// A task is acknowledged on receipt: its ack goes now.
+					if tasks.pending() {
+						timer.Stop()
+						break waiting
+					}
 				}
 			}
 		}
@@ -311,14 +331,30 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		answer, err := tr.exchange(sessionID, newKeys, items...)
 		if err != nil {
 			tasks.failed(items)
+			retrying = true
 			if since := time.Since(lastOK); since >= backstop {
 				return fmt.Errorf("check-in %d: nothing has worked for %s: %w", n, since.Round(time.Second), err)
 			}
 			log.Printf("check-in %d failed, keeping the session: %v", n, err)
-			// Not at once again: the channel may be out of reach.
-			time.Sleep(sched.next())
+			// Not at once again: the channel, or core behind it, may be out
+			// of reach. Over a WebSocket, as a reconnect: 1s, doubling up to
+			// ws_reconnect_backoff (no schedule runs while it is up); through
+			// requests, the check-in schedule.
+			if tr.ws != nil {
+				// The failed attempt's own close says nothing new.
+				select {
+				case <-tr.lost():
+				default:
+				}
+				log.Printf("trying again in %s", backoff)
+				time.Sleep(backoff)
+				backoff = min(2*backoff, tr.conn().wsBackoff())
+			} else {
+				time.Sleep(sched.next())
+			}
 			continue
 		}
+		retrying = false
 		if err := answered(n, items, answer); err != nil {
 			return err
 		}
