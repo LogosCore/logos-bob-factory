@@ -64,6 +64,13 @@ const (
 	// the command goes: core gives path; the command's result is a
 	// ResultDirWalk.
 	ActionWalkDir = "walk_dir"
+	// ActionSwitchConnection moves the minion to another of its build's
+	// connections: core gives conn, its place in the build's connections,
+	// from 1 (a param of FormatConnection, so the UI offers them by name). It has no result: the task's output says how it went, and a
+	// minion that moved says so in a conn_update (ConnUpdateItem) over the
+	// new connection. A command may take more (BOB's connect: for how long),
+	// each with a default.
+	ActionSwitchConnection = "switch_connection"
 )
 
 // results are the results this version defines.
@@ -95,6 +102,7 @@ var actions = map[string]CommandAction{
 		Result: ResultFileUpload},
 	ActionDeletePath: {Params: map[string]FieldType{"path": FieldString, "recursive": FieldBool}},
 	ActionWalkDir:    {Params: map[string]FieldType{"path": FieldString}, Result: ResultDirWalk},
+	ActionSwitchConnection: {Params: map[string]FieldType{"conn": FieldInt}},
 }
 
 // KnownResult reports whether this version defines the result.

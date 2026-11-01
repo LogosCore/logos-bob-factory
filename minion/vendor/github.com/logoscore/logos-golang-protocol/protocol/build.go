@@ -21,10 +21,11 @@ import (
 // build's. Values are validated with the same FieldSpec rules as management
 // properties.
 
-// BuildSchemaV2 is the current build schema format version: commands and
-// their params numbered (BuildCommand.Op, FieldSpec.Num). "1" is no longer
-// taken.
-const BuildSchemaV2 = "2"
+// BuildSchemaV3 is the current build schema format version: commands and
+// their params numbered (BuildCommand.Op, FieldSpec.Num), and channels by
+// connection kind, each with the factory's own parameters (BuildChannel).
+// "1" and "2" are no longer taken.
+const BuildSchemaV3 = "3"
 
 // MaxCommandNumber bounds a command's op and a param's num.
 const MaxCommandNumber = 1<<16 - 1
@@ -86,19 +87,54 @@ type BuildSchema struct {
 	PersistedSessions bool `json:"persisted_sessions,omitempty"`
 }
 
-// ChannelVersions is a channel kind (its module_name) and the connection
-// schema versions a factory's minions read.
+// ChannelVersions is a channel kind (its module_name), the connection
+// schema versions a factory's minions read, and the connection kinds they
+// support through it, by name, in the factory's order: what a target
+// narrows the factory's channels to (BuildTarget.Channels).
 type ChannelVersions struct {
-	ModuleName string `json:"module_name"`
-	Versions   []int  `json:"versions"`
+	ModuleName string   `json:"module_name"`
+	Versions   []int    `json:"versions"`
+	Kinds      []string `json:"kinds,omitempty"`
 }
 
-// BuildChannel is a channel kind the minions speak. Fields are the factory's
-// connection parameters for it: how its minions use the channel (e.g. HTTP
-// method and path prefix), set for each connection of a build.
+// BuildChannel is a channel kind the minions speak: the connection schema
+// versions they read, and the connection kinds they support through it, in
+// the factory's order of preference (a build that names none takes the
+// first one the channel carries too).
 type BuildChannel struct {
-	ChannelVersions
+	ModuleName string      `json:"module_name"`
+	Versions   []int       `json:"versions"`
+	Kinds      []BuildKind `json:"kinds"`
+}
+
+// BuildKind is a connection kind a factory's minions support through a
+// channel, with Fields, the factory's connection parameters for it: how its
+// minions use the channel that way (e.g. the HTTP method of a request), set
+// for each connection of a build. Two kinds that share a parameter each
+// declare it.
+type BuildKind struct {
+	Kind   string      `json:"kind"`
 	Fields []FieldSpec `json:"fields,omitempty"`
+}
+
+// KindNames are the channel's kinds, by name, in the factory's order.
+func (c BuildChannel) KindNames() []string {
+	out := make([]string, len(c.Kinds))
+	for i, k := range c.Kinds {
+		out[i] = k.Kind
+	}
+	return out
+}
+
+// KindFields are the factory's connection parameters for kind; none for a
+// kind it does not list.
+func (c BuildChannel) KindFields(kind string) []FieldSpec {
+	for _, k := range c.Kinds {
+		if k.Kind == kind {
+			return k.Fields
+		}
+	}
+	return nil
 }
 
 // BuildTarget is something a factory can produce.
@@ -114,8 +150,9 @@ type BuildTarget struct {
 	Platforms []string `json:"platforms"`
 	// Fields are this target's own parameters, after the shared ones.
 	Fields []FieldSpec `json:"fields,omitempty"`
-	// Channels narrows the factory's channels for this target, to kinds and
-	// versions the factory lists; empty means all of them. The connection
+	// Channels narrows the factory's channels for this target, to channels,
+	// versions and connection kinds the factory lists; empty means all of
+	// them, and an entry without kinds all of the channel's. The connection
 	// parameters stay the factory's.
 	Channels []ChannelVersions `json:"channels,omitempty"`
 }
@@ -196,7 +233,38 @@ func (s BuildSchema) TargetChannels(t BuildTarget) []ChannelVersions {
 	}
 	out := make([]ChannelVersions, len(s.Channels))
 	for i, c := range s.Channels {
-		out[i] = c.ChannelVersions
+		out[i] = ChannelVersions{ModuleName: c.ModuleName, Versions: c.Versions, Kinds: c.KindNames()}
+	}
+	return out
+}
+
+// TargetKinds are the connection kinds a build of t supports through channel
+// moduleName, in the factory's order: the target's entry's when it lists
+// any, else the factory's. None when t cannot connect through it.
+func (s BuildSchema) TargetKinds(t BuildTarget, moduleName string) []string {
+	for _, c := range t.Channels {
+		if c.ModuleName == moduleName && len(c.Kinds) > 0 {
+			return c.Kinds
+		}
+	}
+	for _, c := range s.TargetChannels(t) {
+		if c.ModuleName == moduleName {
+			if ch, ok := s.Channel(moduleName); ok {
+				return ch.KindNames()
+			}
+		}
+	}
+	return nil
+}
+
+// UsableKinds are the kinds both sides support: those of factory (in its
+// order) the channel carries too.
+func UsableKinds(factory, channel []string) []string {
+	var out []string
+	for _, k := range factory {
+		if slices.Contains(channel, k) {
+			out = append(out, k)
+		}
 	}
 	return out
 }
@@ -254,7 +322,7 @@ func (t BuildTarget) HasPlatform(platform string) bool {
 // ValidateBuildSchema checks a schema's structure, limits, and that every
 // declared default satisfies its own field spec.
 func ValidateBuildSchema(s BuildSchema) error {
-	if s.SchemaVersion != BuildSchemaV2 {
+	if s.SchemaVersion != BuildSchemaV3 {
 		return fmt.Errorf("unsupported build schema_version %q", s.SchemaVersion)
 	}
 	if s.Version < 1 {
@@ -268,18 +336,25 @@ func ValidateBuildSchema(s BuildSchema) error {
 	}
 	channels := make(map[string]ChannelVersions, len(s.Channels))
 	for _, c := range s.Channels {
-		if err := validateChannelVersions(c.ChannelVersions); err != nil {
+		cv := ChannelVersions{ModuleName: c.ModuleName, Versions: c.Versions, Kinds: c.KindNames()}
+		if err := validateChannelVersions(cv); err != nil {
 			return fmt.Errorf("channel %q: %w", c.ModuleName, err)
+		}
+		if len(c.Kinds) == 0 {
+			return fmt.Errorf("channel %q: at least one connection kind", c.ModuleName)
 		}
 		if _, dup := channels[c.ModuleName]; dup {
 			return fmt.Errorf("duplicate channel %q", c.ModuleName)
 		}
-		channels[c.ModuleName] = c.ChannelVersions
-		if len(c.Fields) > MaxConnectionParams {
-			return fmt.Errorf("channel %q: too many connection parameters (%d > %d)", c.ModuleName, len(c.Fields), MaxConnectionParams)
-		}
-		if _, err := validateBuildFields(c.Fields, nil); err != nil {
-			return fmt.Errorf("channel %q: %w", c.ModuleName, err)
+		channels[c.ModuleName] = cv
+		for _, k := range c.Kinds {
+			if len(k.Fields) > MaxConnectionParams {
+				return fmt.Errorf("channel %q kind %s: too many connection parameters (%d > %d)", c.ModuleName, k.Kind,
+					len(k.Fields), MaxConnectionParams)
+			}
+			if _, err := validateBuildFields(k.Fields, nil); err != nil {
+				return fmt.Errorf("channel %q kind %s: %w", c.ModuleName, k.Kind, err)
+			}
 		}
 	}
 
@@ -424,6 +499,14 @@ func validateChannelVersions(c ChannelVersions) error {
 			return fmt.Errorf("duplicate version %d", v)
 		}
 	}
+	for i, k := range c.Kinds {
+		if !KnownKind(k) {
+			return fmt.Errorf("kinds: %q is not a connection kind", k)
+		}
+		if slices.Contains(c.Kinds[:i], k) {
+			return fmt.Errorf("duplicate kind %q", k)
+		}
+	}
 	return nil
 }
 
@@ -484,6 +567,11 @@ func validateBuildTarget(t BuildTarget, shared map[string]bool, channels map[str
 		for _, v := range c.Versions {
 			if !slices.Contains(declared.Versions, v) {
 				return fmt.Errorf("channel %q: version %d is not one the factory lists", c.ModuleName, v)
+			}
+		}
+		for _, k := range c.Kinds {
+			if !slices.Contains(declared.Kinds, k) {
+				return fmt.Errorf("channel %q: kind %q is not one the factory lists", c.ModuleName, k)
 			}
 		}
 		for _, prev := range t.Channels[:i] {

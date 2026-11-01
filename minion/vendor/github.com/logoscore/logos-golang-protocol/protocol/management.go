@@ -87,11 +87,16 @@ type EnumOption struct {
 	Description string `json:"description,omitempty"`
 }
 
-// Field formats: what a string field holds, beyond its type. A UI hint only
-// (never validated): the UI may offer a helper for it, e.g. a generator.
+// Field formats: what a string or int field holds, beyond its type. A UI
+// hint only (never validated): the UI may offer a helper for it, e.g. a
+// generator, or a pick from what it knows.
 const (
-	FormatUserAgent = "user_agent" // an HTTP User-Agent string
-	FormatPath      = "path"       // a URL path, e.g. /cdn/assets/
+	FormatUserAgent = "user_agent" // a string: an HTTP User-Agent
+	FormatPath      = "path"       // a string: a URL path, e.g. /cdn/assets/
+	// FormatConnection is an int: one of a minion's build's connections, by
+	// its place from 1 (a command's param: switch_connection's conn). The UI
+	// offers the session's connections by name, kind and address.
+	FormatConnection = "connection"
 )
 
 // FieldSpec describes a typed value plus its constraints and UI hints. It is
@@ -112,8 +117,8 @@ type FieldSpec struct {
 	Order       int       `json:"order,omitempty"`
 	Unit        string    `json:"unit,omitempty"`
 	Placeholder string    `json:"placeholder,omitempty"`
-	// Format is what a string field holds (FormatUserAgent, ...): a UI hint,
-	// never validated. Unknown formats are ignored.
+	// Format is what a string or int field holds (FormatUserAgent, ...): a
+	// UI hint, never validated. Unknown formats are ignored.
 	Format     string       `json:"format,omitempty"`
 	Required   bool         `json:"required,omitempty"`
 	Default    any          `json:"default,omitempty"`
@@ -423,8 +428,8 @@ func checkFieldSpec(f FieldSpec, allowFile bool) error {
 	if err := validateText(f.Label, f.Description); err != nil {
 		return err
 	}
-	if f.Format != "" && (f.Type != FieldString || !keyPattern.MatchString(f.Format)) {
-		return fmt.Errorf("format is a lowercase name, only for string")
+	if f.Format != "" && ((f.Type != FieldString && f.Type != FieldInt) || !keyPattern.MatchString(f.Format)) {
+		return fmt.Errorf("format is a lowercase name, only for string and int")
 	}
 	if (f.Type == FieldEnum || f.Type == FieldEnumList) && (len(f.Options) == 0 || len(f.Options) > MaxEnumOptions) {
 		return fmt.Errorf("%s needs 1..%d options", f.Type, MaxEnumOptions)

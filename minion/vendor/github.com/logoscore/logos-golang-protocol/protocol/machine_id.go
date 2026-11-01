@@ -12,19 +12,24 @@ import (
 // identity): what tells apart two machines with the same host and user,
 // as "<source>:<value>". The source says where the value came from, so two
 // sources never collide by chance and an operator sees what kind of
-// identity it is. A minion takes the first of these it can read quietly,
-// skipping placeholders (PlaceholderMachineUUID):
+// identity it is. Which sources a minion reads is its factory's choice; the
+// docs recommend the first of these it can read quietly, as any user (the
+// same machine gets the same id whoever runs the minion), skipping
+// placeholders (PlaceholderMachineUUID):
 //
-//  1. a firmware or hardware UUID: MachineSMBIOSUUID (Linux product_uuid,
-//     as root; Windows through GetSystemFirmwareTable), MachineMacUUID,
-//     MachineBSDHostUUID;
+//  1. a firmware or hardware UUID: MachineSMBIOSUUID (Windows, through
+//     GetSystemFirmwareTable; not Linux's, which only root reads),
+//     MachineMacUUID, MachineBSDHostUUID;
 //  2. in a container, the container's id (MachineContainer): an image's
 //     install id is every container's;
 //  3. the OS install's id: MachineLinuxMachineID, MachineWinMachineGUID;
-//  4. a domain machine's identity: MachineDomainSID;
-//  5. the host name: MachineHostname;
-//  6. a random id the minion keeps (a file, a key): MachineKept;
-//  7. a random id for the process alone: MachineEphemeral.
+//  4. the host name: MachineHostname;
+//  5. a random id the minion keeps where every user reads it (a file, a
+//     key): MachineKept;
+//  6. a random id for the process alone: MachineEphemeral.
+//
+// MachineDomainSID is not recommended (it asks LSA or a domain controller);
+// its number stays.
 //
 // On the wire a hello says the source by its number (HelloItem.MachineSource)
 // and the value apart; core keeps them joined, by the source's name.
