@@ -11,16 +11,19 @@ import (
 )
 
 // The hello's machine id (docs: contracts/minion-messages/sessions/, Machine
-// identity): the first of these the minion can read, all by reading files,
+// identity): the first of these the minion can read, all by reading files
+// any user reads (the same machine gets the same id whoever runs it),
 // nothing run, nothing written:
 //
-//  1. the firmware's UUID (/sys/class/dmi/id/product_uuid: root only), not
-//     a placeholder;
-//  2. in a container, the container's id: the image's machine-id is every
+//  1. in a container, the container's id: the image's machine-id is every
 //     container's;
-//  3. the install's machine-id (/etc/machine-id, /var/lib/dbus/machine-id);
-//  4. the host name;
-//  5. a random id for this process.
+//  2. the install's machine-id (/etc/machine-id, /var/lib/dbus/machine-id);
+//  3. the host name;
+//  4. a random id for this process.
+//
+// Not the firmware's UUID (/sys/class/dmi/id/product_uuid): only root reads
+// it, so a minion run as root and one run as a user would name one machine
+// twice.
 //
 // It keeps none of its own (a file it would have to write): BOB's minion
 // leaves nothing on the host.
@@ -32,9 +35,6 @@ var machineRoot = ""
 // machineID is the hello's machine id: its source (a protocol Machine
 // source) and value.
 func machineID() (int, string) {
-	if v := readTrimmed("/sys/class/dmi/id/product_uuid"); v != "" && !protocol.PlaceholderMachineUUID(v) {
-		return protocol.MachineSMBIOSUUID, v
-	}
 	if id := containerID(); id != "" {
 		return protocol.MachineContainer, id
 	}
