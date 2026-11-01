@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -112,3 +113,94 @@ func TestDirEntry(t *testing.T) {
 		t.Errorf("link: %+v", e)
 	}
 }
+
+// drain takes every result part the runner has to send, message by message.
+func drain(r *runner) []protocol.ResultItem {
+	var parts []protocol.ResultItem
+	for range 100 {
+		items := r.outgoing()
+		r.mu.Lock()
+		r.inflight = nil
+		r.mu.Unlock()
+		got := false
+		for _, it := range items {
+			if p, ok := it.(protocol.ResultItem); ok {
+				parts = append(parts, p)
+				got = true
+			}
+		}
+		if !got {
+			break
+		}
+	}
+	return parts
+}
+
+// ls sends its directory as a listing in pieces, no data: the first names
+// it, the last says so, and every entry comes once.
+func TestLsSendsAListing(t *testing.T) {
+	dir := t.TempDir()
+	for i := range 1200 {
+		if err := os.WriteFile(filepath.Join(dir, "f"+strings.Repeat("0", 4-len(itoa(i)))+itoa(i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := newTestRunner()
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: "ls", Args: map[string]any{"path": dir}})
+	waitEnd(t, r, 5*time.Second)
+	parts := drain(r)
+	var pieces []protocol.ListingPiece
+	for i, p := range parts {
+		if len(p.Data) > 0 {
+			t.Fatalf("part %d has data", i)
+		}
+		if err := p.Validate(); err != nil {
+			t.Fatalf("part %d: %v", i, err)
+		}
+		pieces = append(pieces, p.Ls...)
+	}
+	if !parts[len(parts)-1].Done || !*parts[len(parts)-1].OK {
+		t.Fatalf("the last part is not a done ok: %+v", parts[len(parts)-1])
+	}
+	if len(pieces) != 3 || pieces[0].Path != dir || pieces[0].Sep != "/" || !pieces[2].Last || pieces[1].Last {
+		t.Fatalf("pieces: %d, first %+v", len(pieces), pieces[0].Path)
+	}
+	n := 0
+	for i, p := range pieces {
+		if p.ID != 0 || p.Part != uint64(i) || p.Partial || p.Err != "" {
+			t.Fatalf("piece %d: id %d part %d", i, p.ID, p.Part)
+		}
+		n += len(p.Entries)
+	}
+	if n != 1200 {
+		t.Fatalf("%d entries", n)
+	}
+}
+
+// A directory ls may not read is a listing that says so, and the task fails.
+func TestLsUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads every directory")
+	}
+	dir := filepath.Join(t.TempDir(), "closed")
+	if err := os.Mkdir(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	r := newTestRunner()
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: "ls", Args: map[string]any{"path": dir}})
+	waitEnd(t, r, 5*time.Second)
+	parts := drain(r)
+	last := parts[len(parts)-1]
+	if !last.Done || *last.OK {
+		t.Fatalf("the task did not fail: %+v", last)
+	}
+	var pieces []protocol.ListingPiece
+	for _, p := range parts {
+		pieces = append(pieces, p.Ls...)
+	}
+	if len(pieces) != 1 || pieces[0].Err == "" || !pieces[0].Last || pieces[0].Path != dir {
+		t.Fatalf("pieces %+v", pieces)
+	}
+}
+
+func itoa(i int) string { return strconv.Itoa(i) }

@@ -30,10 +30,9 @@ import (
 // the rest goes in the next check-ins, which come at once.
 const maxOutPerMessage = 512 << 10
 
-// lsChunk is how many directory entries one result part carries: a
-// dir_listing's parts join their entries (docs:
-// contracts/task-results-and-actions.md), so a big directory goes in parts that
-// each fit a message.
+// lsChunk is how many directory entries one listing piece carries: a big
+// directory goes in pieces (docs: contracts/minion-messages.md, Listings),
+// several to a result part while the message has room.
 const lsChunk = 500
 
 // streamPoll is how often the minion checks in while a stream that ran is
@@ -51,13 +50,18 @@ type task struct {
 	out     []byte
 	// chunks are structured output not yet sent, a result part each,
 	// encoded (protocol.ResultData).
-	chunks  [][]byte
-	ended   bool
-	ok      bool
-	exit    *int64
-	err     string
-	sentEnd bool
-	cancel  context.CancelFunc
+	chunks [][]byte
+	// pieces are listings not yet sent, with their encoded sizes; listings
+	// the task has started, numbering the next.
+	pieces   []protocol.ListingPiece
+	sizes    []int
+	listings uint64
+	ended    bool
+	ok       bool
+	exit     *int64
+	err      string
+	sentEnd  bool
+	cancel   context.CancelFunc
 	// xfer is the file a download sends (download.go); nil for others.
 	xfer *transfer
 	// recv is the file an upload receives (upload.go); nil for others.
@@ -102,7 +106,7 @@ func (r *runner) pending() bool {
 		return true
 	}
 	for _, t := range r.tasks {
-		if len(t.out) > 0 || len(t.chunks) > 0 || (t.ended && !t.sentEnd) || t.xfer.sending() || t.recv.asking() || t.recv.telling() {
+		if len(t.out) > 0 || len(t.chunks) > 0 || len(t.pieces) > 0 || (t.ended && !t.sentEnd) || t.xfer.sending() || t.recv.asking() || t.recv.telling() {
 			return true
 		}
 	}
@@ -131,11 +135,12 @@ func (r *runner) outgoing() []any {
 		items = append(items, *r.sleepUpd)
 		r.sleepUpd = nil
 	}
-	// Parts while the message has room: output, then a chunk of data each.
+	// Parts while the message has room: output, then a chunk of data each,
+	// then listing pieces, as many to a part as fit.
 	room := maxOutPerMessage
 parts:
 	for _, t := range r.tasks {
-		for !t.sentEnd && (len(t.out) > 0 || len(t.chunks) > 0 || t.ended) {
+		for !t.sentEnd && (len(t.out) > 0 || len(t.chunks) > 0 || len(t.pieces) > 0 || t.ended) {
 			part := protocol.ResultItem{T: protocol.ItemResult, Task: t.id, Seq: t.nextSeq}
 			if len(t.out) > 0 {
 				n := min(len(t.out), room)
@@ -149,8 +154,17 @@ parts:
 					break parts // the next message, which comes at once
 				}
 				part.Data, t.chunks, room = t.chunks[0], t.chunks[1:], max(room-size, 0)
+			} else if len(t.pieces) > 0 {
+				for len(t.pieces) > 0 && (t.sizes[0] <= room || (len(part.Ls) == 0 && room == maxOutPerMessage)) {
+					part.Ls = append(part.Ls, t.pieces[0])
+					room = max(room-t.sizes[0], 0)
+					t.pieces, t.sizes = t.pieces[1:], t.sizes[1:]
+				}
+				if len(part.Ls) == 0 {
+					break parts // the next message, which comes at once
+				}
 			}
-			if t.ended && len(t.out) == 0 && len(t.chunks) == 0 {
+			if t.ended && len(t.out) == 0 && len(t.chunks) == 0 && len(t.pieces) == 0 {
 				ok := t.ok
 				part.Done, part.OK, part.Exit, part.Err = true, &ok, t.exit, t.err
 				t.sentEnd = true
@@ -436,6 +450,30 @@ func (r *runner) write(t *task, out []byte, data any) {
 	r.nudge()
 }
 
+// list adds a directory's listing to a task's result, in pieces of lsChunk
+// entries: the first names the directory, the last says so. err: it could
+// not be read at all; partial: not all of it.
+func (r *runner) list(t *task, path, sep, parent string, entries []protocol.DirEntry, partial bool, errText string) {
+	r.mu.Lock()
+	id := t.listings
+	t.listings++
+	for i, part := 0, uint64(0); i == 0 || i < len(entries); i, part = i+lsChunk, part+1 {
+		p := protocol.ListingPiece{ID: id, Part: part, Entries: entries[i:min(i+lsChunk, len(entries))]}
+		if part == 0 {
+			p.Path, p.Sep, p.Parent, p.Err = path, sep, parent, errText
+		}
+		p.Last = i+lsChunk >= len(entries)
+		p.Partial = p.Last && partial
+		size := 64
+		if b, err := protocol.ResultData(p); err == nil {
+			size = len(b)
+		}
+		t.pieces, t.sizes = append(t.pieces, p), append(t.sizes, size)
+	}
+	r.mu.Unlock()
+	r.nudge()
+}
+
 // end records how a task ended.
 func (r *runner) end(t *task, ok bool, exit *int64, errText string) {
 	r.mu.Lock()
@@ -482,7 +520,9 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 	}
 }
 
-// ls lists a directory as data: its path and an entry per file.
+// ls lists a directory: a listing (docs: contracts/minion-messages.md,
+// Listings), from which core makes the task's dir_listing. A directory it
+// cannot read is a listing that says so, and the task fails.
 func (r *runner) ls(t *task, args map[string]any) {
 	path, _ := protocol.ArgString(args, "path")
 	if path == "" {
@@ -493,8 +533,17 @@ func (r *runner) ls(t *task, args map[string]any) {
 		r.end(t, false, nil, err.Error())
 		return
 	}
+	parent := filepath.Dir(abs)
+	if parent == abs {
+		parent = "" // a root
+	}
+	sep := string(filepath.Separator)
 	dir, err := os.ReadDir(abs)
-	if err != nil {
+	if err != nil && len(dir) == 0 {
+		// Not a directory at all is no listing: only one it may not read.
+		if errors.Is(err, fs.ErrPermission) {
+			r.list(t, abs, sep, parent, nil, false, err.Error())
+		}
 		r.end(t, false, nil, err.Error())
 		return
 	}
@@ -502,19 +551,8 @@ func (r *runner) ls(t *task, args map[string]any) {
 	for _, e := range dir {
 		entries = append(entries, dirEntry(abs, e))
 	}
-	parent := filepath.Dir(abs)
-	if parent == abs {
-		parent = "" // a root
-	}
-	// A dir_listing in chunks: the first names the directory, the rest add
-	// entries.
-	for i := 0; i == 0 || i < len(entries); i += lsChunk {
-		part := protocol.DirListing{Entries: entries[i:min(i+lsChunk, len(entries))]}
-		if i == 0 {
-			part.Path, part.Sep, part.Parent = abs, string(filepath.Separator), parent
-		}
-		r.write(t, nil, part)
-	}
+	// Entries read before an error: what there is, said partial.
+	r.list(t, abs, sep, parent, entries, err != nil, "")
 	r.end(t, true, nil, "")
 }
 
