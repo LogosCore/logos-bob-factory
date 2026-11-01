@@ -140,8 +140,8 @@ var buildSchema = protocol.BuildSchema{
 			Result:      protocol.ResultDirWalk,
 			Params: []protocol.FieldSpec{
 				{Key: "path", Type: protocol.FieldString, Label: "Path", Required: true, Order: 1},
-				{Key: "depth", Type: protocol.FieldInt, Label: "Depth", Default: 5, Order: 2,
-					Description: "How many levels of folders under it to go down; 0 for all."},
+				{Key: "depth", Type: protocol.FieldInt, Label: "Depth", Default: 0, Order: 2,
+					Description: "How many levels of folders under it to go down; 0 for all (max_folders still stops it)."},
 				{Key: "max_folders", Type: protocol.FieldInt, Label: "At most", Default: 10000, Order: 3,
 					Description: "Folders to list before it stops."},
 				{Key: "hidden", Type: protocol.FieldBool, Label: "Into hidden folders", Default: true, Order: 4},
