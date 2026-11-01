@@ -165,10 +165,10 @@ var buildSchema = protocol.BuildSchema{
 			Description: "Moves the minion to another of its connections, once that one answers; it stays on the one it has if not.",
 			Action:      protocol.ActionSwitchConnection,
 			Params: []protocol.FieldSpec{
-				{Key: "conn", Num: 1, Type: protocol.FieldInt, Label: "Connection", Required: true, Min: 1, Order: 1,
-					Description: "The connection's place in the build's connections, from 1."},
+				{Key: "conn", Num: 1, Type: protocol.FieldInt, Format: protocol.FormatConnection, Label: "Connection",
+					Required: true, Min: 1, Order: 1, Description: "The connection to move to."},
 				{Key: "for", Num: 2, Type: protocol.FieldDuration, Label: "For", Default: "0s", Order: 2,
-					Description: "Then back to the connection it had; 0s stays."},
+					Description: "How long before it moves back to the connection it has now. Empty or 0s: it stays."},
 			},
 		},
 	},
