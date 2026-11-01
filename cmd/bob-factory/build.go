@@ -24,7 +24,10 @@ var buildSchema = protocol.BuildSchema{
 	SchemaVersion: protocol.BuildSchemaV2,
 	Version:       2,
 	Channels: []protocol.BuildChannel{{
-		ChannelVersions: protocol.ChannelVersions{ModuleName: "http", Versions: []int{2}},
+		// Requests first (a build that names no kind polls), and a WebSocket
+		// core pushes tasks over.
+		ChannelVersions: protocol.ChannelVersions{ModuleName: "http", Versions: []int{2},
+			Kinds: []string{protocol.KindReverseCall, protocol.KindReversePersistent}},
 		Fields: []protocol.FieldSpec{
 			{
 				Key: "method", Type: protocol.FieldEnum, Label: "Method", Default: "POST", Group: "HTTP", Order: 1,

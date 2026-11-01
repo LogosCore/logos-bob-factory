@@ -95,8 +95,22 @@ func run() error {
 	}
 	sched := conn.schedule()
 	log.Printf("build %s, crypto %s", d.BuildID, d.Crypto.Suite)
-	log.Printf("channel http %q (%s %s), check-in every %s ± %g%%", conn.Endpoint.Name, conn.method(), conn.url(),
-		sched.interval, sched.jitter)
+	// A reverse-persistent connection keeps a WebSocket open: core pushes
+	// tasks over it; check-ins go on, on the schedule, to restate the
+	// allowance.
+	var link *wsLink
+	ex := func(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
+		return exchange(conn, id, keys, items...)
+	}
+	if conn.ConnectionKind() == protocol.KindReversePersistent {
+		link = newWSLink(conn)
+		ex = link.exchange
+		log.Printf("channel http %q (WebSocket %s), check-in every %s ± %g%%", conn.Endpoint.Name, conn.wsURL(),
+			sched.interval, sched.jitter)
+	} else {
+		log.Printf("channel http %q (%s %s), check-in every %s ± %g%%", conn.Endpoint.Name, conn.method(), conn.url(),
+			sched.interval, sched.jitter)
+	}
 
 	// The persisted session the build claims, if it has one: given up for
 	// this process once another process takes it (session_replaced).
@@ -114,7 +128,7 @@ func run() error {
 	// another process claiming it, or the backstop, stages again after a
 	// check-in interval.
 	for {
-		err := session(conn, sched, d, buildID, keys, claim)
+		err := session(ex, link, sched, d, buildID, keys, claim)
 		if errors.Is(err, errReplaced) && claim != nil {
 			claim = nil
 			log.Printf("another process holds the persisted session: this one goes on in a session of its own")
@@ -127,12 +141,20 @@ func run() error {
 
 // session stages, says hello and checks in for as long as that works; it
 // returns why it stopped.
-func session(conn connection, sched schedule, d description, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte) error {
-	tempID, newKeys, err := stage(conn, buildID, keys)
+// exchanger sends a message under id and returns core's reply: through a
+// request, or over the WebSocket.
+type exchanger func(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error)
+
+func session(ex exchanger, link *wsLink, sched schedule, d description, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte) error {
+	if link != nil {
+		// A new session starts on a new WebSocket.
+		defer link.close()
+	}
+	tempID, newKeys, err := stage(ex, buildID, keys)
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
-	sessionID, err := hello(conn, tempID, newKeys, claim, sched)
+	sessionID, err := hello(ex, tempID, newKeys, claim, sched)
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
@@ -144,21 +166,54 @@ func session(conn connection, sched schedule, d description, buildID [16]byte, k
 	// core's sealed session_closed, or the backstop, starts over (docs:
 	// "When an exchange fails").
 	tasks := newRunner(d, &sched)
+	var pushes chan protocol.CoreMessage
+	var lost chan struct{}
+	if link != nil {
+		pushes, lost = link.pushes, link.lost
+	}
+	// A WebSocket that closed is opened again at once, then after 1s,
+	// doubling up to the endpoint's ws_reconnect_backoff: the check-in that
+	// reopens it links it to the session again.
+	backoff := time.Second
 	lastOK := time.Now()
 	for n := 1; ; n++ {
-		if !tasks.pending() {
+		// On a WebSocket the first check-in goes at once: it links the
+		// connection to the session and sets the allowance core pushes
+		// tasks within.
+		if !tasks.pending() && (link == nil || n > 1) {
 			wait := sched.next()
 			if p := tasks.pollEvery(); p > 0 && p < wait {
 				wait = p
 			}
 			log.Printf("next check-in in %s", wait.Round(time.Millisecond))
-			select {
-			case <-time.After(wait):
-			case <-tasks.wake:
+			timer := time.NewTimer(wait)
+		waiting:
+			for {
+				select {
+				case <-timer.C:
+					break waiting
+				case <-tasks.wake:
+					timer.Stop()
+					break waiting
+				case <-lost:
+					timer.Stop()
+					log.Printf("the WebSocket closed: connecting again in %s", backoff)
+					time.Sleep(backoff)
+					backoff = min(2*backoff, link.conn.wsBackoff())
+					break waiting
+				case push := <-pushes:
+					// What core starts over the WebSocket: tasks within the
+					// allowance, cancels. Their acks go with the next message.
+					if e, ok := coreErrItem(push); ok && e.Code == protocol.ErrItemSessionClosed {
+						timer.Stop()
+						return errors.New("core closed the session")
+					}
+					tasks.take(push, nil)
+				}
 			}
 		}
 		items := tasks.outgoing()
-		answer, err := exchange(conn, sessionID, newKeys, items...)
+		answer, err := ex(sessionID, newKeys, items...)
 		if err != nil {
 			tasks.failed(items)
 			if since := time.Since(lastOK); since >= backstop {
@@ -170,6 +225,7 @@ func session(conn connection, sched schedule, d description, buildID [16]byte, k
 			continue
 		}
 		lastOK = time.Now()
+		backoff = time.Second
 		if tasks.delivered(items) {
 			log.Printf("check-in %d: the exit task's end is delivered: exiting", n)
 			os.Exit(0)
@@ -216,7 +272,7 @@ func (s schedule) next() time.Duration {
 
 // stage sends the minion's first message, a stage, under the build id with
 // the build's keys, and returns the temporary id and the new keys.
-func stage(conn connection, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material) ([16]byte, protocol.AES256CBCHMACSHA256Material, error) {
+func stage(ex exchanger, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material) ([16]byte, protocol.AES256CBCHMACSHA256Material, error) {
 	var tempID [16]byte
 	var newKeys protocol.AES256CBCHMACSHA256Material
 
@@ -233,7 +289,7 @@ func stage(conn connection, buildID [16]byte, keys protocol.AES256CBCHMACSHA256M
 	log.Printf("correlation id %x", corr)
 
 	// 3. The stage, sealed with the build's keys, under the build id.
-	answer, err := exchange(conn, buildID, keys, protocol.StageItem{T: protocol.ItemStage, Key: pub, Corr: corr})
+	answer, err := ex(buildID, keys, protocol.StageItem{T: protocol.ItemStage, Key: pub, Corr: corr})
 	if err != nil {
 		return tempID, newKeys, err
 	}
@@ -275,14 +331,14 @@ func stage(conn connection, buildID [16]byte, keys protocol.AES256CBCHMACSHA256M
 // hello sends the host and process under the temporary id, sealed with the
 // new keys, with its check-in schedule, claiming the persisted session when
 // claim is set, and returns the session id core gave.
-func hello(conn connection, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte, sched schedule) ([16]byte, error) {
+func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte, sched schedule) ([16]byte, error) {
 	var sessionID [16]byte
 	h := describeHost()
 	h.SID = claim
 	// The schedule it checks in by, for core to tell when it is late.
 	h.Sleep = &protocol.Sleep{Interval: uint64(max(1, sched.interval.Milliseconds())), Jitter: uint64(sched.jitter)}
 	log.Printf("hello: pid %d, %s/%s, host %q, user %q, integrity %d, addrs %v", h.PID, h.OS, h.Arch, h.Host, h.User, h.Integrity, h.Addrs)
-	answer, err := exchange(conn, tempID, keys, h)
+	answer, err := ex(tempID, keys, h)
 	if err != nil {
 		return sessionID, err
 	}
@@ -346,20 +402,7 @@ func describeHost() protocol.HelloItem {
 // nothing to say.
 func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
 	var answer protocol.CoreMessage
-	msgID := protocol.NewMessageID()
-	msg := protocol.MinionMessage{V: protocol.MinionMessageV3, ID: msgID}
-	for _, it := range items {
-		raw, err := protocol.MarshalCBOR(it)
-		if err != nil {
-			return answer, err
-		}
-		msg.Items = append(msg.Items, raw)
-	}
-	plain, err := protocol.MarshalCBOR(msg)
-	if err != nil {
-		return answer, err
-	}
-	frame, err := protocol.SealFrame(keys, id, protocol.FrameMinionToCore, plain)
+	msgID, frame, plainLen, err := seal(id, keys, items)
 	if err != nil {
 		return answer, err
 	}
@@ -368,7 +411,7 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 		return answer, err
 	}
 	log.Printf("message %x under %s: %d bytes of CBOR, a %d-byte sealed frame, %d bytes packed for the channel",
-		msgID, formatUUID(id[:]), len(plain), len(frame), len(body))
+		msgID, formatUUID(id[:]), plainLen, len(frame), len(body))
 
 	reply, status, took, err := conn.send(body)
 	if err != nil {
@@ -393,7 +436,7 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 		// or a message it took as a replay).
 		return answer, nil
 	}
-	plain, err = protocol.OpenFrame(keys, id, protocol.FrameCoreToMinion, sealed)
+	plain, err := protocol.OpenFrame(keys, id, protocol.FrameCoreToMinion, sealed)
 	if err != nil {
 		return answer, fmt.Errorf("core's reply: %w", err)
 	}
@@ -408,6 +451,26 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 	}
 	log.Printf("opened core's reply: %d bytes of CBOR, %d item(s)", len(plain), len(answer.Items))
 	return answer, nil
+}
+
+// seal makes a minion message of items under id, sealed with keys: its id,
+// the sealed frame, and the plaintext's size.
+func seal(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items []any) ([]byte, []byte, int, error) {
+	msgID := protocol.NewMessageID()
+	msg := protocol.MinionMessage{V: protocol.MinionMessageV3, ID: msgID}
+	for _, it := range items {
+		raw, err := protocol.MarshalCBOR(it)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		msg.Items = append(msg.Items, raw)
+	}
+	plain, err := protocol.MarshalCBOR(msg)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	frame, err := protocol.SealFrame(keys, id, protocol.FrameMinionToCore, plain)
+	return msgID, frame, len(plain), err
 }
 
 // coreErr is the first err item of core's answer, as an error.
@@ -489,12 +552,26 @@ func (c connection) url() string {
 	return strings.TrimRight(c.param("base_url"), "/") + prefix
 }
 
+// wsBackoff is the endpoint's longest wait between WebSocket reconnects.
+func (c connection) wsBackoff() time.Duration {
+	if d, err := time.ParseDuration(c.param("ws_reconnect_backoff")); err == nil && d > 0 {
+		return d
+	}
+	return 60 * time.Second
+}
+
+// timeout is the endpoint's request timeout: how long the minion waits for
+// a reply.
+func (c connection) timeout() time.Duration {
+	if d, err := time.ParseDuration(c.param("request_timeout")); err == nil && d > 0 {
+		return d
+	}
+	return 40 * time.Second
+}
+
 // send posts body to the channel as the connection's settings say.
 func (c connection) send(body []byte) ([]byte, int, time.Duration, error) {
-	timeout := 40 * time.Second
-	if d, err := time.ParseDuration(c.param("request_timeout")); err == nil && d > 0 {
-		timeout = d
-	}
+	timeout := c.timeout()
 	verify, _ := c.Endpoint.Params["tls_verify"].(bool)
 	client := &http.Client{Timeout: timeout, Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: !verify, ServerName: c.param("sni")}, //nolint:gosec // the endpoint's own setting
