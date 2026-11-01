@@ -130,6 +130,10 @@ type FieldSpec struct {
 	// file's id, so they are checked against the file itself (ValidateFile).
 	Accept  []string `json:"accept,omitempty"`
 	MaxSize int64    `json:"max_size,omitempty"`
+	// Num is a command param's number: how a task names it on the wire
+	// (TaskItem.Args), 1 to MaxCommandNumber, once per command. Only a
+	// build command's params have one (BuildCommand.Params).
+	Num int `json:"num,omitempty"`
 }
 
 // PropertySpec is a manageable property. Default is the module's own effective
@@ -406,6 +410,9 @@ func validateBuildFieldSpec(f FieldSpec) error { return checkFieldSpec(f, true) 
 func checkFieldSpec(f FieldSpec, allowFile bool) error {
 	if !keyPattern.MatchString(f.Key) {
 		return fmt.Errorf("key must match %s", keyPattern)
+	}
+	if f.Num != 0 {
+		return fmt.Errorf("only a command's params have a num")
 	}
 	if !fieldTypes[f.Type] {
 		return fmt.Errorf("invalid type %q", f.Type)

@@ -8,8 +8,8 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
-	"slices"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -20,16 +20,20 @@ import (
 // starts an exchange or re when it answers one, and items.
 //
 // Every key of a message, of its items and of the structures inside them
-// (a sleep, a listing piece and its entries, a file offer, stage keys) is
-// a small unsigned integer, and so are item types and err codes: the
-// registry is the cbor tags below (key 0 of an item is its type, its
+// (a sleep, a listing piece and its entries, a file offer, stage keys, the
+// data of the results this package defines) is a small unsigned integer,
+// and so are item types, err codes and the closed sets of values (an
+// integrity level, a machine id's source, an entry's type, a listing's
+// error). A task names its command by the number the build schema gives it
+// (BuildCommand.Op) and its args by their params' numbers (FieldSpec.Num).
+// The registry is the cbor tags below (key 0 of an item is its type, its
 // fields count from 1) and the docs' Wire format page. A number is never
-// reused for something else. What is the command's or the factory's own (a
-// task's args, a result's data, an x) keeps text keys.
+// reused for something else. What is the factory's own (the data of a
+// result it shapes, an x) keeps text keys.
 
-// MinionMessageV2 is the v of both formats: integer keys. v 1, text keys,
-// is no longer taken.
-const MinionMessageV2 = 2
+// MinionMessageV3 is the v of both formats: numbered keys, values and
+// commands. v 1 and 2 are no longer taken.
+const MinionMessageV3 = 3
 
 // Limits a reader enforces before it trusts a length. A message carries at
 // most MaxMinionMessageItems items (ValidateMessageHead); an array or map
@@ -116,22 +120,27 @@ type StageResponseItem struct {
 // PID, OS and Arch are required; OS and Arch use Go's names, as build
 // platforms do. X holds the factory's own fields.
 type HelloItem struct {
-	T         int      `cbor:"0,keyasint"`
-	PID       uint64   `cbor:"1,keyasint"`
-	OS        string   `cbor:"2,keyasint"`
-	Arch      string   `cbor:"3,keyasint"`
-	Host      string   `cbor:"4,keyasint,omitempty"`
-	User      string   `cbor:"5,keyasint,omitempty"`
-	Domain    string   `cbor:"6,keyasint,omitempty"`
-	Proc      string   `cbor:"7,keyasint,omitempty"`
-	Integrity string   `cbor:"8,keyasint,omitempty"`
-	Addrs     []string `cbor:"9,keyasint,omitempty"`
-	Version   string   `cbor:"10,keyasint,omitempty"`
-	// MachineID tells apart machines with the same host and user:
-	// "<source>:<value>" (machine_id.go). Every minion sends one; core takes
-	// a hello without it from minions built before it was asked for.
-	MachineID string         `cbor:"11,keyasint,omitempty"`
-	X         map[string]any `cbor:"12,keyasint,omitempty"`
+	T      int    `cbor:"0,keyasint"`
+	PID    uint64 `cbor:"1,keyasint"`
+	OS     string `cbor:"2,keyasint"`
+	Arch   string `cbor:"3,keyasint"`
+	Host   string `cbor:"4,keyasint,omitempty"`
+	User   string `cbor:"5,keyasint,omitempty"`
+	Domain string `cbor:"6,keyasint,omitempty"`
+	Proc   string `cbor:"7,keyasint,omitempty"`
+	// Integrity is one of the Integrity levels; 0 when the minion does not
+	// say.
+	Integrity int `cbor:"8,keyasint,omitempty"`
+	// Addrs are the host's IP addresses, raw: 4 bytes or 16.
+	Addrs   []net.IP `cbor:"9,keyasint,omitempty"`
+	Version string   `cbor:"10,keyasint,omitempty"`
+	// MachineSource and MachineValue tell apart machines with the same
+	// host and user (machine_id.go): where the value came from (one of the
+	// Machine sources) and the value. MachineID joins them as core keeps
+	// them.
+	MachineSource int            `cbor:"11,keyasint,omitempty"`
+	MachineValue  string         `cbor:"15,keyasint,omitempty"`
+	X             map[string]any `cbor:"12,keyasint,omitempty"`
 	// SID is the persisted session the minion claims, raw bytes; nil for a
 	// new session.
 	SID []byte `cbor:"13,keyasint,omitempty"`
@@ -169,11 +178,59 @@ type SleepUpdateItem struct {
 // Sleep is the schedule the item says.
 func (u SleepUpdateItem) Sleep() Sleep { return Sleep{Interval: u.Interval, Jitter: u.Jitter} }
 
-// HelloIntegrity holds the integrity values a hello may carry: Windows'
-// integrity levels, or root and user elsewhere.
-var HelloIntegrity = []string{"low", "medium", "high", "system", "root", "user"}
+// Integrity levels a hello may say: Windows' integrity levels, or root and
+// user elsewhere.
+const (
+	IntegrityLow    = 1
+	IntegrityMedium = 2
+	IntegrityHigh   = 3
+	IntegritySystem = 4
+	IntegrityRoot   = 5
+	IntegrityUser   = 6
+)
 
-// Validate checks the required fields and the integrity value.
+// integrityNames are the levels' names, as core keeps and shows them.
+var integrityNames = map[int]string{
+	IntegrityLow: "low", IntegrityMedium: "medium", IntegrityHigh: "high", IntegritySystem: "system",
+	IntegrityRoot: "root", IntegrityUser: "user",
+}
+
+// IntegrityName is a level's name: "" for none, "level 7" for one this
+// version does not know.
+func IntegrityName(level int) string {
+	if level == 0 {
+		return ""
+	}
+	if n, ok := integrityNames[level]; ok {
+		return n
+	}
+	return fmt.Sprintf("level %d", level)
+}
+
+// MachineID is the hello's machine id as core keeps it, "<source>:<value>"
+// (MachineID in machine_id.go); "" when the hello has none.
+func (h HelloItem) MachineID() string {
+	if h.MachineValue == "" {
+		return ""
+	}
+	return MachineID(h.MachineSource, h.MachineValue)
+}
+
+// AddrStrings are the hello's addresses as text.
+func (h HelloItem) AddrStrings() []string {
+	if len(h.Addrs) == 0 {
+		return nil
+	}
+	out := make([]string, len(h.Addrs))
+	for i, a := range h.Addrs {
+		out[i] = a.String()
+	}
+	return out
+}
+
+// Validate checks the required fields, the addresses and the machine id. An
+// integrity level or machine source this version does not know is taken:
+// core shows its number.
 func (h HelloItem) Validate() error {
 	switch {
 	case h.PID == 0:
@@ -182,14 +239,21 @@ func (h HelloItem) Validate() error {
 		return errors.New("hello: os is required")
 	case h.Arch == "":
 		return errors.New("hello: arch is required")
-	case h.Integrity != "" && !slices.Contains(HelloIntegrity, h.Integrity):
-		return fmt.Errorf("hello: integrity %q is not one of %v", h.Integrity, HelloIntegrity)
+	case h.Integrity < 0:
+		return errors.New("hello: integrity is a level")
 	case h.SID != nil && len(h.SID) != 16:
 		return errors.New("hello: sid is 16 bytes")
-	case h.MachineID != "" && ValidateMachineID(h.MachineID) != nil:
-		return fmt.Errorf("hello: %w", ValidateMachineID(h.MachineID))
+	case (h.MachineValue == "") != (h.MachineSource == 0), h.MachineSource < 0:
+		return errors.New("hello: a machine id is a source and a value")
+	case h.MachineValue != "" && ValidateMachineID(h.MachineID()) != nil:
+		return fmt.Errorf("hello: %w", ValidateMachineID(h.MachineID()))
 	case h.Sleep != nil:
 		return h.Sleep.Validate()
+	}
+	for _, a := range h.Addrs {
+		if len(a) != net.IPv4len && len(a) != net.IPv6len {
+			return errors.New("hello: an address is 4 bytes or 16")
+		}
 	}
 	return nil
 }
@@ -216,24 +280,25 @@ func (g GetTasksItem) Validate() error {
 }
 
 // TaskItem is a command for the minion to run (core → minion): Task is its
-// id (16 random bytes), Cmd one of the build's commands, Args its params'
-// values, defaults filled in by core.
+// id (16 random bytes), Cmd the number the build schema gives the command
+// (BuildCommand.Op), Args its params' values by their numbers
+// (FieldSpec.Num), defaults filled in by core.
 type TaskItem struct {
 	T    int    `cbor:"0,keyasint"`
 	Task []byte `cbor:"1,keyasint"`
-	Cmd  string `cbor:"2,keyasint"`
+	Cmd  uint64 `cbor:"2,keyasint"`
 	Args Args   `cbor:"3,keyasint,omitempty"`
 }
 
-// Args are a task's args: its params' keys, as the build schema names
-// them, to their values. A file or stream param's value is a FileOffer,
-// integer keys as every protocol map has: decoded, it stays the CBOR it
+// Args are a task's args: its params' numbers (FieldSpec.Num) to their
+// values (WireArgs). A file or stream param's value is a FileOffer,
+// numbered keys as every protocol map has: decoded, it stays the CBOR it
 // came as (a cbor.RawMessage), which ArgFile reads.
-type Args map[string]any
+type Args map[uint64]any
 
 // UnmarshalCBOR decodes args, keeping an integer-keyed map as it came.
 func (a *Args) UnmarshalCBOR(data []byte) error {
-	var raw map[string]cbor.RawMessage
+	var raw map[uint64]cbor.RawMessage
 	if err := cborDec.Unmarshal(data, &raw); err != nil {
 		return err
 	}
@@ -249,7 +314,7 @@ func (a *Args) UnmarshalCBOR(data []byte) error {
 		}
 		var x any
 		if err := cborDec.Unmarshal(v, &x); err != nil {
-			return fmt.Errorf("arg %q: %w", k, err)
+			return fmt.Errorf("arg %d: %w", k, err)
 		}
 		out[k] = x
 	}
@@ -270,13 +335,13 @@ func isIntKeyedMap(b []byte) bool {
 	return head > 0 && len(b) > head && b[head]>>5 == 0
 }
 
-// Validate checks the task id and the command's id.
+// Validate checks the task id and the command's number.
 func (t TaskItem) Validate() error {
 	switch {
 	case len(t.Task) != 16:
 		return errors.New("task: task is 16 bytes")
-	case !commandIDPattern.MatchString(t.Cmd):
-		return fmt.Errorf("task: cmd %q is not a command id", t.Cmd)
+	case t.Cmd == 0:
+		return errors.New("task: cmd is a command's number, at least 1")
 	}
 	return nil
 }
@@ -315,8 +380,8 @@ type ResultItem struct {
 	Data cbor.RawMessage `cbor:"7,keyasint,omitempty"`
 	Exit *int64          `cbor:"8,keyasint,omitempty"`
 	// Ls is what the task saw of the host's file system: listings, in
-	// pieces (ListingPiece), beside or instead of out and data.
-	Ls []ListingPiece `cbor:"9,keyasint,omitempty"`
+	// pieces (LsPiece), beside or instead of out and data.
+	Ls []LsPiece `cbor:"9,keyasint,omitempty"`
 }
 
 // Validate checks the task id, and ok and exit against done.
@@ -480,8 +545,8 @@ func NewMessageID() []byte {
 // and re (16 bytes), and at most MaxMinionMessageItems items.
 func ValidateMessageHead(v int, id, re []byte, items int) error {
 	switch {
-	case v != MinionMessageV2:
-		return fmt.Errorf("v must be %d", MinionMessageV2)
+	case v != MinionMessageV3:
+		return fmt.Errorf("v must be %d", MinionMessageV3)
 	case (id == nil) == (re == nil):
 		return errors.New("a message has exactly one of id and re")
 	case id != nil && len(id) != 16, re != nil && len(re) != 16:

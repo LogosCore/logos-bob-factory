@@ -21,8 +21,13 @@ import (
 // build's. Values are validated with the same FieldSpec rules as management
 // properties.
 
-// BuildSchemaV1 is the current build schema format version.
-const BuildSchemaV1 = "1"
+// BuildSchemaV2 is the current build schema format version: commands and
+// their params numbered (BuildCommand.Op, FieldSpec.Num). "1" is no longer
+// taken.
+const BuildSchemaV2 = "2"
+
+// MaxCommandNumber bounds a command's op and a param's num.
+const MaxCommandNumber = 1<<16 - 1
 
 // RegisterFieldBuild is the module.register key a factory declares its build
 // schema under.
@@ -119,9 +124,14 @@ type BuildTarget struct {
 // operator picks a build's commands, so a minion carries only what its job
 // needs.
 type BuildCommand struct {
-	// ID names the command in builds (and in tasks, once minions take them),
-	// unique in the schema: ^[a-z][a-z0-9_-]{0,62}$.
-	ID          string `json:"id"`
+	// ID names the command in builds and in core, unique in the schema:
+	// ^[a-z][a-z0-9_-]{0,62}$.
+	ID string `json:"id"`
+	// Op is the command's number, unique in the schema, 1 to
+	// MaxCommandNumber: a task names its command by it on the wire
+	// (TaskItem.Cmd), so a minion needs no command names. Its params are
+	// numbered too (FieldSpec.Num).
+	Op          int    `json:"op"`
 	Label       string `json:"label,omitempty"`
 	Description string `json:"description,omitempty"`
 	// Targets narrows the command to these targets; empty means all of them.
@@ -244,7 +254,7 @@ func (t BuildTarget) HasPlatform(platform string) bool {
 // ValidateBuildSchema checks a schema's structure, limits, and that every
 // declared default satisfies its own field spec.
 func ValidateBuildSchema(s BuildSchema) error {
-	if s.SchemaVersion != BuildSchemaV1 {
+	if s.SchemaVersion != BuildSchemaV2 {
 		return fmt.Errorf("unsupported build schema_version %q", s.SchemaVersion)
 	}
 	if s.Version < 1 {
@@ -306,6 +316,7 @@ func ValidateBuildSchema(s BuildSchema) error {
 		return fmt.Errorf("too many commands (%d > %d)", len(s.Commands), MaxBuildCommands)
 	}
 	commands := make(map[string]bool, len(s.Commands))
+	ops := make(map[int]string, len(s.Commands))
 	for _, c := range s.Commands {
 		if err := validateBuildCommand(c, ids); err != nil {
 			return fmt.Errorf("command %q: %w", c.ID, err)
@@ -314,6 +325,13 @@ func ValidateBuildSchema(s BuildSchema) error {
 			return fmt.Errorf("duplicate command %q", c.ID)
 		}
 		commands[c.ID] = true
+		if err := validateCommandNumbers(c); err != nil {
+			return fmt.Errorf("command %q: %w", c.ID, err)
+		}
+		if other, dup := ops[c.Op]; dup {
+			return fmt.Errorf("command %q: op %d is %q's", c.ID, c.Op, other)
+		}
+		ops[c.Op] = c.ID
 	}
 	return nil
 }
@@ -322,6 +340,25 @@ func ValidateBuildSchema(s BuildSchema) error {
 // the commands the session's minion takes, or one command's params. Core
 // answers it; it never goes to a minion, and a schema may not declare it.
 const CommandHelp = "help"
+
+// validateCommandNumbers checks a command's op and its params' nums: each 1
+// to MaxCommandNumber, the nums once each.
+func validateCommandNumbers(c BuildCommand) error {
+	if c.Op < 1 || c.Op > MaxCommandNumber {
+		return fmt.Errorf("op must be 1 to %d", MaxCommandNumber)
+	}
+	nums := make(map[int]string, len(c.Params))
+	for _, p := range c.Params {
+		if p.Num < 1 || p.Num > MaxCommandNumber {
+			return fmt.Errorf("param %q: num must be 1 to %d", p.Key, MaxCommandNumber)
+		}
+		if other, dup := nums[p.Num]; dup {
+			return fmt.Errorf("param %q: num %d is %q's", p.Key, p.Num, other)
+		}
+		nums[p.Num] = p.Key
+	}
+	return nil
+}
 
 // validateBuildCommand checks a command; targets are the schema's target ids.
 func validateBuildCommand(c BuildCommand, targets map[string]bool) error {
@@ -351,6 +388,7 @@ func validateBuildCommand(c BuildCommand, targets map[string]bool) error {
 	params := make(map[string]bool, len(c.Params))
 	files := 0
 	for _, p := range c.Params {
+		p.Num = 0 // validateCommandNumbers checks it; checkFieldSpec refuses one elsewhere
 		// A file param is a task file core sends the minion with the task
 		// (docs: contracts/minion-messages.md, Core sending a file), a
 		// stream param one core streams it as it is uploaded: one of either

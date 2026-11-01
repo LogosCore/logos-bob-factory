@@ -124,8 +124,25 @@ func taskArg(f FieldSpec, v any) (any, error) {
 	return v, nil
 }
 
-// ArgString is a task's text arg (string, url, secret, enum).
-func ArgString(args map[string]any, key string) (string, bool) {
+// WireArgs are a task's args as it carries them: args (TaskArgs, by param
+// key) by their params' numbers (FieldSpec.Num). An arg whose param has no
+// number is left out.
+func WireArgs(params []FieldSpec, args map[string]any) Args {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make(Args, len(args))
+	for _, p := range params {
+		if v, ok := args[p.Key]; ok && p.Num > 0 {
+			out[uint64(p.Num)] = v
+		}
+	}
+	return out
+}
+
+// ArgString is a task's text arg (string, url, secret, enum): by number in
+// a task's Args, or by key in args TaskArgs made.
+func ArgString[K comparable](args map[K]any, key K) (string, bool) {
 	s, ok := args[key].(string)
 	return s, ok
 }
@@ -133,7 +150,7 @@ func ArgString(args map[string]any, key string) (string, bool) {
 // ArgInt is a task's integer arg (int, bytes; a datetime's unix seconds),
 // whichever integer type the CBOR decoder gave. A float that is a whole
 // number reads too: a core that kept the args in a document may send one.
-func ArgInt(args map[string]any, key string) (int64, bool) {
+func ArgInt[K comparable](args map[K]any, key K) (int64, bool) {
 	switch n := args[key].(type) {
 	case uint64:
 		if n > 1<<63-1 {
@@ -154,7 +171,7 @@ func ArgInt(args map[string]any, key string) (int64, bool) {
 }
 
 // ArgDuration is a task's duration arg (milliseconds on the wire).
-func ArgDuration(args map[string]any, key string) (time.Duration, bool) {
+func ArgDuration[K comparable](args map[K]any, key K) (time.Duration, bool) {
 	ms, ok := ArgInt(args, key)
 	if !ok || ms < 0 {
 		return 0, false

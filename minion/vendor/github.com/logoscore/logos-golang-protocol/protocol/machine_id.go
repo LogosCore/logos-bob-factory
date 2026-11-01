@@ -2,12 +2,13 @@ package protocol
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"unicode"
 )
 
-// A hello's machine_id (docs: contracts/minion-messages.md, Machine
+// A hello's machine id (docs: contracts/minion-messages/sessions/, Machine
 // identity): what tells apart two machines with the same host and user,
 // as "<source>:<value>". The source says where the value came from, so two
 // sources never collide by chance and an operator sees what kind of
@@ -24,34 +25,53 @@ import (
 //  5. the host name: MachineHostname;
 //  6. a random id the minion keeps (a file, a key): MachineKept;
 //  7. a random id for the process alone: MachineEphemeral.
+//
+// On the wire a hello says the source by its number (HelloItem.MachineSource)
+// and the value apart; core keeps them joined, by the source's name.
 const (
-	MachineSMBIOSUUID     = "smbios-uuid"
-	MachineMacUUID        = "mac-platform-uuid"
-	MachineBSDHostUUID    = "bsd-host-uuid"
-	MachineLinuxMachineID = "linux-machine-id"
-	MachineWinMachineGUID = "win-machine-guid"
-	MachineContainer      = "container"
-	MachineDomainSID      = "domain-sid"
-	MachineHostname       = "hostname"
-	MachineKept           = "kept"
-	MachineEphemeral      = "ephemeral"
+	MachineSMBIOSUUID     = 1
+	MachineMacUUID        = 2
+	MachineBSDHostUUID    = 3
+	MachineLinuxMachineID = 4
+	MachineWinMachineGUID = 5
+	MachineContainer      = 6
+	MachineDomainSID      = 7
+	MachineHostname       = 8
+	MachineKept           = 9
+	MachineEphemeral      = 10
 )
+
+// machineSourceNames are the sources' names, as core keeps them.
+var machineSourceNames = map[int]string{
+	MachineSMBIOSUUID: "smbios-uuid", MachineMacUUID: "mac-platform-uuid", MachineBSDHostUUID: "bsd-host-uuid",
+	MachineLinuxMachineID: "linux-machine-id", MachineWinMachineGUID: "win-machine-guid", MachineContainer: "container",
+	MachineDomainSID: "domain-sid", MachineHostname: "hostname", MachineKept: "kept", MachineEphemeral: "ephemeral",
+}
+
+// MachineSourceName is a source's name: "source-42" for one this version
+// does not know.
+func MachineSourceName(source int) string {
+	if n, ok := machineSourceNames[source]; ok {
+		return n
+	}
+	return fmt.Sprintf("source-%d", source)
+}
 
 // MaxMachineIDLength bounds a machine_id.
 const MaxMachineIDLength = 256
 
 var machineSourcePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
-// MachineID is a machine_id from its source and value, lowercased and
-// trimmed.
-func MachineID(source, value string) string {
-	return strings.ToLower(source) + ":" + strings.ToLower(strings.TrimSpace(value))
+// MachineID is a machine_id from its source and value, as core keeps it:
+// "<source's name>:<value>", the value lowercased and trimmed.
+func MachineID(source int, value string) string {
+	return MachineSourceName(source) + ":" + strings.ToLower(strings.TrimSpace(value))
 }
 
 // ValidateMachineID checks a machine_id's shape: a source of lowercase
 // letters, digits and dashes, a colon, and a value with no spaces or
 // control characters; MaxMachineIDLength in all. The source need not be
-// one of the Machine constants: a factory may have its own.
+// one this version names.
 func ValidateMachineID(id string) error {
 	source, value, ok := strings.Cut(id, ":")
 	switch {

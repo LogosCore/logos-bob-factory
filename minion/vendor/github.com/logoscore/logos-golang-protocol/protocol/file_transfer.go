@@ -121,20 +121,20 @@ func (o FileOffer) Validate() error {
 }
 
 // ArgFile is a task's file arg, as core put it (FileOffer), checked.
-func ArgFile(args map[string]any, key string) (*FileOffer, error) {
+func ArgFile[K comparable](args map[K]any, key K) (*FileOffer, error) {
 	v, ok := args[key]
 	if !ok {
-		return nil, fmt.Errorf("no file %q", key)
+		return nil, fmt.Errorf("no file %v", key)
 	}
 	// However the args were decoded (a map of any, of strings), read the
 	// value as the CBOR it came as.
 	b, err := MarshalCBOR(v)
 	if err != nil {
-		return nil, fmt.Errorf("file %q: %w", key, err)
+		return nil, fmt.Errorf("file %v: %w", key, err)
 	}
 	var o FileOffer
 	if err := cborDec.Unmarshal(b, &o); err != nil {
-		return nil, fmt.Errorf("file %q: %w", key, err)
+		return nil, fmt.Errorf("file %v: %w", key, err)
 	}
 	if err := o.Validate(); err != nil {
 		return nil, err
