@@ -258,25 +258,85 @@ func validateEntries(entries []DirEntry) error {
 // numbered Part from 0, the last with Last. The first piece names the
 // directory (Path, Sep, Parent), every piece adds entries. Any command can
 // send listings; core keeps them in its file system snapshot as they come,
-// outside the task's output and data.
+// outside the task's output and data. It travels as listingPieceWire.
 type ListingPiece struct {
-	ID   uint64 `cbor:"id"`
-	Part uint64 `cbor:"part"`
-	Last bool   `cbor:"last,omitempty"`
+	ID   uint64
+	Part uint64
+	Last bool
 	// Path is the directory listed, absolute, as the host writes it; Sep
 	// the host's separator ("/" or "\"); Parent the directory above it,
 	// empty at a root. On part 0 only.
-	Path    string     `cbor:"path,omitempty"`
-	Sep     string     `cbor:"sep,omitempty"`
-	Parent  string     `cbor:"parent,omitempty"`
-	Entries []DirEntry `cbor:"entries,omitempty"`
+	Path    string
+	Sep     string
+	Parent  string
+	Entries []DirEntry
 	// Partial: some entries could not be read; the listing is not the
 	// whole directory, so core takes what it has and says nothing of the
 	// rest.
-	Partial bool `cbor:"partial,omitempty"`
+	Partial bool
 	// Err: the directory could not be read at all (permission denied); on
 	// a single last piece, with no entries.
-	Err string `cbor:"err,omitempty"`
+	Err string
+}
+
+// listingEntry is a DirEntry as a listing piece carries it: integer keys,
+// as every protocol map has. A dir_listing's data (DirListing) keeps text
+// keys, its command's shape.
+type listingEntry struct {
+	Name     string         `cbor:"1,keyasint"`
+	Type     string         `cbor:"2,keyasint"`
+	Size     *uint64        `cbor:"3,keyasint,omitempty"`
+	Modified *int64         `cbor:"4,keyasint,omitempty"`
+	Mode     string         `cbor:"5,keyasint,omitempty"`
+	Owner    string         `cbor:"6,keyasint,omitempty"`
+	Group    string         `cbor:"7,keyasint,omitempty"`
+	Target   string         `cbor:"8,keyasint,omitempty"`
+	Hidden   bool           `cbor:"9,keyasint,omitempty"`
+	X        map[string]any `cbor:"10,keyasint,omitempty"`
+}
+
+// listingPieceWire is a ListingPiece as it travels: its entries with
+// integer keys.
+type listingPieceWire struct {
+	ID      uint64         `cbor:"1,keyasint"`
+	Part    uint64         `cbor:"2,keyasint"`
+	Last    bool           `cbor:"3,keyasint,omitempty"`
+	Path    string         `cbor:"4,keyasint,omitempty"`
+	Sep     string         `cbor:"5,keyasint,omitempty"`
+	Parent  string         `cbor:"6,keyasint,omitempty"`
+	Entries []listingEntry `cbor:"7,keyasint,omitempty"`
+	Partial bool           `cbor:"8,keyasint,omitempty"`
+	Err     string         `cbor:"9,keyasint,omitempty"`
+}
+
+// MarshalCBOR encodes the piece as it travels.
+func (p ListingPiece) MarshalCBOR() ([]byte, error) {
+	w := listingPieceWire{ID: p.ID, Part: p.Part, Last: p.Last, Path: p.Path, Sep: p.Sep, Parent: p.Parent,
+		Partial: p.Partial, Err: p.Err}
+	if p.Entries != nil {
+		w.Entries = make([]listingEntry, len(p.Entries))
+		for i, e := range p.Entries {
+			w.Entries[i] = listingEntry(e)
+		}
+	}
+	return cborEnc.Marshal(w)
+}
+
+// UnmarshalCBOR decodes a piece as it travels.
+func (p *ListingPiece) UnmarshalCBOR(data []byte) error {
+	var w listingPieceWire
+	if err := cborDec.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*p = ListingPiece{ID: w.ID, Part: w.Part, Last: w.Last, Path: w.Path, Sep: w.Sep, Parent: w.Parent,
+		Partial: w.Partial, Err: w.Err}
+	if w.Entries != nil {
+		p.Entries = make([]DirEntry, len(w.Entries))
+		for i, e := range w.Entries {
+			p.Entries[i] = DirEntry(e)
+		}
+	}
+	return nil
 }
 
 // Validate checks a piece: the first names its directory, the rest do

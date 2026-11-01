@@ -14,9 +14,6 @@ import (
 // download_file task; core sends one to a minion for an upload_file
 // task, the minion asking for each chunk with its ack (FileOffer).
 
-// ItemChunk is one piece of a file transfer.
-const ItemChunk = "chunk"
-
 // MaxChunkData is the most a chunk carries.
 const MaxChunkData = 512 << 10
 
@@ -25,18 +22,18 @@ const MaxChunkData = 512 << 10
 // the last (off+len(Data) == Total) says the whole's SHA-256, which the
 // receiver checks.
 type ChunkItem struct {
-	T    string `cbor:"t"`
-	Xfer []byte `cbor:"xfer"`
-	Off  uint64 `cbor:"off"`
-	Data []byte `cbor:"data"`
+	T    int    `cbor:"0,keyasint"`
+	Xfer []byte `cbor:"1,keyasint"`
+	Off  uint64 `cbor:"2,keyasint"`
+	Data []byte `cbor:"3,keyasint"`
 	// Total is the whole's size: in the first chunk.
-	Total *uint64 `cbor:"total,omitempty"`
+	Total *uint64 `cbor:"4,keyasint,omitempty"`
 	// SHA256 is the whole's: in the last chunk.
-	SHA256 []byte `cbor:"sha256,omitempty"`
+	SHA256 []byte `cbor:"5,keyasint,omitempty"`
 	// Task is the task the transfer is for: in the first chunk.
-	Task []byte `cbor:"task,omitempty"`
+	Task []byte `cbor:"6,keyasint,omitempty"`
 	// Name is the file's, as the sender has it (a path): in the first.
-	Name string `cbor:"name,omitempty"`
+	Name string `cbor:"7,keyasint,omitempty"`
 }
 
 // Validate checks the ids and sizes, and that the first chunk says what a
@@ -96,16 +93,16 @@ func ReadFileDownload(seq uint64, data cbor.RawMessage) (*FileDownload, error) {
 // write it, then asks for its chunks with ack {xfer, next}; each reply brings
 // the chunk from next.
 type FileOffer struct {
-	Xfer []byte `cbor:"xfer" json:"xfer"`
+	Xfer []byte `cbor:"1,keyasint" json:"xfer"`
 	// Name is the file's name as uploaded: no path.
-	Name string `cbor:"name" json:"name"`
+	Name string `cbor:"2,keyasint" json:"name"`
 	// Size and SHA256 are the whole's; a stream's are not known when the
 	// task goes: its first chunk says the size, its last the SHA-256.
-	Size   uint64 `cbor:"size,omitempty" json:"size,omitempty"`
-	SHA256 []byte `cbor:"sha256,omitempty" json:"sha256,omitempty"`
+	Size   uint64 `cbor:"3,keyasint,omitempty" json:"size,omitempty"`
+	SHA256 []byte `cbor:"4,keyasint,omitempty" json:"sha256,omitempty"`
 	// Stream: the file comes as its uploader sends it to core (docs:
 	// contracts/minion-messages.md, Streaming a file to a minion).
-	Stream bool `cbor:"stream,omitempty" json:"stream,omitempty"`
+	Stream bool `cbor:"5,keyasint,omitempty" json:"stream,omitempty"`
 }
 
 // Validate checks the ids and the name.

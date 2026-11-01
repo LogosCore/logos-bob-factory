@@ -14,13 +14,22 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// Minion messages (docs: contracts/minion-messages.md): what a minion and
+// Minion messages (docs: contracts/minion-messages/): what a minion and
 // core say inside a sealed frame, one CBOR map each. A minion message goes
 // minion → core, a core message core → minion; each carries an id when it
 // starts an exchange or re when it answers one, and items.
+//
+// Every key of a message, of its items and of the structures inside them
+// (a sleep, a listing piece and its entries, a file offer, stage keys) is
+// a small unsigned integer, and so are item types and err codes: the
+// registry is the cbor tags below (key 0 of an item is its type, its
+// fields count from 1) and the docs' Wire format page. A number is never
+// reused for something else. What is the command's or the factory's own (a
+// task's args, a result's data, an x) keeps text keys.
 
-// MinionMessageV1 is the v of both formats.
-const MinionMessageV1 = 1
+// MinionMessageV2 is the v of both formats: integer keys. v 1, text keys,
+// is no longer taken.
+const MinionMessageV2 = 2
 
 // Limits a reader enforces before it trusts a length. A message carries at
 // most MaxMinionMessageItems items (ValidateMessageHead); an array or map
@@ -33,43 +42,62 @@ const (
 	maxMinionNesting        = 16
 )
 
-// Item types.
+// Item types: an item's key 0. 0 is none.
 const (
-	ItemStage         = "stage"
-	ItemStageResponse = "stage_response"
-	ItemHello         = "hello"
-	ItemHelloResponse = "hello_response"
-	ItemGetTasks      = "get_tasks"
-	ItemSleepUpdate   = "sleep_update"
-	ItemTask          = "task"
-	ItemCancel        = "cancel"
-	ItemResult        = "result"
-	ItemAck           = "ack"
-	ItemErr           = "err"
+	ItemStage         = 1
+	ItemStageResponse = 2
+	ItemHello         = 3
+	ItemHelloResponse = 4
+	ItemSleepUpdate   = 5
+	// 6 is rehello (planned): core asking for a new hello.
+	ItemGetTasks = 7
+	ItemTask     = 8
+	ItemCancel   = 9
+	ItemResult   = 10
+	ItemAck      = 11
+	ItemChunk    = 12
+	ItemErr      = 13
 )
+
+// itemNames are the item types' names, for people (logs, docs).
+var itemNames = map[int]string{
+	ItemStage: "stage", ItemStageResponse: "stage_response", ItemHello: "hello",
+	ItemHelloResponse: "hello_response", ItemSleepUpdate: "sleep_update", 6: "rehello",
+	ItemGetTasks: "get_tasks", ItemTask: "task", ItemCancel: "cancel", ItemResult: "result",
+	ItemAck: "ack", ItemChunk: "chunk", ItemErr: "err",
+}
+
+// ItemName is an item type's name, for people: "item 42" for one it does
+// not know.
+func ItemName(t int) string {
+	if n, ok := itemNames[t]; ok {
+		return n
+	}
+	return fmt.Sprintf("item %d", t)
+}
 
 // MinionMessage is a message minion → core.
 type MinionMessage struct {
-	V     int               `cbor:"v"`
-	ID    []byte            `cbor:"id,omitempty"`
-	Re    []byte            `cbor:"re,omitempty"`
-	Items []cbor.RawMessage `cbor:"items,omitempty"`
+	V     int               `cbor:"0,keyasint"`
+	ID    []byte            `cbor:"1,keyasint,omitempty"`
+	Re    []byte            `cbor:"2,keyasint,omitempty"`
+	Items []cbor.RawMessage `cbor:"3,keyasint,omitempty"`
 }
 
 // CoreMessage is a message core → minion.
 type CoreMessage struct {
-	V     int               `cbor:"v"`
-	ID    []byte            `cbor:"id,omitempty"`
-	Re    []byte            `cbor:"re,omitempty"`
-	Items []cbor.RawMessage `cbor:"items,omitempty"`
+	V     int               `cbor:"0,keyasint"`
+	ID    []byte            `cbor:"1,keyasint,omitempty"`
+	Re    []byte            `cbor:"2,keyasint,omitempty"`
+	Items []cbor.RawMessage `cbor:"3,keyasint,omitempty"`
 }
 
 // StageItem is a minion's first message: its RSA public key (DER
 // SubjectPublicKeyInfo) and a random correlation id.
 type StageItem struct {
-	T    string `cbor:"t"`
-	Key  []byte `cbor:"key"`
-	Corr []byte `cbor:"corr"`
+	T    int    `cbor:"0,keyasint"`
+	Key  []byte `cbor:"1,keyasint"`
+	Corr []byte `cbor:"2,keyasint"`
 }
 
 // StageResponseItem is core's answer to a stage: the temporary id (16 raw
@@ -77,10 +105,10 @@ type StageItem struct {
 // suite encrypted to the minion's key (EncryptStageKeys), and the stage's
 // correlation id.
 type StageResponseItem struct {
-	T    string `cbor:"t"`
-	TID  []byte `cbor:"tid"`
-	Keys []byte `cbor:"keys"`
-	Corr []byte `cbor:"corr"`
+	T    int    `cbor:"0,keyasint"`
+	TID  []byte `cbor:"1,keyasint"`
+	Keys []byte `cbor:"2,keyasint"`
+	Corr []byte `cbor:"3,keyasint"`
 }
 
 // HelloItem is the minion's host and process: it opens a session, and
@@ -88,36 +116,36 @@ type StageResponseItem struct {
 // PID, OS and Arch are required; OS and Arch use Go's names, as build
 // platforms do. X holds the factory's own fields.
 type HelloItem struct {
-	T         string   `cbor:"t"`
-	PID       uint64   `cbor:"pid"`
-	OS        string   `cbor:"os"`
-	Arch      string   `cbor:"arch"`
-	Host      string   `cbor:"host,omitempty"`
-	User      string   `cbor:"user,omitempty"`
-	Domain    string   `cbor:"domain,omitempty"`
-	Proc      string   `cbor:"proc,omitempty"`
-	Integrity string   `cbor:"integrity,omitempty"`
-	Addrs     []string `cbor:"addrs,omitempty"`
-	Version   string   `cbor:"version,omitempty"`
+	T         int      `cbor:"0,keyasint"`
+	PID       uint64   `cbor:"1,keyasint"`
+	OS        string   `cbor:"2,keyasint"`
+	Arch      string   `cbor:"3,keyasint"`
+	Host      string   `cbor:"4,keyasint,omitempty"`
+	User      string   `cbor:"5,keyasint,omitempty"`
+	Domain    string   `cbor:"6,keyasint,omitempty"`
+	Proc      string   `cbor:"7,keyasint,omitempty"`
+	Integrity string   `cbor:"8,keyasint,omitempty"`
+	Addrs     []string `cbor:"9,keyasint,omitempty"`
+	Version   string   `cbor:"10,keyasint,omitempty"`
 	// MachineID tells apart machines with the same host and user:
 	// "<source>:<value>" (machine_id.go). Every minion sends one; core takes
 	// a hello without it from minions built before it was asked for.
-	MachineID string         `cbor:"machine_id,omitempty"`
-	X         map[string]any `cbor:"x,omitempty"`
+	MachineID string         `cbor:"11,keyasint,omitempty"`
+	X         map[string]any `cbor:"12,keyasint,omitempty"`
 	// SID is the persisted session the minion claims, raw bytes; nil for a
 	// new session.
-	SID []byte `cbor:"sid,omitempty"`
+	SID []byte `cbor:"13,keyasint,omitempty"`
 	// Sleep is the check-in schedule the minion starts with; nil when it
 	// does not say.
-	Sleep *Sleep `cbor:"sleep,omitempty"`
+	Sleep *Sleep `cbor:"14,keyasint,omitempty"`
 }
 
 // Sleep is a minion's check-in schedule: Interval milliseconds between
 // check-ins, spread by Jitter percent of it either way. Core marks a
 // session late once a check-in is overdue by it.
 type Sleep struct {
-	Interval uint64 `cbor:"interval"`
-	Jitter   uint64 `cbor:"jitter"`
+	Interval uint64 `cbor:"1,keyasint"`
+	Jitter   uint64 `cbor:"2,keyasint"`
 }
 
 // Validate refuses an interval of 0 and a jitter over 100.
@@ -133,9 +161,9 @@ func (s Sleep) Validate() error {
 
 // SleepUpdateItem says the minion's check-in schedule changed.
 type SleepUpdateItem struct {
-	T        string `cbor:"t"`
-	Interval uint64 `cbor:"interval"`
-	Jitter   uint64 `cbor:"jitter"`
+	T        int    `cbor:"0,keyasint"`
+	Interval uint64 `cbor:"1,keyasint"`
+	Jitter   uint64 `cbor:"2,keyasint"`
 }
 
 // Sleep is the schedule the item says.
@@ -168,15 +196,15 @@ func (h HelloItem) Validate() error {
 
 // HelloResponseItem is core's answer to a hello: the session id, raw bytes.
 type HelloResponseItem struct {
-	T   string `cbor:"t"`
-	SID []byte `cbor:"sid"`
+	T   int    `cbor:"0,keyasint"`
+	SID []byte `cbor:"1,keyasint"`
 }
 
 // GetTasksItem says the minion takes new tasks, and how many at most: nil
 // for no limit of the minion's. A message without one takes none.
 type GetTasksItem struct {
-	T   string  `cbor:"t"`
-	Max *uint64 `cbor:"max,omitempty"`
+	T   int     `cbor:"0,keyasint"`
+	Max *uint64 `cbor:"1,keyasint,omitempty"`
 }
 
 // Validate refuses a max of 0.
@@ -191,10 +219,55 @@ func (g GetTasksItem) Validate() error {
 // id (16 random bytes), Cmd one of the build's commands, Args its params'
 // values, defaults filled in by core.
 type TaskItem struct {
-	T    string         `cbor:"t"`
-	Task []byte         `cbor:"task"`
-	Cmd  string         `cbor:"cmd"`
-	Args map[string]any `cbor:"args,omitempty"`
+	T    int    `cbor:"0,keyasint"`
+	Task []byte `cbor:"1,keyasint"`
+	Cmd  string `cbor:"2,keyasint"`
+	Args Args   `cbor:"3,keyasint,omitempty"`
+}
+
+// Args are a task's args: its params' keys, as the build schema names
+// them, to their values. A file or stream param's value is a FileOffer,
+// integer keys as every protocol map has: decoded, it stays the CBOR it
+// came as (a cbor.RawMessage), which ArgFile reads.
+type Args map[string]any
+
+// UnmarshalCBOR decodes args, keeping an integer-keyed map as it came.
+func (a *Args) UnmarshalCBOR(data []byte) error {
+	var raw map[string]cbor.RawMessage
+	if err := cborDec.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw == nil {
+		*a = nil
+		return nil
+	}
+	out := make(Args, len(raw))
+	for k, v := range raw {
+		if isIntKeyedMap(v) {
+			out[k] = v
+			continue
+		}
+		var x any
+		if err := cborDec.Unmarshal(v, &x); err != nil {
+			return fmt.Errorf("arg %q: %w", k, err)
+		}
+		out[k] = x
+	}
+	*a = out
+	return nil
+}
+
+// isIntKeyedMap reports whether b is a CBOR map whose first key is an
+// unsigned integer.
+func isIntKeyedMap(b []byte) bool {
+	if !isCBORMap(b) {
+		return false
+	}
+	head := map[byte]int{24: 2, 25: 3, 26: 5, 27: 9}[b[0]&0x1f]
+	if b[0]&0x1f < 24 {
+		head = 1
+	}
+	return head > 0 && len(b) > head && b[head]>>5 == 0
 }
 
 // Validate checks the task id and the command's id.
@@ -211,8 +284,8 @@ func (t TaskItem) Validate() error {
 // CancelItem asks the minion to stop a task (core → minion). The minion
 // still sends the task's final result.
 type CancelItem struct {
-	T    string `cbor:"t"`
-	Task []byte `cbor:"task"`
+	T    int    `cbor:"0,keyasint"`
+	Task []byte `cbor:"1,keyasint"`
 }
 
 // Validate checks the task id.
@@ -229,21 +302,21 @@ func (c CancelItem) Validate() error {
 // (each part's adds to the earlier parts'), Err what went wrong, Exit the
 // exit code of the process the task ran, on the done part only.
 type ResultItem struct {
-	T    string `cbor:"t"`
-	Task []byte `cbor:"task"`
-	Seq  uint64 `cbor:"seq"`
-	Done bool   `cbor:"done,omitempty"`
-	OK   *bool  `cbor:"ok,omitempty"`
-	Out  []byte `cbor:"out,omitempty"`
-	Err  string `cbor:"err,omitempty"`
+	T    int    `cbor:"0,keyasint"`
+	Task []byte `cbor:"1,keyasint"`
+	Seq  uint64 `cbor:"2,keyasint"`
+	Done bool   `cbor:"3,keyasint,omitempty"`
+	OK   *bool  `cbor:"4,keyasint,omitempty"`
+	Out  []byte `cbor:"5,keyasint,omitempty"`
+	Err  string `cbor:"6,keyasint,omitempty"`
 	// Data is the command's structured output, a CBOR map passed through
 	// as it came: its shape is the command's result's
 	// (task_results.go). ResultData encodes one.
-	Data cbor.RawMessage `cbor:"data,omitempty"`
-	Exit *int64          `cbor:"exit,omitempty"`
+	Data cbor.RawMessage `cbor:"7,keyasint,omitempty"`
+	Exit *int64          `cbor:"8,keyasint,omitempty"`
 	// Ls is what the task saw of the host's file system: listings, in
 	// pieces (ListingPiece), beside or instead of out and data.
-	Ls []ListingPiece `cbor:"ls,omitempty"`
+	Ls []ListingPiece `cbor:"9,keyasint,omitempty"`
 }
 
 // Validate checks the task id, and ok and exit against done.
@@ -271,14 +344,14 @@ func (r ResultItem) Validate() error {
 // AckItem says what its sender received: tasks (minion → core), or how far
 // a file transfer got (Xfer with Next, the offset it has every byte before).
 type AckItem struct {
-	T     string   `cbor:"t"`
-	Tasks [][]byte `cbor:"tasks,omitempty"`
-	Xfer  []byte   `cbor:"xfer,omitempty"`
-	Next  *uint64  `cbor:"next,omitempty"`
+	T     int      `cbor:"0,keyasint"`
+	Tasks [][]byte `cbor:"1,keyasint,omitempty"`
+	Xfer  []byte   `cbor:"2,keyasint,omitempty"`
+	Next  *uint64  `cbor:"3,keyasint,omitempty"`
 	// Hold, with Xfer: send nothing more of the transfer until an ack
 	// without it (a stream waiting for its downloader; docs:
 	// contracts/minion-messages.md, Streaming a file).
-	Hold bool `cbor:"hold,omitempty"`
+	Hold bool `cbor:"4,keyasint,omitempty"`
 }
 
 // Validate checks the ids, and that a transfer comes with its offset.
@@ -301,27 +374,42 @@ func (a AckItem) Validate() error {
 
 // ErrItem reports a problem with a message or one of its items.
 type ErrItem struct {
-	T    string `cbor:"t"`
-	Code string `cbor:"code"`
-	Msg  string `cbor:"msg,omitempty"`
-	Item *int   `cbor:"item,omitempty"`
+	T    int    `cbor:"0,keyasint"`
+	Code int    `cbor:"1,keyasint"`
+	Msg  string `cbor:"2,keyasint,omitempty"`
+	Item *int   `cbor:"3,keyasint,omitempty"`
 }
 
 // Error codes of ErrItem.
 const (
-	ErrItemBadMessage  = "bad_message"
-	ErrItemUnknownItem = "unknown_item"
+	ErrItemBadMessage  = 1
+	ErrItemUnknownItem = 2
 	// ErrItemUnknownTask: a cancel (or chunk) for a task the minion does not
 	// have.
-	ErrItemUnknownTask = "unknown_task"
-	ErrItemTooLarge    = "too_large"
+	ErrItemUnknownTask = 3
+	ErrItemTooLarge    = 4
 	// ErrItemSessionClosed: the session the message was sent under is
 	// closed. The one code a minion starts over on.
-	ErrItemSessionClosed = "session_closed"
+	ErrItemSessionClosed = 5
 	// ErrItemSessionReplaced: another process claimed the persisted session
 	// the message was sent under. Start over without claiming it.
-	ErrItemSessionReplaced = "session_replaced"
+	ErrItemSessionReplaced = 6
 )
+
+// errCodeNames are the err codes' names, for people.
+var errCodeNames = map[int]string{
+	ErrItemBadMessage: "bad_message", ErrItemUnknownItem: "unknown_item", ErrItemUnknownTask: "unknown_task",
+	ErrItemTooLarge: "too_large", ErrItemSessionClosed: "session_closed", ErrItemSessionReplaced: "session_replaced",
+}
+
+// ErrCodeName is an err code's name, for people: "code 42" for one it does
+// not know.
+func ErrCodeName(code int) string {
+	if n, ok := errCodeNames[code]; ok {
+		return n
+	}
+	return fmt.Sprintf("code %d", code)
+}
 
 // StageKeySize is the RSA key size a stage's key must have.
 const StageKeySize = 2048
@@ -341,8 +429,8 @@ func init() {
 	}).EncMode(); err != nil {
 		panic(err)
 	}
-	// The subset both sides accept: text keys once each, definite lengths,
-	// no tags, and limits checked before a length is trusted.
+	// The subset both sides accept: keys once each, definite lengths, no
+	// tags, and limits checked before a length is trusted.
 	if cborDec, err = (cbor.DecOptions{
 		DupMapKey:        cbor.DupMapKeyEnforcedAPF,
 		IndefLength:      cbor.IndefLengthForbidden,
@@ -370,13 +458,13 @@ func UnmarshalCBOR(data []byte, v any) error {
 	return cborDec.Unmarshal(data, v)
 }
 
-// ItemType is the t of an item, "" when it has none.
-func ItemType(item cbor.RawMessage) string {
+// ItemType is the type of an item (its key 0), 0 when it has none.
+func ItemType(item cbor.RawMessage) int {
 	var head struct {
-		T string `cbor:"t"`
+		T int `cbor:"0,keyasint"`
 	}
 	if err := cborDec.Unmarshal(item, &head); err != nil {
-		return ""
+		return 0
 	}
 	return head.T
 }
@@ -392,8 +480,8 @@ func NewMessageID() []byte {
 // and re (16 bytes), and at most MaxMinionMessageItems items.
 func ValidateMessageHead(v int, id, re []byte, items int) error {
 	switch {
-	case v != MinionMessageV1:
-		return fmt.Errorf("v must be %d", MinionMessageV1)
+	case v != MinionMessageV2:
+		return fmt.Errorf("v must be %d", MinionMessageV2)
 	case (id == nil) == (re == nil):
 		return errors.New("a message has exactly one of id and re")
 	case id != nil && len(id) != 16, re != nil && len(re) != 16:
