@@ -148,7 +148,7 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, _ := protocol.MarshalCBOR(item)
-	answer, _ := protocol.MarshalCBOR(protocol.CoreMessage{V: protocol.MinionMessageV1, Re: msg.ID, Items: []cbor.RawMessage{raw}})
+	answer, _ := protocol.MarshalCBOR(protocol.CoreMessage{V: protocol.MinionMessageV2, Re: msg.ID, Items: []cbor.RawMessage{raw}})
 	replyFrame, _ := protocol.SealFrame(keys, id, protocol.FrameCoreToMinion, answer)
 	out := append([]byte{0}, id[:]...)
 	_, _ = w.Write(append(out, replyFrame...))

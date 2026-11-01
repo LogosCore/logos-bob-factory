@@ -137,7 +137,7 @@ func TestDownloadRefused(t *testing.T) {
 	}
 	r.take(coreSays(t, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemTooLarge, Msg: "over core's 2", Item: &i}), items)
 	task := waitEnd(t, r, 2*time.Second)
-	if task.ok || !strings.Contains(task.err, "too_large: over core's 2") {
+	if task.ok || !strings.Contains(task.err, "core refused the file: over core's 2") {
 		t.Fatalf("ended %+v", task)
 	}
 }

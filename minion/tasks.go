@@ -264,10 +264,10 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 			if protocol.UnmarshalCBOR(raw, &e) == nil && e.Item != nil && *e.Item >= 0 && *e.Item < len(sent) {
 				switch it := sent[*e.Item].(type) {
 				case protocol.ChunkItem:
-					r.refused(it.Xfer, e.Code+": "+e.Msg)
+					r.refused(it.Xfer, e.Msg)
 				case protocol.AckItem:
 					if it.Xfer != nil {
-						r.refused(it.Xfer, e.Code+": "+e.Msg)
+						r.refused(it.Xfer, e.Msg)
 					}
 				}
 			}
@@ -374,7 +374,7 @@ func (r *runner) chunk(c protocol.ChunkItem, item int) {
 	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask, Msg: "no such transfer", Item: &item})
 }
 
-func (r *runner) queueErr(code, msg string, item int) {
+func (r *runner) queueErr(code int, msg string, item int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: code, Msg: msg, Item: &item})

@@ -183,7 +183,7 @@ func session(conn connection, sched schedule, d description, buildID [16]byte, k
 			}
 			// About one of the items (a chunk core does not take): the
 			// tasks see it with the rest of the answer.
-			log.Printf("check-in %d: core says %s: %s; keeping the session", n, e.Code, e.Msg)
+			log.Printf("check-in %d: core says err %d: %s; keeping the session", n, e.Code, e.Msg)
 		}
 		tasks.take(answer, items)
 		if asked := slices.ContainsFunc(items, func(it any) bool { _, ok := it.(protocol.GetTasksItem); return ok }); asked {
@@ -343,7 +343,7 @@ func describeHost() protocol.HelloItem {
 func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
 	var answer protocol.CoreMessage
 	msgID := protocol.NewMessageID()
-	msg := protocol.MinionMessage{V: protocol.MinionMessageV1, ID: msgID}
+	msg := protocol.MinionMessage{V: protocol.MinionMessageV2, ID: msgID}
 	for _, it := range items {
 		raw, err := protocol.MarshalCBOR(it)
 		if err != nil {
@@ -409,7 +409,7 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 // coreErr is the first err item of core's answer, as an error.
 func coreErr(answer protocol.CoreMessage) error {
 	if e, ok := coreErrItem(answer); ok {
-		return fmt.Errorf("core says %s: %s", e.Code, e.Msg)
+		return fmt.Errorf("core says err %d: %s", e.Code, e.Msg)
 	}
 	return nil
 }
@@ -426,7 +426,7 @@ func coreErrItem(answer protocol.CoreMessage) (protocol.ErrItem, bool) {
 }
 
 // item is the answer's first item of type t, or nil.
-func item(answer protocol.CoreMessage, t string) []byte {
+func item(answer protocol.CoreMessage, t int) []byte {
 	for _, raw := range answer.Items {
 		if protocol.ItemType(raw) == t {
 			return raw
