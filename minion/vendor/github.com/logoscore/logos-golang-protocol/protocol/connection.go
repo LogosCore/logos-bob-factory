@@ -78,6 +78,16 @@ func (s ConnectionSchema) KindFields(kind string) []FieldSpec {
 	return s.Kinds[kind].Fields
 }
 
+// TargetFields are what an operator fills in for each target of a bind
+// kind; none for a reverse kind or one the channel does not carry.
+func (s ConnectionSchema) TargetFields(kind string) []FieldSpec {
+	return s.Kinds[kind].Target
+}
+
+// IsBindKind reports whether kind is one the channel dials (bind-call,
+// bind-persistent): its minions have targets.
+func IsBindKind(kind string) bool { return kind == KindBindCall || kind == KindBindPersistent }
+
 // ValidateConnectionSchema checks a schema's structure, limits, and that every
 // declared default satisfies its own field spec: at least one kind, each a
 // known kind with its fields (and, for a bind kind only, its target), keys
@@ -97,7 +107,7 @@ func ValidateConnectionSchema(s ConnectionSchema) error {
 			return fmt.Errorf("kinds: %q is not a connection kind", kind)
 		}
 		k := s.Kinds[kind]
-		bind := kind == KindBindCall || kind == KindBindPersistent
+		bind := IsBindKind(kind)
 		switch {
 		case len(k.Target) > 0 && !bind:
 			return fmt.Errorf("kinds.%s: only a bind kind has target fields", kind)
@@ -130,6 +140,24 @@ func ValidateConnectionValues(s ConnectionSchema, kind string, values map[string
 		return map[string]string{"": fmt.Sprintf("the channel does not carry %q connections", kind)}
 	}
 	return validateValues(s.KindFields(kind), values, "not a field of this kind of connection")
+}
+
+// ValidateTargetValues checks a target's values against kind's target
+// fields in s, as ValidateConnectionValues does a connection's.
+func ValidateTargetValues(s ConnectionSchema, kind string, values map[string]any) map[string]string {
+	if _, ok := s.Kinds[kind]; !ok {
+		return map[string]string{"": fmt.Sprintf("the channel does not carry %q connections", kind)}
+	}
+	if !IsBindKind(kind) {
+		return map[string]string{"": fmt.Sprintf("%q connections have no targets", kind)}
+	}
+	return validateValues(s.TargetFields(kind), values, "not a target field of this kind of connection")
+}
+
+// ResolveTargetValues are a target's values over its kind's target
+// defaults, for its target fields only.
+func ResolveTargetValues(s ConnectionSchema, kind string, values map[string]any) map[string]any {
+	return ResolveFieldValues(s.TargetFields(kind), values)
 }
 
 // ResolveConnectionValues is what a minion is given for a connection of

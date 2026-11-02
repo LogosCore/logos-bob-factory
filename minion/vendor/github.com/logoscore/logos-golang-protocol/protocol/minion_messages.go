@@ -53,6 +53,9 @@ const (
 	ItemHello         = 3
 	ItemHelloResponse = 4
 	ItemSleepUpdate   = 5
+	// ItemRehello: core asks the minion for a hello (core → minion). A
+	// bind-call minion's first call carries one, under its build id.
+	ItemRehello = 6
 	// 6 is rehello (planned): core asking for a new hello.
 	ItemGetTasks = 7
 	ItemTask     = 8
@@ -68,7 +71,7 @@ const (
 // itemNames are the item types' names, for people (logs, docs).
 var itemNames = map[int]string{
 	ItemStage: "stage", ItemStageResponse: "stage_response", ItemHello: "hello",
-	ItemHelloResponse: "hello_response", ItemSleepUpdate: "sleep_update", 6: "rehello",
+	ItemHelloResponse: "hello_response", ItemSleepUpdate: "sleep_update", ItemRehello: "rehello",
 	ItemGetTasks: "get_tasks", ItemTask: "task", ItemCancel: "cancel", ItemResult: "result",
 	ItemAck: "ack", ItemChunk: "chunk", ItemErr: "err", ItemConnUpdate: "conn_update",
 }
@@ -294,6 +297,13 @@ func (h HelloItem) Validate() error {
 type HelloResponseItem struct {
 	T   int    `cbor:"0,keyasint"`
 	SID []byte `cbor:"1,keyasint"`
+}
+
+// RehelloItem asks the minion for a hello (core → minion): it answers
+// with one, as under the id the request came (a bind-call minion's first
+// call, under its build id, opens its session this way).
+type RehelloItem struct {
+	T int `cbor:"0,keyasint"`
 }
 
 // GetTasksItem says the minion takes new tasks, and how many at most: nil
