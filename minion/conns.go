@@ -13,9 +13,13 @@ import (
 // Connections (docs: contracts/channel-core-connections/, Connection
 // management): the minion is built with an ordered list of them and uses
 // one at a time, the first it can use when it starts. Its hello says which,
-// by its place in the build's (from 1); an operator's connect moves it to
+// by its place in the build's (from 1); an operator's switch moves it to
 // another, which it takes only once a check-in through it worked, saying so
 // in a conn_update over the new one; with a duration it moves back after it.
+// A connection it listens on (bind-persistent) cannot be checked in through
+// until core dials it: a switch to one opens its port (listen), the session
+// goes on through the connection in use meanwhile, and the move goes through
+// the dial once it comes; no dial in listenWait closes the port again.
 // The session, its keys and its schedule stay the same whichever connection
 // carries it.
 
@@ -27,6 +31,10 @@ type transport struct {
 	// WebSocket, a bind-persistent one's listener; nil for a reverse-call
 	// one.
 	link persistentLink
+	// listener is a bind-persistent connection's listener a switch opened,
+	// waiting for core's dial (at place listening); nil when none.
+	listener  *tcpLink
+	listening int
 }
 
 // persistentLink is a connection kept open, which core pushes over.
@@ -82,7 +90,12 @@ func (t *transport) use(i int, ws *wsLink) {
 		}
 		t.link = ws
 	case protocol.KindBindPersistent:
-		t.link = newTCPLink(t.conn())
+		if t.listener != nil && t.listening == i+1 {
+			// The one a switch opened, which core dialed.
+			t.link, t.listener, t.listening = t.listener, nil, 0
+		} else {
+			t.link = newTCPLink(t.conn())
+		}
 	}
 	if old != nil && old != t.link {
 		old.close()
@@ -146,6 +159,7 @@ func (t *transport) reconnectWait(backoff time.Duration) time.Duration {
 // closeLink closes the WebSocket in use, if any: the next exchange opens
 // another.
 func (t *transport) closeLink() {
+	t.stopListening()
 	if t.link != nil {
 		t.link.close()
 	}
@@ -159,8 +173,6 @@ func (t *transport) check(place int) error {
 		return fmt.Errorf("the build has %d connection(s): there is no connection %d", len(t.conns), place)
 	case place == t.place():
 		return fmt.Errorf("already on connection %d", place)
-	case t.conns[place-1].bound() || t.conn().bound():
-		return fmt.Errorf("connection %d: a minion that listens is reached by core, not moved", place)
 	case !usable(t.conns[place-1]):
 		c := t.conns[place-1]
 		return fmt.Errorf("connection %d is %s through %s, which this minion cannot use", place, c.ConnectionKind(),
@@ -177,6 +189,18 @@ func (t *transport) try(place int, id [16]byte, keys protocol.AES256CBCHMACSHA25
 	var ws *wsLink
 	var answer protocol.CoreMessage
 	var err error
+	if c.bound() {
+		// Through core's dial on the listener a switch opened: one that
+		// does not answer leaves it listening.
+		if t.listener == nil || t.listening != place {
+			return answer, fmt.Errorf("connection %d is not listening", place)
+		}
+		if answer, err = t.listener.exchange(id, keys, items...); err != nil {
+			return answer, err
+		}
+		t.use(place-1, nil)
+		return answer, nil
+	}
 	if c.ConnectionKind() == protocol.KindReversePersistent {
 		ws = newWSLink(c)
 		answer, err = ws.exchange(id, keys, items...)
@@ -193,6 +217,29 @@ func (t *transport) try(place int, id [16]byte, keys protocol.AES256CBCHMACSHA25
 	return answer, nil
 }
 
+// listen opens the port of the connection at place, a bind-persistent one,
+// for a switch to it: core's dial comes on dialed. One open already is
+// kept.
+func (t *transport) listen(place int) *tcpLink {
+	if t.listener == nil || t.listening != place {
+		t.stopListening()
+		t.listener, t.listening = newTCPLink(t.conns[place-1]), place
+	}
+	return t.listener
+}
+
+// stopListening closes a listener a switch opened and core never dialed.
+func (t *transport) stopListening() {
+	if t.listener != nil {
+		t.listener.close()
+		t.listener, t.listening = nil, 0
+	}
+}
+
+// listenWait is how long a switch to a connection the minion listens on
+// waits for core's dial.
+var listenWait = 10 * time.Minute
+
 // switchReq is a connect task asking the session to move: to the
 // connection at place, for dur (0: for good). done gets what came of it:
 // nil once moved.
@@ -200,6 +247,12 @@ type switchReq struct {
 	place int
 	dur   time.Duration
 	done  chan error
+	// listening, when set, is told the port a switch to a connection the
+	// minion listens on opened: the task says it, which is core's cue to
+	// dial (it then waits for done, up to listenWait more).
+	listening func(addr string)
+	// ctx is the task's: a switch it stops no longer waits for a dial.
+	ctx context.Context
 }
 
 // revert is a move back the session owes: to the connection at place, at
@@ -222,7 +275,10 @@ func (r *runner) switchConnection(ctx context.Context, t *task, args protocol.Ar
 	if !ok || dur < 0 {
 		dur = 0
 	}
-	req := switchReq{place: int(place), dur: dur, done: make(chan error, 1)}
+	req := switchReq{place: int(place), dur: dur, done: make(chan error, 1), ctx: ctx, listening: func(addr string) {
+		r.write(t, []byte(fmt.Sprintf("listening on %s: waiting for core to dial connection %d (up to %s)\n", addr, place, listenWait)), nil)
+		r.nudge()
+	}}
 	// The session moves between check-ins; a session that ends first (it
 	// starts over) never answers.
 	var err error
@@ -233,7 +289,7 @@ func (r *runner) switchConnection(ctx context.Context, t *task, args protocol.Ar
 		case err = <-req.done:
 		case <-ctx.Done():
 			err = errors.New("cancelled")
-		case <-time.After(switchWait):
+		case <-time.After(switchWait + listenWait):
 			err = errors.New("the session did not get to it")
 		}
 	case <-ctx.Done():

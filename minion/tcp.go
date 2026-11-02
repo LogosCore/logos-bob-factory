@@ -37,6 +37,9 @@ type tcpLink struct {
 	conn connection
 
 	mu sync.Mutex
+	// ln is the listener while it listens; stopped once closed for good.
+	ln      net.Listener
+	stopped bool
 	// cur is the connection in use; nil while none is in.
 	cur net.Conn
 	// open counts the connections in, the one in use and those not closed
@@ -50,8 +53,7 @@ type tcpLink struct {
 }
 
 // newTCPLink starts listening as the connection says, and keeps listening
-// for the process's life: a listen that fails (the port taken) is tried
-// again.
+// until closed: a listen that fails (the port taken) is tried again.
 func newTCPLink(conn connection) *tcpLink {
 	l := &tcpLink{conn: conn, arrived: make(chan struct{}, 1), keys: map[[16]byte]protocol.AES256CBCHMACSHA256Material{},
 		waiting: map[string]chan protocol.CoreMessage{}, pushes: make(chan protocol.CoreMessage, 16), lost: make(chan struct{}, 1)}
@@ -91,25 +93,46 @@ func (c connection) keepalive() time.Duration {
 }
 
 func (l *tcpLink) listen() {
-	for {
+	for !l.isStopped() {
 		ln, err := net.Listen("tcp", l.conn.listenAddr())
 		if err != nil {
 			log.Printf("listen on %s: %v; trying again in 30s", l.conn.listenAddr(), err)
 			time.Sleep(30 * time.Second)
 			continue
 		}
+		l.mu.Lock()
+		if l.stopped {
+			l.mu.Unlock()
+			_ = ln.Close()
+			return
+		}
+		l.ln = ln
+		l.mu.Unlock()
 		log.Printf("listening on %s for the channel's dial", ln.Addr())
 		for {
 			c, err := ln.Accept()
 			if err != nil {
-				log.Printf("accept: %v", err)
+				if !l.isStopped() {
+					log.Printf("accept: %v", err)
+				}
 				_ = ln.Close()
 				break
 			}
 			l.take(c)
 		}
 	}
+	log.Printf("no longer listening on %s", l.conn.listenAddr())
 }
+
+func (l *tcpLink) isStopped() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.stopped
+}
+
+// dialed says a connection came in (a switch waits on it); a receive
+// consumes it, which wait does not need: it looks at the one in use.
+func (l *tcpLink) dialed() <-chan struct{} { return l.arrived }
 
 // take makes a connection that came in the one in use, while fewer than
 // max_connections are in: the newest wins (the one before is likely stale,
@@ -267,11 +290,17 @@ func (l *tcpLink) forget(msgID []byte) {
 	l.mu.Unlock()
 }
 
-// close closes the connection in use, if any; the listener stays.
+// close stops listening and closes the connection in use, if any: the
+// minion moved off the connection, or its session ended (one that starts
+// over listens again, and finds the port free).
 func (l *tcpLink) close() {
 	l.mu.Lock()
-	c := l.cur
+	l.stopped = true
+	c, ln := l.cur, l.ln
 	l.mu.Unlock()
+	if ln != nil {
+		_ = ln.Close()
+	}
 	if c != nil {
 		_ = c.Close()
 	}

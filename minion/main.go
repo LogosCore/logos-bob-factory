@@ -56,6 +56,9 @@ type description struct {
 	// (ops.go); Greeting what its hello command answers.
 	Ops      []uint64 `json:"ops"`
 	Greeting string   `json:"greeting"`
+	// Failover is the build's failover policy (failover.go); nil: the
+	// defaults.
+	Failover *protocol.BuildFailover `json:"failover"`
 }
 
 func main() {
@@ -130,6 +133,27 @@ func run() error {
 
 // session stages, says hello and checks in for as long as that works; it
 // returns why it stopped.
+// awaitDial is a switch to a connection the minion listens on: its port
+// open (link), until core's dial, or until; from is the connection the
+// minion was on.
+type awaitDial struct {
+	req   switchReq
+	from  int
+	link  *tcpLink
+	until time.Time
+}
+
+// fail ends the switch: its task fails with err.
+func (a *awaitDial) fail(err error) {
+	select {
+	case a.req.done <- err:
+	default:
+	}
+}
+
+// cancelled reports whether the switch's task was stopped.
+func (a *awaitDial) cancelled() bool { return a.req.ctx != nil && a.req.ctx.Err() != nil }
+
 // exchanger sends a message under id and returns core's reply: through a
 // request, or over the WebSocket.
 type exchanger func(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error)
@@ -164,6 +188,12 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	retrying := false
 	// back is the move back a connect with a duration owes; nil for none.
 	var back *revert
+	// awaiting is a switch to a connection the minion listens on, waiting
+	// for core's dial; nil for none.
+	var awaiting *awaitDial
+	// fo moves the minion between its connections on its own, as the
+	// build's failover policy says (failover.go).
+	fo := newFailover(d.Failover, tr.conns)
 	// answered takes core's answer to items: false when the session ends
 	// (err says why).
 	answered := func(n int, items []any, answer protocol.CoreMessage) error {
@@ -214,6 +244,20 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			return
 		}
 		from := tr.place()
+		if tr.conns[req.place-1].bound() {
+			// Core reaches it: open its port, say so, and go on as before
+			// until the dial comes (awaitDial, below).
+			if awaiting != nil {
+				awaiting.fail(fmt.Errorf("a switch to connection %d came first", req.place))
+			}
+			link := tr.listen(req.place)
+			awaiting = &awaitDial{req: req, from: from, link: link, until: time.Now().Add(listenWait)}
+			log.Printf("switch to connection %d: listening on %s, waiting for core's dial", req.place, tr.conns[req.place-1].listenAddr())
+			if req.listening != nil {
+				req.listening(tr.conns[req.place-1].listenAddr())
+			}
+			return
+		}
 		why := "operator"
 		if req.dur > 0 {
 			why = fmt.Sprintf("operator, for %s", req.dur)
@@ -221,6 +265,7 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		err := move(n, req.place, why)
 		switch {
 		case err == nil:
+			fo.switched()
 			back = nil
 			if req.dur > 0 {
 				back = &revert{place: from, at: time.Now().Add(req.dur), after: req.dur}
@@ -234,9 +279,60 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			req.done <- err
 		}
 	}
+	// dialCame moves through core's dial on the listener a switch opened;
+	// one that does not answer leaves it listening, for another dial.
+	dialCame := func(n int) {
+		a := awaiting
+		why := "operator"
+		if a.req.dur > 0 {
+			why = fmt.Sprintf("operator, for %s", a.req.dur)
+		}
+		if err := move(n, a.req.place, why); err != nil {
+			if tr.place() == a.req.place {
+				awaiting = nil
+				a.req.done <- nil
+				ended = err
+				return
+			}
+			log.Printf("core's dial on connection %d: %v; still listening", a.req.place, err)
+			return
+		}
+		awaiting = nil
+		fo.switched()
+		back = nil
+		if a.req.dur > 0 {
+			back = &revert{place: a.from, at: time.Now().Add(a.req.dur), after: a.req.dur}
+		}
+		a.req.done <- nil
+	}
+	// dialTimedOut gives up a switch no dial came for: the port closes.
+	dialTimedOut := func() {
+		if awaiting.cancelled() {
+			log.Printf("switch to connection %d: cancelled; no longer listening", awaiting.req.place)
+		} else {
+			log.Printf("switch to connection %d: no dial from core in %s; no longer listening", awaiting.req.place, listenWait)
+		}
+		tr.stopListening()
+		awaiting.fail(fmt.Errorf("core did not dial connection %d within %s (is there a target for it, connected?); staying on %d",
+			awaiting.req.place, listenWait, tr.place()))
+		awaiting = nil
+	}
 	for n := 1; ; n++ {
 		if ended != nil {
 			return ended
+		}
+		// A switch waiting for core's dial: the dial, or its time up.
+		if awaiting != nil {
+			select {
+			case <-awaiting.link.dialed():
+				dialCame(n)
+				continue
+			default:
+			}
+			if awaiting.cancelled() || !time.Now().Before(awaiting.until) {
+				dialTimedOut()
+				continue
+			}
 		}
 		// A connect waiting, or a move back that is due, goes first.
 		select {
@@ -244,6 +340,17 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			switchTo(n, req)
 			continue
 		default:
+		}
+		if back != nil && !time.Now().Before(back.at) && tr.conns[back.place-1].bound() {
+			// Back to a connection the minion listens on: its port opens,
+			// and the move goes through core's dial, as a switch's.
+			if awaiting == nil {
+				log.Printf("back after %s: listening on %s, waiting for core's dial", back.after, tr.conns[back.place-1].listenAddr())
+				awaiting = &awaitDial{req: switchReq{place: back.place, done: make(chan error, 1)}, from: tr.place(),
+					link: tr.listen(back.place), until: time.Now().Add(listenWait)}
+			}
+			back = nil
+			continue
 		}
 		if back != nil && !time.Now().Before(back.at) {
 			if err := move(n, back.place, fmt.Sprintf("back after %s", back.after)); err != nil {
@@ -256,6 +363,23 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 				back = nil
 			}
 			continue
+		}
+		// Failover took the minion off its first connection a while ago:
+		// that one again, once (an operator's move back, or a switch under
+		// way, goes first).
+		if back == nil && awaiting == nil {
+			if first := fo.failbackDue(tr.place(), time.Now()); first > 0 {
+				if err := move(n, first, fmt.Sprintf("failback after %s", fo.failbackWait)); err != nil {
+					if tr.place() == first {
+						return err
+					}
+					log.Printf("failback to connection %d: %v; trying again in %s", first, err, fo.failbackWait)
+					fo.failbackMissed(time.Now())
+				} else {
+					fo.ok(first)
+				}
+				continue
+			}
 		}
 		// On a WebSocket the first check-in goes at once: it links the
 		// connection to the session and sets the allowance core pushes
@@ -281,11 +405,31 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			if !scheduled {
 				timer.Stop()
 			}
+			// A switch waiting for core's dial wakes the loop when it comes,
+			// or when its time is up.
+			var dialed <-chan struct{}
+			var dialDue <-chan time.Time
+			if awaiting != nil {
+				dialed = awaiting.link.dialed()
+				dialDue = time.After(min(time.Until(awaiting.until), 5*time.Second))
+			}
 		waiting:
 			for {
 				select {
 				case <-timer.C:
 					break waiting
+				case <-dialed:
+					timer.Stop()
+					dialCame(n)
+					break waiting
+				case <-dialDue:
+					// Time up, or the task stopped: the loop gives it up.
+					// Otherwise only the watch goes on: no check-in for it.
+					if awaiting.cancelled() || !time.Now().Before(awaiting.until) {
+						timer.Stop()
+						break waiting
+					}
+					dialDue = time.After(min(time.Until(awaiting.until), 5*time.Second))
 				case <-tasks.wake:
 					timer.Stop()
 					break waiting
@@ -340,6 +484,28 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 				return fmt.Errorf("check-in %d: nothing has worked for %s: %w", n, since.Round(time.Second), err)
 			}
 			log.Printf("check-in %d failed, keeping the session: %v", n, err)
+			// Failing again and again: the next connection, as the build's
+			// failover policy says.
+			to, pause, why := fo.failed(tr.place(), time.Now())
+			if pause > 0 {
+				log.Printf("every connection failed in a row: pausing %s before the next round", pause)
+				time.Sleep(pause)
+				continue
+			}
+			if to > 0 {
+				from := tr.place()
+				if mErr := move(n, to, why); mErr != nil {
+					if tr.place() == to {
+						return mErr
+					}
+					log.Printf("failover from connection %d to %d: %v", from, to, mErr)
+					fo.missed(to)
+				} else {
+					fo.moved(to, time.Now())
+					retrying = false
+					continue
+				}
+			}
 			// Not at once again: the channel, or core behind it, may be out
 			// of reach. Over a WebSocket, as a reconnect: 1s, doubling up to
 			// ws_reconnect_backoff (no schedule runs while it is up); through
@@ -361,6 +527,7 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			continue
 		}
 		retrying = false
+		fo.ok(tr.place())
 		if err := answered(n, items, answer); err != nil {
 			return err
 		}

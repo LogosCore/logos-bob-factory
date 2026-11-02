@@ -199,3 +199,84 @@ func TestListener(t *testing.T) {
 		t.Fatal("not lost")
 	}
 }
+
+// A switch to a connection the minion listens on: its port opens while the
+// minion stays where it is, the move goes through core's dial (answered),
+// and from there the minion can move off it again; the port closes when it
+// does.
+func TestSwitchToListener(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	tcp := protocol.BuildConnection{Endpoint: protocol.ChannelEndpointExport{Name: "listener", Kind: protocol.KindBindPersistent,
+		Channel: protocol.ExportChannel{ModuleName: "tcp", SchemaVersion: 1},
+		Params:  map[string]any{"listen_port": float64(port), "listen_address": "127.0.0.1", "request_timeout": "5s"}}}
+	tr, err := newTransport([]protocol.BuildConnection{buildConn("http", protocol.KindReverseCall, "http://127.0.0.1:1"), tcp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.closeLink()
+	if tr.place() != 1 || tr.check(2) != nil {
+		t.Fatalf("on %d; check(2): %v", tr.place(), tr.check(2))
+	}
+	keys := protocol.AES256CBCHMACSHA256Material{EncKey: bytes.Repeat([]byte{1}, 32), MACKey: bytes.Repeat([]byte{2}, 32)}
+	id := [16]byte{9}
+	if _, err := tr.try(2, id, keys); err == nil {
+		t.Fatal("moved to a connection not listening")
+	}
+	link := tr.listen(2)
+	var c net.Conn
+	for i := 0; i < 100; i++ {
+		if c, err = net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if c == nil {
+		t.Fatal("the switch did not open the port")
+	}
+	defer func() { _ = c.Close() }()
+	select {
+	case <-link.dialed():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the dial was not seen")
+	}
+	// Core's side of the dial answers the minion's check-in.
+	go func() {
+		r := bufio.NewReader(c)
+		gotID, sealed, err := readTCPFrame(r)
+		if err != nil {
+			return
+		}
+		plain, _ := protocol.OpenFrame(keys, gotID, protocol.FrameMinionToCore, sealed)
+		var msg protocol.MinionMessage
+		_ = protocol.UnmarshalCBOR(plain, &msg)
+		reply, _ := protocol.MarshalCBOR(protocol.CoreMessage{V: protocol.MinionMessageV3, Re: msg.ID})
+		frame, _ := protocol.SealFrame(keys, gotID, protocol.FrameCoreToMinion, reply)
+		_ = writeTCPFrame(c, gotID[:], frame)
+	}()
+	update := protocol.ConnUpdateItem{T: protocol.ItemConnUpdate, Conn: 2}
+	if _, err := tr.try(2, id, keys, update); err != nil || tr.place() != 2 || tr.link != link || tr.listener != nil {
+		t.Fatalf("the move through the dial: %v, on %d", err, tr.place())
+	}
+	// Off it again: allowed now, and the port closes.
+	if err := tr.check(1); err != nil {
+		t.Fatalf("check(1) from the listener: %v", err)
+	}
+	tr.use(0, nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		d, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+		if err != nil {
+			break
+		}
+		_ = d.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("still listening after moving off")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

@@ -53,6 +53,9 @@ var buildSchema = protocol.BuildSchema{
 	Crypto: protocol.CryptoAES256CBCHMACSHA256,
 	// Its minions claim a persisted session when built with one.
 	PersistedSessions: true,
+	// The minions move between their connections as the build's failover
+	// settings say (minion/failover.go).
+	Failover: true,
 	Fields: []protocol.FieldSpec{
 		{
 			Key: "greeting", Type: protocol.FieldString, Label: "Greeting", Default: "hello from BOB", MaxLength: 200,
@@ -204,7 +207,9 @@ type dummyMinion struct {
 	Punches     []string                   `json:"punches,omitempty"`
 	Badge       *protocol.BuildFile        `json:"badge,omitempty"`
 	Connections []protocol.BuildConnection `json:"connections"`
-	Crypto      *protocol.BuildCrypto      `json:"crypto,omitempty"`
+	// Failover is the build's failover policy, defaults filled in.
+	Failover protocol.BuildFailover `json:"failover"`
+	Crypto   *protocol.BuildCrypto  `json:"crypto,omitempty"`
 	// SessionID is the persisted session the minion claims, when the build
 	// has one.
 	SessionID string    `json:"session_id,omitempty"`
@@ -326,6 +331,7 @@ func describe(req protocol.BuildRequest, badge *protocol.BuildFile, builtBy stri
 		Punches:     punches,
 		Badge:       badge,
 		Connections: req.Connections,
+		Failover:    failoverOf(req),
 		Crypto:      req.Crypto,
 		SessionID:   req.SessionID,
 		BuiltBy:     builtBy,
@@ -342,4 +348,13 @@ func opsOf(ids []string) []int {
 		}
 	}
 	return ops
+}
+
+// failoverOf is the build's failover policy: the request's, or the
+// defaults from a core that sends none.
+func failoverOf(req protocol.BuildRequest) protocol.BuildFailover {
+	if req.Failover != nil {
+		return *req.Failover
+	}
+	return protocol.DefaultBuildFailover()
 }
