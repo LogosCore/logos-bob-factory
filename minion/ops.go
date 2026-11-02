@@ -17,7 +17,7 @@ const (
 	opRm             = 9
 	opWalk           = 10
 	opShell          = 11
-	opConnect        = 12
+	opSwitch         = 12
 )
 
 // Params, by command.
@@ -51,6 +51,6 @@ const (
 	shellCommand = 1
 	shellTimeout = 2
 
-	connectConn = 1
-	connectFor  = 2
+	switchConn = 1
+	switchFor  = 2
 )

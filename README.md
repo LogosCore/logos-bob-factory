@@ -44,8 +44,11 @@ description is **baked in at compile time**. The minion's sources are their
 own Go module, `minion/` in this repository. For each build BOB copies that
 directory, writes the build's description into it as `minion.json`, and runs
 `go build` there for the build's platform (`GOOS=linux`, `GOARCH=amd64` or
-`386`), with no network: a `vendor/` directory, once the minion has
-dependencies, is used as it is: the minion vendors the protocol package (its sealed frame, CBOR messages and stage and hello items) and the CBOR library. The plan is **Check the badge** (when the build has one), **Compile the
+`386`) with `-mod=readonly`. Its modules (the protocol package, the CBOR
+library, coder/websocket) come from the module cache, which the image warms
+when it is built, so a build needs no network; a module the cache lacks
+comes through `GOPROXY`, checked against the minion's `go.sum` either way:
+what compiles is what `go.sum` names. The plan is **Check the badge** (when the build has one), **Compile the
 binary** and **Upload the artifact**. The compile step runs the command, and
 everything the compiler prints to stdout and stderr goes to the build log as
 it comes (`go build -v`, so it names what it compiles), on success too. The
@@ -127,6 +130,8 @@ and `draining`), BOB declares:
 | `RABBITMQ_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_VHOST` | `localhost` / `5672` / `guest` / `guest` / `/` | Core's broker |
 | `LOG_FORMAT` | `json` | `json` or `text`, on stderr |
 | `MINION_SRC` | `/app/minion` | The minion module compiled for `linux-elf` builds; `./minion` when running from the repository |
+| `GOPROXY` | `https://proxy.golang.org,direct` | Where a module the image's cache lacks comes from: a mirror (Nexus, Artifactory, Athens) on a network without the internet |
+| `GOSUMDB` | `sum.golang.org` | The checksum database; `off` behind a mirror that does not proxy it (`go.sum` still checks every module) |
 
 ## Run
 

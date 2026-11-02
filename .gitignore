@@ -1,3 +1,6 @@
 .env
 .dev/
 /bob-factory
+
+# A minion built in place (go build in minion/)
+/minion/minion

@@ -19,7 +19,8 @@ import (
 // parameters, and commands of each kind (required, picked by default, picked
 // by the operator), so the build flow can be worked out end to end before a
 // real factory exists. Version 2: the JSON-only targets dummy and dummy-lite
-// are gone. Version 3: connection parameters by kind.
+// are gone. Version 3: connection parameters by kind. The TCP channel
+// (bind-persistent) came later: a channel added needs no new version.
 var buildSchema = protocol.BuildSchema{
 	SchemaVersion: protocol.BuildSchemaV3,
 	Version:       3,
@@ -40,6 +41,12 @@ var buildSchema = protocol.BuildSchema{
 				pathPrefix("The WebSocket's path starts with it, e.g. /cdn/assets/ when the front forwards only that path."),
 			}},
 		},
+	}, {
+		// A minion that listens, which core reaches by asking the TCP
+		// channel to dial it (bind-persistent): the listen port and the
+		// rest are the channel's own fields, BOB adds none.
+		ModuleName: "tcp", Versions: []int{1},
+		Kinds: []protocol.BuildKind{{Kind: protocol.KindBindPersistent}},
 	}},
 	// Its minions encrypt with AES-256-CBC and HMAC-SHA256; core generates
 	// each one's keys and BOB writes them into the artifact.
@@ -161,7 +168,7 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 		{
-			ID: "connect", Op: 12, Label: "Switch connection", Default: true,
+			ID: "switch", Op: 12, Label: "Switch connection", Default: true,
 			Description: "Moves the minion to another of its connections, once that one answers; it stays on the one it has if not.",
 			Action:      protocol.ActionSwitchConnection,
 			Params: []protocol.FieldSpec{

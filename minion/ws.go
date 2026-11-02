@@ -251,6 +251,9 @@ func (l *wsLink) forget(msgID []byte) {
 	l.mu.Unlock()
 }
 
+func (l *wsLink) pushesCh() chan protocol.CoreMessage { return l.pushes }
+func (l *wsLink) lostCh() chan struct{}               { return l.lost }
+
 // close closes the WebSocket, if one is open.
 func (l *wsLink) close() {
 	l.mu.Lock()

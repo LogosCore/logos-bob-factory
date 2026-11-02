@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,9 +31,12 @@ var errNoToolchain = errors.New("no Go toolchain: the go command is not on PATH"
 // compile builds the minion module in src for target and platform, with
 // minion baked in as its minion.json, and returns the binary: static (no
 // cgo), stripped, and the same for the same input. src is copied first, so
-// it is never written to. A vendor directory in it is used; nothing is
-// downloaded either way. The command and everything the compiler writes to
-// stdout and stderr go to log as they come.
+// it is never written to. Its modules come from the module cache, and what
+// is not there through GOPROXY as BOB's environment sets it (a mirror such
+// as Nexus on a network without the internet), checked against the
+// minion's go.sum: what compiles is what go.sum names, wherever it came
+// from. The command and everything the compiler writes to stdout and stderr
+// go to log as they come.
 func compile(ctx context.Context, src, target, platform string, minion []byte, log io.Writer) ([]byte, error) {
 	pair, ok := compiledTargets[target][platform]
 	if !ok {
@@ -59,15 +61,13 @@ func compile(ctx context.Context, src, target, platform string, minion []byte, l
 	if err := os.WriteFile(filepath.Join(dir, "minion.json"), minion, 0o600); err != nil {
 		return nil, err
 	}
-	args := []string{"build", "-v", "-trimpath", "-ldflags=-s -w -buildid=", "-o", filepath.Join(".bin", "minion")}
-	if _, err := fs.Stat(os.DirFS(dir), "vendor"); err == nil {
-		args = append(args, "-mod=vendor")
-	}
+	// readonly: go.mod and go.sum are as committed, never fixed up here.
+	args := []string{"build", "-v", "-trimpath", "-mod=readonly", "-ldflags=-s -w -buildid=", "-o", filepath.Join(".bin", "minion")}
 	cmd := exec.CommandContext(ctx, goBin, append(args, ".")...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GOOS="+pair[0], "GOARCH="+pair[1], "CGO_ENABLED=0",
-		"GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local", "GOPROXY=off",
+		"GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local",
 	)
 	// The build log's own line: a write it refuses fails the compile below.
 	_, _ = fmt.Fprintf(log, "$ GOOS=%s GOARCH=%s CGO_ENABLED=0 go %s\n", pair[0], pair[1], strings.Join(cmd.Args[1:], " "))

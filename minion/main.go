@@ -262,7 +262,7 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		// tasks within. After that, while it stays open, nothing goes on a
 		// schedule: only what there is to send (output, acks), what core
 		// pushes, and a failed exchange's retry.
-		if !tasks.pending() && (tr.ws == nil || n > 1) {
+		if !tasks.pending() && (!tr.persistent() || n > 1) {
 			wait := sched.next()
 			if p := tasks.pollEvery(); p > 0 && p < wait {
 				wait = p
@@ -271,11 +271,11 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			if back != nil {
 				due = time.After(time.Until(back.at))
 			}
-			scheduled := tr.ws == nil || retrying || tasks.pollEvery() > 0
+			scheduled := !tr.persistent() || retrying || tasks.pollEvery() > 0
 			if scheduled {
 				log.Printf("next check-in in %s", wait.Round(time.Millisecond))
 			} else {
-				log.Printf("WebSocket open: no check-in until there is something to send")
+				log.Printf("connection open: no check-in until there is something to send")
 			}
 			timer := time.NewTimer(wait)
 			if !scheduled {
@@ -300,9 +300,13 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 					timer.Stop()
 					// It worked until now: the backstop counts from here.
 					lastOK = time.Now()
-					log.Printf("the WebSocket closed: connecting again in %s", backoff)
-					time.Sleep(backoff)
-					backoff = min(2*backoff, tr.conn().wsBackoff())
+					if wait := tr.reconnectWait(backoff); wait > 0 {
+						log.Printf("the WebSocket closed: connecting again in %s", wait)
+						time.Sleep(wait)
+						backoff = min(2*backoff, tr.conn().wsBackoff())
+					} else {
+						log.Printf("the connection closed: waiting for the channel to dial again")
+					}
 					break waiting
 				case push := <-tr.pushes():
 					// What core starts over the WebSocket: tasks within the
@@ -340,15 +344,17 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			// of reach. Over a WebSocket, as a reconnect: 1s, doubling up to
 			// ws_reconnect_backoff (no schedule runs while it is up); through
 			// requests, the check-in schedule.
-			if tr.ws != nil {
+			if tr.persistent() {
 				// The failed attempt's own close says nothing new.
 				select {
 				case <-tr.lost():
 				default:
 				}
-				log.Printf("trying again in %s", backoff)
-				time.Sleep(backoff)
-				backoff = min(2*backoff, tr.conn().wsBackoff())
+				if wait := tr.reconnectWait(backoff); wait > 0 {
+					log.Printf("trying again in %s", wait)
+					time.Sleep(wait)
+					backoff = min(2*backoff, tr.conn().wsBackoff())
+				}
 			} else {
 				time.Sleep(sched.next())
 			}

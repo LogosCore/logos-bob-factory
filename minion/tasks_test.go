@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -77,7 +78,7 @@ func TestTaskOnceAndUnknownCancel(t *testing.T) {
 	other := make([]byte, 16)
 	other[0] = 9
 	r.stop(other, 3)
-	if len(r.errs) != 1 || r.errs[0].Code != protocol.ErrItemUnknownTask || *r.errs[0].Item != 3 {
+	if len(r.errs) != 1 || r.errs[0].Code != protocol.ErrItemUnknownTask || *r.errs[0].Item != 3 || !bytes.Equal(r.errs[0].Task, other) {
 		t.Fatalf("errs %+v", r.errs)
 	}
 }

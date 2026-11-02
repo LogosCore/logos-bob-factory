@@ -19,6 +19,11 @@ services:
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
       RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/}
       LOG_FORMAT: ${LOG_FORMAT:-json}
+      # Where the minion's modules come from when the image lacks one: the
+      # Go default (proxy.golang.org) unless set, a mirror where there is no
+      # internet (with GOSUMDB=off or a proxied checksum database).
+      GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+      GOSUMDB: ${GOSUMDB:-sum.golang.org}
     # Working on the minion: mount its sources over the image's, and the next
     # linux-elf build compiles your edits, without rebuilding BOB.
     # volumes:

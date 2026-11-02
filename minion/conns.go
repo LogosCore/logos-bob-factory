@@ -23,17 +23,36 @@ import (
 type transport struct {
 	conns []connection
 	cur   int
-	// ws is the WebSocket of a reverse-persistent connection in use; nil
-	// for a reverse-call one.
-	ws *wsLink
+	// link is the persistent connection in use: a reverse-persistent one's
+	// WebSocket, a bind-persistent one's listener; nil for a reverse-call
+	// one.
+	link persistentLink
+}
+
+// persistentLink is a connection kept open, which core pushes over.
+type persistentLink interface {
+	exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error)
+	pushesCh() chan protocol.CoreMessage
+	lostCh() chan struct{}
+	close()
 }
 
 // usable reports whether this minion can use c: an http connection of a
-// reverse kind.
+// reverse kind, or a tcp one it listens on (bind-persistent).
 func usable(c connection) bool {
 	k := c.ConnectionKind()
-	return c.Endpoint.Channel.ModuleName == "http" && (k == protocol.KindReverseCall || k == protocol.KindReversePersistent)
+	switch c.Endpoint.Channel.ModuleName {
+	case "http":
+		return k == protocol.KindReverseCall || k == protocol.KindReversePersistent
+	case "tcp":
+		return k == protocol.KindBindPersistent
+	}
+	return false
 }
+
+// bound reports whether c is one the minion is reached through (it
+// listens) rather than one it reaches out through.
+func (c connection) bound() bool { return c.ConnectionKind() == protocol.KindBindPersistent }
 
 // newTransport uses the first connection the minion can use.
 func newTransport(all []protocol.BuildConnection) (*transport, error) {
@@ -47,22 +66,25 @@ func newTransport(all []protocol.BuildConnection) (*transport, error) {
 			return t, nil
 		}
 	}
-	return nil, errors.New("built without an http connection")
+	return nil, errors.New("built without a connection this minion can use (http, or tcp to listen on)")
 }
 
 // use makes connection i the one in use, with its WebSocket when it has
 // one (ws: one opened already; nil opens one when needed), closing the
 // previous one's.
 func (t *transport) use(i int, ws *wsLink) {
-	old := t.ws
-	t.cur, t.ws = i, nil
-	if t.conn().ConnectionKind() == protocol.KindReversePersistent {
+	old := t.link
+	t.cur, t.link = i, nil
+	switch t.conn().ConnectionKind() {
+	case protocol.KindReversePersistent:
 		if ws == nil {
 			ws = newWSLink(t.conn())
 		}
-		t.ws = ws
+		t.link = ws
+	case protocol.KindBindPersistent:
+		t.link = newTCPLink(t.conn())
 	}
-	if old != nil && old != t.ws {
+	if old != nil && old != t.link {
 		old.close()
 	}
 }
@@ -74,7 +96,10 @@ func (t *transport) place() int       { return t.cur + 1 }
 // describe is the connection in use, for the log.
 func (t *transport) describe() string {
 	c := t.conn()
-	if t.ws != nil {
+	if c.bound() {
+		return fmt.Sprintf("connection %d, tcp %q (listening on %s)", t.place(), c.Endpoint.Name, c.listenAddr())
+	}
+	if c.ConnectionKind() == protocol.KindReversePersistent {
 		return fmt.Sprintf("connection %d, http %q (WebSocket %s)", t.place(), c.Endpoint.Name, c.wsURL())
 	}
 	return fmt.Sprintf("connection %d, http %q (%s %s)", t.place(), c.Endpoint.Name, c.method(), c.url())
@@ -82,8 +107,8 @@ func (t *transport) describe() string {
 
 // exchange sends a message through the connection in use.
 func (t *transport) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
-	if t.ws != nil {
-		return t.ws.exchange(id, keys, items...)
+	if t.link != nil {
+		return t.link.exchange(id, keys, items...)
 	}
 	return exchange(t.conn(), id, keys, items...)
 }
@@ -91,24 +116,38 @@ func (t *transport) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Mater
 // pushes and lost are the WebSocket's, when one is in use; nil channels,
 // which never deliver, otherwise.
 func (t *transport) pushes() chan protocol.CoreMessage {
-	if t.ws == nil {
+	if t.link == nil {
 		return nil
 	}
-	return t.ws.pushes
+	return t.link.pushesCh()
 }
 
 func (t *transport) lost() chan struct{} {
-	if t.ws == nil {
+	if t.link == nil {
 		return nil
 	}
-	return t.ws.lost
+	return t.link.lostCh()
+}
+
+// persistent reports whether the connection in use is kept open.
+func (t *transport) persistent() bool { return t.link != nil }
+
+// reconnectWait is how long to wait before the next exchange after the
+// connection in use closed or failed: backoff for a WebSocket the minion
+// opens again; none for a listener, whose next exchange waits for the
+// channel's dial.
+func (t *transport) reconnectWait(backoff time.Duration) time.Duration {
+	if t.conn().bound() {
+		return 0
+	}
+	return backoff
 }
 
 // closeLink closes the WebSocket in use, if any: the next exchange opens
 // another.
 func (t *transport) closeLink() {
-	if t.ws != nil {
-		t.ws.close()
+	if t.link != nil {
+		t.link.close()
 	}
 }
 
@@ -120,6 +159,8 @@ func (t *transport) check(place int) error {
 		return fmt.Errorf("the build has %d connection(s): there is no connection %d", len(t.conns), place)
 	case place == t.place():
 		return fmt.Errorf("already on connection %d", place)
+	case t.conns[place-1].bound() || t.conn().bound():
+		return fmt.Errorf("connection %d: a minion that listens is reached by core, not moved", place)
 	case !usable(t.conns[place-1]):
 		c := t.conns[place-1]
 		return fmt.Errorf("connection %d is %s through %s, which this minion cannot use", place, c.ConnectionKind(),
@@ -169,15 +210,15 @@ type revert struct {
 	after time.Duration
 }
 
-// connect is the connect command: it asks the session to move, and ends
+// switchConnection is the switch command: it asks the session to move, and ends
 // with what came of it.
-func (r *runner) connect(ctx context.Context, t *task, args protocol.Args) {
-	place, ok := protocol.ArgInt(args, connectConn)
+func (r *runner) switchConnection(ctx context.Context, t *task, args protocol.Args) {
+	place, ok := protocol.ArgInt(args, switchConn)
 	if !ok || place < 1 {
 		r.end(t, false, nil, "a connection, from 1, is required")
 		return
 	}
-	dur, ok := protocol.ArgDuration(args, connectFor)
+	dur, ok := protocol.ArgDuration(args, switchFor)
 	if !ok || dur < 0 {
 		dur = 0
 	}

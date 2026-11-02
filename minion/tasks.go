@@ -374,7 +374,9 @@ func (r *runner) chunk(c protocol.ChunkItem, item int) {
 			return
 		}
 	}
-	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask, Msg: "no such transfer", Item: &item})
+	// A first chunk names its task: core ends the task the minion does not
+	// have.
+	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask, Msg: "no such transfer", Item: &item, Task: c.Task})
 }
 
 func (r *runner) queueErr(code int, msg string, item int) {
@@ -428,7 +430,8 @@ func (r *runner) stop(id []byte, item int) {
 			return
 		}
 	}
-	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask, Msg: "no such task running", Item: &item})
+	// Named, so core ends it (one this process never had: it restarted).
+	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask, Msg: "no such task running", Item: &item, Task: id})
 }
 
 // write adds output to a task (text, or a chunk of structured output: a
@@ -528,8 +531,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.shell(ctx, t, ti.Args)
 	case opSleep:
 		r.sleep(t, ti.Args)
-	case opConnect:
-		r.connect(ctx, t, ti.Args)
+	case opSwitch:
+		r.switchConnection(ctx, t, ti.Args)
 	case opExit:
 		r.write(t, []byte("bye\n"), nil)
 		r.end(t, true, nil, "")

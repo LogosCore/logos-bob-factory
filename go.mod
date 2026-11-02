@@ -6,7 +6,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.6
 	github.com/logoscore/logos-golang-factory-core v0.2.23
 	github.com/logoscore/logos-golang-module-core v0.2.22
-	github.com/logoscore/logos-golang-protocol v0.25.0
+	github.com/logoscore/logos-golang-protocol v0.26.0
 )
 
 require (
