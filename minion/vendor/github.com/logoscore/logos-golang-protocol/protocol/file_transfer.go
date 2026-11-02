@@ -17,6 +17,14 @@ import (
 // MaxChunkData is the most a chunk carries.
 const MaxChunkData = 512 << 10
 
+// MaxTransferCtx bounds a transfer's ctx: the minion's own bytes, which
+// core echoes on every chunk and ack of the transfer it sends after. A
+// minion that keeps nothing between messages (a bind-call page) keeps
+// there what it needs to go on (the file's path, its offsets); core never
+// reads it. It travels inside the sealed message, so it is as private as
+// the rest.
+const MaxTransferCtx = 1024
+
 // ChunkItem is one piece of a file in transfer xfer, from off. The first
 // (off 0) says the whole's size, the task it is for and the file's name;
 // the last (off+len(Data) == Total) says the whole's SHA-256, which the
@@ -34,6 +42,9 @@ type ChunkItem struct {
 	Task []byte `cbor:"6,keyasint,omitempty"`
 	// Name is the file's, as the sender has it (a path): in the first.
 	Name string `cbor:"7,keyasint,omitempty"`
+	// Ctx is the transfer's ctx (MaxTransferCtx): a minion's chunk sets it,
+	// core's chunks echo the last one the minion set.
+	Ctx []byte `cbor:"8,keyasint,omitempty"`
 }
 
 // Validate checks the ids and sizes, and that the first chunk says what a
@@ -54,6 +65,8 @@ func (c ChunkItem) Validate() error {
 		return errors.New("chunk: only the first says total, task and name")
 	case c.Total != nil && uint64(len(c.Data)) > *c.Total:
 		return errors.New("chunk: more data than total")
+	case len(c.Ctx) > MaxTransferCtx:
+		return fmt.Errorf("chunk: ctx is %d bytes at most", MaxTransferCtx)
 	}
 	return nil
 }

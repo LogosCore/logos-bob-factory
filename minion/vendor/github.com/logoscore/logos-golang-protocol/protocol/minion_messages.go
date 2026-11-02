@@ -66,6 +66,11 @@ const (
 	ItemErr      = 13
 	// ItemConnUpdate: the minion moved to another of its connections.
 	ItemConnUpdate = 14
+	// ItemResume: core asks the minion to go on with a task, giving back
+	// the ctx of its latest part (core → minion). A minion that keeps
+	// nothing between messages (a bind-call page) carries a long task (a
+	// walk) across calls this way.
+	ItemResume = 15
 )
 
 // itemNames are the item types' names, for people (logs, docs).
@@ -73,7 +78,7 @@ var itemNames = map[int]string{
 	ItemStage: "stage", ItemStageResponse: "stage_response", ItemHello: "hello",
 	ItemHelloResponse: "hello_response", ItemSleepUpdate: "sleep_update", ItemRehello: "rehello",
 	ItemGetTasks: "get_tasks", ItemTask: "task", ItemCancel: "cancel", ItemResult: "result",
-	ItemAck: "ack", ItemChunk: "chunk", ItemErr: "err", ItemConnUpdate: "conn_update",
+	ItemAck: "ack", ItemChunk: "chunk", ItemErr: "err", ItemConnUpdate: "conn_update", ItemResume: "resume",
 }
 
 // ItemName is an item type's name, for people: "item 42" for one it does
@@ -391,12 +396,39 @@ func (t TaskItem) Validate() error {
 type CancelItem struct {
 	T    int    `cbor:"0,keyasint"`
 	Task []byte `cbor:"1,keyasint"`
+	// Ctx is the ctx of the task's latest part, when it said one: a minion
+	// that keeps nothing finds there what it needs to end the task.
+	Ctx []byte `cbor:"2,keyasint,omitempty"`
 }
 
 // Validate checks the task id.
 func (c CancelItem) Validate() error {
-	if len(c.Task) != 16 {
+	switch {
+	case len(c.Task) != 16:
 		return errors.New("cancel: task is 16 bytes")
+	case len(c.Ctx) > MaxTransferCtx:
+		return fmt.Errorf("cancel: ctx is %d bytes at most", MaxTransferCtx)
+	}
+	return nil
+}
+
+// ResumeItem asks the minion to go on with a task (core → minion): Ctx is
+// the ctx its latest part said, where the task stands as the minion wrote
+// it. Core sends it in answer to such a part, and again (a bind-call page)
+// while the task runs, until a part says done.
+type ResumeItem struct {
+	T    int    `cbor:"0,keyasint"`
+	Task []byte `cbor:"1,keyasint"`
+	Ctx  []byte `cbor:"2,keyasint"`
+}
+
+// Validate checks the task id and the ctx.
+func (r ResumeItem) Validate() error {
+	switch {
+	case len(r.Task) != 16:
+		return errors.New("resume: task is 16 bytes")
+	case len(r.Ctx) == 0 || len(r.Ctx) > MaxTransferCtx:
+		return fmt.Errorf("resume: ctx is 1 to %d bytes", MaxTransferCtx)
 	}
 	return nil
 }
@@ -422,6 +454,10 @@ type ResultItem struct {
 	// Ls is what the task saw of the host's file system: listings, in
 	// pieces (LsPiece), beside or instead of out and data.
 	Ls []LsPiece `cbor:"9,keyasint,omitempty"`
+	// Ctx, on a part that is not done, is where the task stands as the
+	// minion writes it (MaxTransferCtx): core answers with a resume giving
+	// it back, so a minion that keeps nothing goes on from there.
+	Ctx []byte `cbor:"10,keyasint,omitempty"`
 }
 
 // Validate checks the task id, and ok and exit against done.
@@ -437,6 +473,10 @@ func (r ResultItem) Validate() error {
 		return errors.New("result: only the done part has an exit code")
 	case len(r.Data) > 0 && !isCBORMap(r.Data):
 		return errors.New("result: data is a map")
+	case r.Done && r.Ctx != nil:
+		return errors.New("result: the done part says no ctx: there is nothing to go on with")
+	case len(r.Ctx) > MaxTransferCtx:
+		return fmt.Errorf("result: ctx is %d bytes at most", MaxTransferCtx)
 	}
 	for _, p := range r.Ls {
 		if err := p.Validate(); err != nil {
@@ -457,6 +497,9 @@ type AckItem struct {
 	// without it (a stream waiting for its downloader; docs:
 	// contracts/minion-messages.md, Streaming a file).
 	Hold bool `cbor:"4,keyasint,omitempty"`
+	// Ctx, with Xfer, is the transfer's ctx (MaxTransferCtx): a minion's ack
+	// sets it, core's acks echo the last one the minion set.
+	Ctx []byte `cbor:"5,keyasint,omitempty"`
 }
 
 // Validate checks the ids, and that a transfer comes with its offset.
@@ -473,6 +516,10 @@ func (a AckItem) Validate() error {
 		return errors.New("ack: xfer is 16 bytes")
 	case a.Hold && a.Xfer == nil:
 		return errors.New("ack: hold comes with xfer")
+	case a.Ctx != nil && a.Xfer == nil:
+		return errors.New("ack: ctx comes with xfer")
+	case len(a.Ctx) > MaxTransferCtx:
+		return fmt.Errorf("ack: ctx is %d bytes at most", MaxTransferCtx)
 	}
 	return nil
 }
