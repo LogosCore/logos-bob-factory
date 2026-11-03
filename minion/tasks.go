@@ -103,6 +103,8 @@ type runner struct {
 	maxTasks    uint64
 	maxTasksSay bool
 	persistent  bool
+	// exec carries out a task's command: run, but in tests.
+	exec func(ctx context.Context, t *task, ti protocol.TaskItem)
 }
 
 // setLimit says the largest message the connection in use carries.
@@ -157,6 +159,9 @@ func (r *runner) pending() bool {
 	if len(r.inflight) > 0 || len(r.acks) > 0 || len(r.errs) > 0 || r.sleepUpd != nil || r.helloAsked || r.maxTasksSay {
 		return true
 	}
+	if feedback.pending() {
+		return true
+	}
 	for _, t := range r.tasks {
 		if len(t.out) > 0 || len(t.chunks) > 0 || len(t.pieces) > 0 || (t.ended && !t.sentEnd) || t.xfer.sending() || t.recv.asking() || t.recv.telling() {
 			return true
@@ -198,10 +203,17 @@ func (r *runner) outgoing() []any {
 		items = append(items, *r.sleepUpd)
 		r.sleepUpd = nil
 	}
-	// Parts while the message has room: output, then a chunk of data each,
-	// then listing pieces, as many to a part as fit.
+	// Feedback first, in the room a message has (most of it, to leave the
+	// tasks theirs), then parts while the message has room: output, then a
+	// chunk of data each, then listing pieces, as many to a part as fit.
 	full := r.perMessageLocked()
 	room := full
+	if fb, left := feedback.take(full/2, true); len(fb) > 0 {
+		for _, f := range fb {
+			items = append(items, f)
+		}
+		room = max(full-(full/2-left), 0)
+	}
 parts:
 	for _, t := range r.tasks {
 		for !t.sentEnd && (len(t.out) > 0 || len(t.chunks) > 0 || len(t.pieces) > 0 || t.ended) {
@@ -519,7 +531,20 @@ func (r *runner) start(ti protocol.TaskItem) {
 	log.Printf("task %s: command %d %v", key[:8], ti.Cmd, ti.Args)
 	go func() {
 		defer cancel()
-		r.run(ctx, t, ti)
+		// A command that panics fails its task, and says so to the
+		// operators, rather than taking the minion down.
+		defer func() {
+			if v := recover(); v != nil {
+				report(protocol.FeedbackError, "task_panic", t.id, "task %s (command %d) crashed: %v", key[:8], ti.Cmd, v)
+				r.end(t, false, nil, fmt.Sprintf("the command crashed: %v", v))
+				r.nudge()
+			}
+		}()
+		if r.exec != nil {
+			r.exec(ctx, t, ti)
+		} else {
+			r.run(ctx, t, ti)
+		}
 		r.nudge()
 	}()
 }
@@ -661,6 +686,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.switchConnection(ctx, t, ti.Args)
 	case opVolumes:
 		r.volumes(t)
+	case opFeedback:
+		r.sendFeedback(t, ti.Args)
 	case opExit:
 		r.exit(t)
 	default:

@@ -145,7 +145,8 @@ func (l *tcpLink) take(c net.Conn) {
 	l.mu.Lock()
 	if l.open >= max(1, l.conn.intParam("max_connections", 1)) {
 		l.mu.Unlock()
-		log.Printf("a connection from %s past max_connections: closed", c.RemoteAddr())
+		report(protocol.FeedbackWarning, "tcp_refused", nil, "a connection from %s came past max_connections (%d): closed",
+			c.RemoteAddr(), max(1, l.conn.intParam("max_connections", 1)))
 		_ = c.Close()
 		return
 	}

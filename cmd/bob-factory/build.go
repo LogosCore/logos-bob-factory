@@ -196,6 +196,15 @@ var buildSchema = protocol.BuildSchema{
 			Action:      protocol.ActionListVolumes,
 			Result:      protocol.ResultVolumes,
 		},
+		{
+			ID: "feedback", Op: 14, Label: "Send feedback",
+			Description: "Sends a warning or an error of your words as the minion's own feedback, to try the mechanic: it shows in the session's Feedback.",
+			Params: []protocol.FieldSpec{
+				{Key: "level", Num: 1, Type: protocol.FieldEnum, Label: "Level", Default: "warning", Order: 1,
+					Options: []protocol.EnumOption{{Value: "warning", Label: "Warning"}, {Value: "error", Label: "Error"}}},
+				{Key: "message", Num: 2, Type: protocol.FieldString, Label: "Message", Required: true, Order: 2},
+			},
+		},
 	},
 }
 
@@ -226,8 +235,8 @@ type dummyMinion struct {
 	Failover protocol.BuildFailover `json:"failover"`
 	// MaxTasks is how many tasks the minion runs at once as it starts: the
 	// request's, or protocol.DefaultMaxTasks from a core that sends none.
-	MaxTasks uint64 `json:"max_tasks"`
-	Crypto   *protocol.BuildCrypto  `json:"crypto,omitempty"`
+	MaxTasks uint64                `json:"max_tasks"`
+	Crypto   *protocol.BuildCrypto `json:"crypto,omitempty"`
 	// SessionID is the persisted session the minion claims, when the build
 	// has one.
 	SessionID string    `json:"session_id,omitempty"`

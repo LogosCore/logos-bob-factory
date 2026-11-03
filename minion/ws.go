@@ -34,6 +34,9 @@ type wsLink struct {
 
 	mu sync.Mutex
 	ws *websocket.Conn
+	// closing is the WebSocket the minion closes itself (a switch, a
+	// session's end): its close is no news for the operators.
+	closing *websocket.Conn
 	// keys open what comes under each id: the build's, the stage's, the
 	// session's.
 	keys map[[16]byte]protocol.AES256CBCHMACSHA256Material
@@ -141,6 +144,12 @@ func (l *wsLink) read(ws *websocket.Conn) {
 		typ, data, err := ws.Read(context.Background())
 		if err != nil {
 			log.Printf("WebSocket closed: %v", err)
+			l.mu.Lock()
+			ours := l.closing == ws
+			l.mu.Unlock()
+			if !ours {
+				report(protocol.FeedbackWarning, "ws_closed", nil, "the WebSocket to the channel closed: %v; it opens again", err)
+			}
 			return
 		}
 		if typ != websocket.MessageBinary {
@@ -258,6 +267,7 @@ func (l *wsLink) lostCh() chan struct{}               { return l.lost }
 func (l *wsLink) close() {
 	l.mu.Lock()
 	ws := l.ws
+	l.closing = ws
 	l.mu.Unlock()
 	if ws != nil {
 		_ = ws.Close(websocket.StatusNormalClosure, "")

@@ -19,6 +19,7 @@ const (
 	opShell          = 11
 	opSwitch         = 12
 	opVolumes        = 13
+	opFeedback       = 14
 )
 
 // Params, by command.
@@ -54,4 +55,7 @@ const (
 
 	switchConn = 1
 	switchFor  = 2
+
+	feedbackLevel   = 1
+	feedbackMessage = 2
 )

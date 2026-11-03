@@ -190,6 +190,12 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	// core's sealed session_closed, or the backstop, starts over (docs:
 	// "When an exchange fails").
 	tasks := newRunner(d, &sched)
+	// Feedback reported meanwhile wakes this session's runner.
+	feedback.setWake(tasks.nudge)
+	defer feedback.setWake(nil)
+	// Check-ins failing in a row: said once one works again (until then
+	// nothing reaches core).
+	var streak failStreak
 	// A hello core asks for (rehello) says the host and process again,
 	// through the connection in use.
 	tasks.hello = func() protocol.HelloItem {
@@ -505,6 +511,7 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		answer, err := tr.exchange(sessionID, newKeys, items...)
 		if err != nil {
 			tasks.failed(items)
+			streak.failed(err)
 			retrying = true
 			if since := time.Since(lastOK); since >= backstop {
 				return fmt.Errorf("check-in %d: nothing has worked for %s: %w", n, since.Round(time.Second), err)
@@ -528,6 +535,7 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 					fo.missed(to)
 				} else {
 					fo.moved(to, time.Now())
+					streak.worked()
 					retrying = false
 					continue
 				}
@@ -553,6 +561,7 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			continue
 		}
 		retrying = false
+		streak.worked()
 		fo.ok(tr.place())
 		if err := answered(n, items, answer); err != nil {
 			return err
@@ -682,6 +691,8 @@ func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Mater
 		log.Printf("session id %s: the persisted session, claimed", formatUUID(resp.SID))
 	default:
 		log.Printf("session id %s: core did not give the persisted session, a new one instead", formatUUID(resp.SID))
+		report(protocol.FeedbackWarning, "session_not_claimed", nil,
+			"core did not give the persisted session %s: this process goes on in a new one", formatUUID(claim))
 	}
 	return sessionID, nil
 }
