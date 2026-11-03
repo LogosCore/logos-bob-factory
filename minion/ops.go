@@ -18,6 +18,7 @@ const (
 	opWalk           = 10
 	opShell          = 11
 	opSwitch         = 12
+	opVolumes        = 13
 )
 
 // Params, by command.

@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/logoscore/logos-golang-protocol/protocol"
@@ -37,7 +36,7 @@ func (r *runner) walk(ctx context.Context, t *task, args protocol.Args) {
 	hidden := argBool(args, walkHidden, true)
 	oneFS := argBool(args, walkOneFS, true)
 
-	root, err := filepath.Abs(path)
+	root, err := hostPath(path)
 	if err != nil {
 		r.end(t, false, nil, err.Error())
 		return
@@ -91,13 +90,14 @@ func (r *runner) walk(ctx context.Context, t *task, args protocol.Args) {
 		}
 		entries := make([]entry, 0, len(dir))
 		for _, e := range dir {
-			entries = append(entries, dirEntry(f.path, e))
+			de := dirEntry(f.path, e)
+			entries = append(entries, de)
 			// A link to a folder is a link: not followed.
 			if !e.IsDir() {
 				continue
 			}
 			switch {
-			case !hidden && strings.HasPrefix(e.Name(), "."),
+			case !hidden && de.Hidden,
 				depth > 0 && f.level+1 > depth:
 				w.Skipped++
 				continue

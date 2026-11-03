@@ -11,7 +11,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"path/filepath"
 
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
@@ -70,7 +69,7 @@ func (r *runner) sendFile(ctx context.Context, t *task, args protocol.Args, stre
 		r.end(t, false, nil, "no path")
 		return
 	}
-	abs, err := filepath.Abs(path)
+	abs, err := hostPath(path)
 	if err != nil {
 		r.end(t, false, nil, err.Error())
 		return

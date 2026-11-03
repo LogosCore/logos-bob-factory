@@ -96,6 +96,13 @@ type runner struct {
 	// helloAsked: core asked for a hello (rehello); hello makes it.
 	helloAsked bool
 	hello      func() protocol.HelloItem
+	// maxTasks is how many tasks it runs at once: the build's, then core's
+	// (a max_tasks); maxTasksSay: core's came, and the next message says
+	// the minion has it. persistent: the connection in use stays open, so
+	// a get_tasks is a standing allowance there, not this message's.
+	maxTasks    uint64
+	maxTasksSay bool
+	persistent  bool
 }
 
 // setLimit says the largest message the connection in use carries.
@@ -117,7 +124,22 @@ func (r *runner) perMessageLocked() int {
 
 func newRunner(d description, sched *schedule) *runner {
 	return &runner{greeting: d.Greeting, ops: d.Ops, sched: sched, seen: map[string]time.Time{}, wake: make(chan struct{}, 1),
-		switches: make(chan switchReq, 1)}
+		switches: make(chan switchReq, 1), maxTasks: d.maxTasks()}
+}
+
+// setPersistent says whether the connection in use stays open (a WebSocket,
+// a TCP connection).
+func (r *runner) setPersistent(p bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.persistent = p
+}
+
+// maxTasksNow is how many tasks the minion runs at once now.
+func (r *runner) maxTasksNow() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.maxTasks
 }
 
 // nudge asks for an early check-in: there is output to send.
@@ -132,7 +154,7 @@ func (r *runner) nudge() {
 func (r *runner) pending() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.inflight) > 0 || len(r.acks) > 0 || len(r.errs) > 0 || r.sleepUpd != nil || r.helloAsked {
+	if len(r.inflight) > 0 || len(r.acks) > 0 || len(r.errs) > 0 || r.sleepUpd != nil || r.helloAsked || r.maxTasksSay {
 		return true
 	}
 	for _, t := range r.tasks {
@@ -144,8 +166,8 @@ func (r *runner) pending() bool {
 }
 
 // outgoing is the next message's items: the failed message's again, or
-// acks, errs, a sleep_update and output, and a get_tasks when the minion is
-// free.
+// acks, errs, a sleep_update, a max_tasks (core set the limit), output, and
+// a get_tasks while the limit leaves room.
 func (r *runner) outgoing() []any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -156,7 +178,12 @@ func (r *runner) outgoing() []any {
 	}
 	var items []any
 	if r.helloAsked && r.hello != nil {
-		items = append(items, r.hello())
+		// With the limit it has now (core's, if core set one): said here,
+		// under the lock the closure must not take.
+		h := r.hello()
+		n := r.maxTasks
+		h.MaxTasks = &n
+		items = append(items, h)
 	}
 	r.helloAsked = false
 	if len(r.acks) > 0 {
@@ -233,20 +260,37 @@ parts:
 			items = append(items, t.recv.ask())
 		}
 	}
-	if !r.busyLocked() {
-		one := uint64(1)
-		items = append(items, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &one})
+	// The limit core set, said back: core sends it until the minion has it.
+	if r.maxTasksSay {
+		items = append(items, protocol.MaxTasksItem{T: protocol.ItemMaxTasks, Max: r.maxTasks})
+		r.maxTasksSay = false
+	}
+	// Tasks, as many as the limit leaves room for. On a persistent
+	// connection the limit itself: a standing allowance, which core counts
+	// the tasks under way against. Through a call, this message's: the
+	// room left (none asked when there is none).
+	if r.persistent {
+		max := r.maxTasks
+		items = append(items, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &max})
+	} else if room := r.roomLocked(); room > 0 {
+		items = append(items, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &room})
 	}
 	return items
 }
 
-func (r *runner) busyLocked() bool {
+// roomLocked is how many more tasks the limit leaves room for: the limit
+// less the tasks whose end has not gone yet.
+func (r *runner) roomLocked() uint64 {
+	running := uint64(0)
 	for _, t := range r.tasks {
 		if !t.sentEnd {
-			return true
+			running++
 		}
 	}
-	return false
+	if running >= r.maxTasks {
+		return 0
+	}
+	return r.maxTasks - running
 }
 
 // delivered: the message went through. Tasks whose end it carried are done
@@ -338,6 +382,21 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 				r.poll = time.Duration(p.Within) * time.Millisecond
 				r.mu.Unlock()
 			}
+		case protocol.ItemMaxTasks:
+			// How many tasks to run at once, from now: said back in the next
+			// message, whatever it was, so core knows the minion has it.
+			var m protocol.MaxTasksItem
+			if protocol.UnmarshalCBOR(raw, &m) != nil || m.Validate() != nil {
+				r.queueErr(protocol.ErrItemBadMessage, "the max_tasks does not read", i)
+				continue
+			}
+			r.mu.Lock()
+			if r.maxTasks != m.Max {
+				log.Printf("max tasks %d, as core says (was %d)", m.Max, r.maxTasks)
+			}
+			r.maxTasks, r.maxTasksSay = m.Max, true
+			r.mu.Unlock()
+			r.nudge()
 		case protocol.ItemRehello:
 			// Core asks what host and process this is: a hello, in the
 			// next message.
@@ -600,12 +659,47 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.sleep(t, ti.Args)
 	case opSwitch:
 		r.switchConnection(ctx, t, ti.Args)
+	case opVolumes:
+		r.volumes(t)
 	case opExit:
-		r.write(t, []byte("bye\n"), nil)
-		r.end(t, true, nil, "")
+		r.exit(t)
 	default:
 		r.end(t, false, nil, fmt.Sprintf("command %d is not one this minion knows", ti.Cmd))
 	}
+}
+
+// exitWait is how long exit waits for the tasks it stops to end.
+const exitWait = 10 * time.Second
+
+// exit stops the minion for good: the tasks running beside it first, each
+// cancelled and ending so (their ends go before exit's: core is told how
+// each one went), then its own end, whose delivery stops the minion. A task
+// that does not end within exitWait is left: the minion goes all the same.
+func (r *runner) exit(t *task) {
+	r.mu.Lock()
+	var others []*task
+	for _, o := range r.tasks {
+		if o != t && !o.ended {
+			others = append(others, o)
+			o.cancel()
+		}
+	}
+	r.mu.Unlock()
+	if len(others) > 0 {
+		log.Printf("exit: stopping %d task(s) first", len(others))
+		deadline := time.Now().Add(exitWait)
+		for time.Now().Before(deadline) {
+			r.mu.Lock()
+			left := slices.ContainsFunc(others, func(o *task) bool { return !o.ended })
+			r.mu.Unlock()
+			if !left {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	r.write(t, []byte("bye\n"), nil)
+	r.end(t, true, nil, "")
 }
 
 // ls lists a directory: a listing (docs: contracts/minion-messages.md,
@@ -616,7 +710,7 @@ func (r *runner) ls(t *task, args protocol.Args) {
 	if path == "" {
 		path = "."
 	}
-	abs, err := filepath.Abs(path)
+	abs, err := hostPath(path)
 	if err != nil {
 		r.end(t, false, nil, err.Error())
 		return
@@ -656,11 +750,22 @@ func dirEntry(dir string, e os.DirEntry) entry {
 		mod := info.ModTime().Unix()
 		d.Modified = &mod
 		d.Mode = modeBits(info)
+		// Hidden by its name (a dot first) or, on Windows, its attribute.
+		d.Hidden = d.Hidden || hiddenFile(info)
 		d.owner, d.group = owners(info)
 	}
-	if d.Type == protocol.EntryLink {
+	switch {
+	case d.Type == protocol.EntryLink:
 		if target, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil {
 			d.Target = target
+		}
+	case e.Type()&fs.ModeIrregular != 0:
+		// A Windows junction (C:\Users\All Users, Application Data) is a
+		// reparse point Go calls irregular, neither folder nor link: it is a
+		// link to a folder, with a target to show. Walks do not enter it either
+		// way, as they enter no link (a junction can loop).
+		if target, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil {
+			d.Type, d.Target = protocol.EntryLink, target
 		}
 	}
 	return d
@@ -689,8 +794,8 @@ func (w taskWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// shell runs a command in the system shell, its output streamed, within its
-// timeout.
+// shell runs a command in the system shell (sh on Unix, cmd.exe on
+// Windows), its output streamed, within its timeout.
 func (r *runner) shell(ctx context.Context, t *task, args protocol.Args) {
 	command, _ := protocol.ArgString(args, shellCommand)
 	timeout, ok := protocol.ArgDuration(args, shellTimeout)
@@ -699,13 +804,10 @@ func (r *runner) shell(ctx context.Context, t *task, args protocol.Args) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
-	// Its own process group, all of it killed on a cancel or the timeout: the
-	// shell's children (a sleep) would otherwise live on holding the output
-	// open, and the task would never end. WaitDelay ends it even if one that
-	// left the group still holds it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// The host's shell (shell_unix.go, shell_windows.go), all it starts
+	// ended on a cancel or the timeout. WaitDelay ends the task even if a
+	// child that got away still holds the output.
+	cmd := shellCmd(ctx, command)
 	cmd.WaitDelay = 2 * time.Second
 	w := taskWriter{r: r, t: t}
 	cmd.Stdout, cmd.Stderr = w, w

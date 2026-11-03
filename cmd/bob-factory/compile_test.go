@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"debug/elf"
+	"debug/pe"
 	"fmt"
 	"io"
 	"os"
@@ -70,6 +71,41 @@ func TestCompile(t *testing.T) {
 }
 
 // The command and what the compiler prints reach the log, a line at a time.
+// windows-exe gives a console program for each Windows platform's machine,
+// the description baked in all the same.
+func TestCompileWindows(t *testing.T) {
+	needGo(t)
+	minion := []byte(`{"format":"logos.bob-dummy.v1","greeting":"hello"}` + "\n")
+	for platform, machine := range map[string]uint16{
+		"windows/amd64": pe.IMAGE_FILE_MACHINE_AMD64, "windows/386": pe.IMAGE_FILE_MACHINE_I386, "windows/arm64": pe.IMAGE_FILE_MACHINE_ARM64,
+	} {
+		bin, err := compile(context.Background(), testMinionSrc, "windows-exe", platform, minion, io.Discard)
+		if err != nil {
+			t.Fatalf("%s: %v", platform, err)
+		}
+		f, err := pe.NewFile(bytes.NewReader(bin))
+		if err != nil || f.Machine != machine {
+			t.Fatalf("%s: pe %v, %v", platform, f, err)
+		}
+		var subsystem uint16
+		switch h := f.OptionalHeader.(type) {
+		case *pe.OptionalHeader64:
+			subsystem = h.Subsystem
+		case *pe.OptionalHeader32:
+			subsystem = h.Subsystem
+		}
+		if subsystem != pe.IMAGE_SUBSYSTEM_WINDOWS_CUI {
+			t.Fatalf("%s: subsystem %d, not a console program", platform, subsystem)
+		}
+		if !bytes.Contains(bin, minion) {
+			t.Fatalf("%s: the description is not baked in", platform)
+		}
+	}
+	if _, err := compile(context.Background(), testMinionSrc, "windows-exe", "linux/amd64", minion, io.Discard); err == nil {
+		t.Fatal("windows-exe compiled for linux/amd64")
+	}
+}
+
 func TestCompileLogs(t *testing.T) {
 	needGo(t)
 	var lines []string

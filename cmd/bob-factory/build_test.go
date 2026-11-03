@@ -33,7 +33,7 @@ func TestCommands(t *testing.T) {
 	for _, c := range buildSchema.TargetCommands(target) {
 		ids = append(ids, c.ID)
 	}
-	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell switch" {
+	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell switch volumes" {
 		t.Errorf("linux-elf: %s", got)
 	}
 }
@@ -87,7 +87,7 @@ func TestDescribe(t *testing.T) {
 	if m.Format != "logos.bob-dummy.v1" || m.BuildID != req.BuildID || m.Platform != "linux/amd64" ||
 		m.Greeting != "hello from BOB" || m.KillDate != "2027-01-31T00:00:00Z" ||
 		!reflect.DeepEqual(m.Punches, []string{"jab", "hook"}) || !m.BuiltAt.Equal(at) ||
-		!reflect.DeepEqual(m.Ops, []int{1, 2, 3, 4, 12}) {
+		!reflect.DeepEqual(m.Ops, []int{1, 2, 3, 4, 12, 13}) {
 		t.Fatalf("minion %+v", m)
 	}
 	if m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.Badge.URL != "" || badge.URL == "" {
@@ -118,6 +118,27 @@ func TestDescribeWithoutOptionalValues(t *testing.T) {
 	m := describe(req, nil, "bob", time.Now())
 	if m.KillDate != "" || m.Punches != nil || m.Badge != nil {
 		t.Fatalf("minion %+v", m)
+	}
+}
+
+// windows-exe builds for its three platforms, and refuses any other.
+func TestWindowsEXE(t *testing.T) {
+	r := coreRequest(t)
+	r.Target = "windows-exe"
+	for _, platform := range []string{"windows/amd64", "windows/386", "windows/arm64"} {
+		r.Platform = platform
+		if p := protocol.ValidateBuildRequest(buildSchema, r); p != nil {
+			t.Fatalf("windows-exe for %s: %v", platform, p)
+		}
+	}
+	r.Platform = "linux/amd64"
+	if p := protocol.ValidateBuildRequest(buildSchema, r); p["platform"] == "" {
+		t.Fatalf("windows-exe for linux/amd64: %v", p)
+	}
+	// Every command is the target's: the shell is cmd.exe there.
+	target, _ := buildSchema.Target("windows-exe")
+	if got, all := len(buildSchema.TargetCommands(target)), len(buildSchema.Commands); got != all {
+		t.Fatalf("windows-exe has %d commands of %d", got, all)
 	}
 }
 

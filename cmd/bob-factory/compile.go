@@ -23,6 +23,11 @@ var compiledTargets = map[string]map[string][2]string{
 		"linux/amd64": {"linux", "amd64"},
 		"linux/386":   {"linux", "386"},
 	},
+	"windows-exe": {
+		"windows/amd64": {"windows", "amd64"},
+		"windows/386":   {"windows", "386"},
+		"windows/arm64": {"windows", "arm64"},
+	},
 }
 
 // errNoToolchain means BOB has no Go toolchain to compile with.

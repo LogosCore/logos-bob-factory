@@ -4,44 +4,43 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
 // The hello's machine id (docs: contracts/minion-messages/sessions/, Machine
-// identity): the first of these the minion can read, all by reading files
-// any user reads (the same machine gets the same id whoever runs it),
-// nothing run, nothing written:
+// identity): the first source the minion can read, quietly (a file, a
+// registry value, a system call: nothing run, nothing written) and the same
+// whoever runs it, so the same machine gets the same id from a minion run
+// as an administrator and one run as a user.
+//
+// On Linux and other Unix hosts (machine_unix.go):
 //
 //  1. in a container, the container's id: the image's machine-id is every
 //     container's;
-//  2. the install's machine-id (/etc/machine-id, /var/lib/dbus/machine-id);
-//  3. the host name;
-//  4. a random id for this process.
+//  2. the install's machine-id (/etc/machine-id, /var/lib/dbus/machine-id).
 //
 // Not the firmware's UUID (/sys/class/dmi/id/product_uuid): only root reads
 // it, so a minion run as root and one run as a user would name one machine
 // twice.
 //
+// On Windows (machine_windows.go):
+//
+//  1. the SMBIOS system UUID, from the firmware table any user reads
+//     (GetSystemFirmwareTable): the hardware's, or the VM's;
+//  2. the install's MachineGuid, from the registry's 64-bit view.
+//
+// Then, anywhere, the host name, and last a random id for this process.
+//
 // It keeps none of its own (a file it would have to write): BOB's minion
 // leaves nothing on the host.
-
-// root is where the files are read from: "" on a host, a test's directory
-// in a test.
-var machineRoot = ""
 
 // machineID is the hello's machine id: its source (a protocol Machine
 // source) and value.
 func machineID() (int, string) {
-	if id := containerID(); id != "" {
-		return protocol.MachineContainer, id
-	}
-	for _, f := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
-		if v := readTrimmed(f); v != "" && !protocol.PlaceholderMachineUUID(v) {
-			return protocol.MachineLinuxMachineID, v
-		}
+	if src, v := hostMachineID(); v != "" {
+		return src, v
 	}
 	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
 		return protocol.MachineHostname, h
@@ -49,43 +48,4 @@ func machineID() (int, string) {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return protocol.MachineEphemeral, hex.EncodeToString(b)
-}
-
-func readTrimmed(path string) string {
-	b, err := os.ReadFile(machineRoot + path)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
-}
-
-// containerHexID is a container runtime's id: 64 hex digits.
-var containerHexID = regexp.MustCompile(`[0-9a-f]{64}`)
-
-// containerID is the container the minion runs in, from where the runtime
-// mounts its files (/proc/self/mountinfo: .../containers/<id>/hostname) or
-// its cgroup (v1: .../docker/<id>); "" on a host.
-func containerID() string {
-	inContainer := false
-	for _, f := range []string{"/.dockerenv", "/run/.containerenv"} {
-		if _, err := os.Stat(machineRoot + f); err == nil {
-			inContainer = true
-		}
-	}
-	cgroup := readTrimmed("/proc/self/cgroup")
-	if strings.Contains(cgroup, "docker") || strings.Contains(cgroup, "kubepods") || strings.Contains(cgroup, "containerd") ||
-		strings.Contains(cgroup, "libpod") {
-		inContainer = true
-	}
-	if !inContainer {
-		return ""
-	}
-	for _, line := range strings.Split(readTrimmed("/proc/self/mountinfo"), "\n") {
-		if strings.Contains(line, "/containers/") && (strings.Contains(line, "/hostname") || strings.Contains(line, "/hosts")) {
-			if id := containerHexID.FindString(line); id != "" {
-				return id
-			}
-		}
-	}
-	return containerHexID.FindString(cgroup)
 }

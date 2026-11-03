@@ -3,8 +3,9 @@
 BOB (Body Opponent Bag, the human-shaped boxing dummy) is a bare Logos
 factory, the module type that builds minions. It registers with core as
 `factory` / `bob`, says hello, keeps heartbeating, and builds **dummy
-minions**: Linux binaries that print a JSON description of the minion (its
-build id, commands, values, connections and badge) and do nothing else. It is the dummy the factory
+minions**: Linux and Windows programs that print a JSON description of the
+minion (its build id, commands, values, connections and badge) when asked,
+and otherwise run as a minion that talks to core. It is the dummy the factory
 contracts are worked out against.
 
 Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang-factory-core).
@@ -14,9 +15,10 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 | | |
 |---|---|
 | Version | 2 (version 1 also had the JSON-only targets `dummy` and `dummy-lite`) |
-| Targets | `linux-elf`: format `elf`, platforms `linux/amd64` and `linux/386`; the artifact is a [binary](#the-linux-elf-binary) that prints the description |
+| Targets | `linux-elf`: format `elf`, platforms `linux/amd64` and `linux/386`; the artifact is a [binary](#the-linux-elf-binary). `windows-exe`: format `exe`, platforms `windows/amd64`, `windows/386` and `windows/arm64`; the artifact is the same minion as a [Windows program](#the-windows-exe-program) |
 | Fields | `greeting` (string), `kill_date` (datetime), `punches` (enum_list: jab, cross, hook, uppercut), `badge` (file, an image up to 256 KiB, checked and recorded by SHA-256) |
-| Commands | `sleep` and `exit` (required), `hello` and `ls` (picked by default), `download`, `shell`. Each declares the params a task of it would take; the dummy minion runs none of them, and its description lists the ones its build picked. |
+| Max tasks | Declared: a build says how many tasks its minion runs at once (default 5), and core changes it live from the session. |
+| Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch` and `volumes` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`. Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. `volumes` (action `list_volumes`, result `volumes`) lists the host's file systems: on Linux those mounted where the minion sees them (`/proc/self/mountinfo`, less the kernel's own and the snaps), with their space (`statfs`), label (`/dev/disk/by-label`) and kind (removable by `/sys/class/block`); core's file browser runs it at a machine's roots. |
 | Channels | `http` connection schema version 2, with connection parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`) |
 | Crypto | `aes-256-cbc-hmac-sha256` (AES-256-CBC with HMAC-SHA256); the keys core generates go into the artifact |
 
@@ -100,6 +102,37 @@ BOB. Run outside the image, BOB uses the `go` on its `PATH` and the sources in
 `MINION_SRC`. Without a toolchain a `linux-elf` build fails with
 `no_toolchain`, and one that does not compile with `compile_failed` (the
 compiler's output is in the build log).
+
+## The windows-exe program
+
+For `windows-exe`, BOB compiles the same minion for Windows (`GOOS=windows`,
+`GOARCH=amd64`, `386` or `arm64`): a console program, its artifact
+`bob-<first 8 of the build id>.exe`,
+`application/vnd.microsoft.portable-executable`. It does everything the Linux
+one does, with what Windows has:
+
+- **Shell**: `cmd.exe` (`%ComSpec%`), its command line passed as typed
+  (`/d /s /c "<command>"`: no AutoRun commands), no window of its own; a
+  cancel or the timeout ends the whole tree it started (`taskkill /T /F`).
+- **Machine id**: the firmware's SMBIOS system UUID (`GetSystemFirmwareTable`,
+  which any user may call: `smbios-uuid`), else the install's `MachineGuid`
+  from the registry's 64-bit view (`win-machine-guid`), else the host name;
+  nothing run, nothing written.
+- **Hello**: its integrity level from its token (low, medium, high, system)
+  and the host's domain or workgroup (`NetGetJoinInformation`).
+- **Listings**: files with the hidden attribute are hidden (a walk told to
+  leave hidden folders out leaves them out), and an entry's mode is its file
+  attributes, which core shows as PowerShell does.
+- **Volumes**: its drives, `A:` to `Z:` (`GetLogicalDrives`), its mapped
+  network drives with them (their share, `WNetGetConnection`): each one's
+  kind (`GetDriveType`), label, file system and read-only flag
+  (`GetVolumeInformation`), and size and the space free to its user
+  (`GetDiskFreeSpaceEx`). An empty DVD drive or card reader says "no media",
+  without Windows asking anyone to insert a disk (`SetThreadErrorMode`).
+
+The image's build cache holds the standard library for `windows/amd64`;
+`windows/386` and `windows/arm64` compile it on their first build, kept for
+the next.
 
 ## Icon
 

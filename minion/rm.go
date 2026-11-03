@@ -19,7 +19,7 @@ func (r *runner) rm(t *task, args protocol.Args) {
 		r.end(t, false, nil, "no path")
 		return
 	}
-	abs, err := filepath.Abs(path)
+	abs, err := hostPath(path)
 	if err != nil {
 		r.end(t, false, nil, err.Error())
 		return

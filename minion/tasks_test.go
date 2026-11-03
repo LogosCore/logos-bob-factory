@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,6 +13,49 @@ import (
 
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
+
+// onWindows: what a test expects differs there (the shell, attributes for
+// modes, no owners, ACLs rather than mode bits).
+const onWindows = runtime.GOOS == "windows"
+
+// sleepy is a shell command that prints "started", sleeps 30 seconds, then
+// prints "never", in the host's shell.
+func sleepy() string {
+	if onWindows {
+		return "echo started& ping -n 30 127.0.0.1 >nul& echo never"
+	}
+	return "echo started; sleep 30; echo never"
+}
+
+// sleep30 is a shell command that sleeps 30 seconds.
+func sleep30() string {
+	if onWindows {
+		return "ping -n 30 127.0.0.1 >nul"
+	}
+	return "sleep 30"
+}
+
+// closeDir makes dir one the test may not list: no mode bits on Unix; on
+// Windows, where mode bits do not deny, an ACE that denies Everyone listing
+// it. Undone before the test's temporary directory is removed. It says
+// whether the test may list it now all the same: root may, as may a Windows
+// account with the backup privilege enabled (an administrator over SSH).
+func closeDir(t *testing.T, dir string) bool {
+	t.Helper()
+	if !onWindows {
+		if err := os.Chmod(dir, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	} else {
+		if out, err := exec.Command("icacls", dir, "/deny", "*S-1-1-0:(RD)").CombinedOutput(); err != nil {
+			t.Fatalf("icacls: %v: %s", err, out)
+		}
+		t.Cleanup(func() { _ = exec.Command("icacls", dir, "/remove:d", "*S-1-1-0").Run() })
+	}
+	_, err := os.ReadDir(dir)
+	return err == nil
+}
 
 func newTestRunner() *runner {
 	s := &schedule{interval: time.Second}
@@ -40,7 +85,7 @@ func waitEnd(t *testing.T, r *runner, within time.Duration) *task {
 func TestShellCancelKillsTheGroup(t *testing.T) {
 	r := newTestRunner()
 	id := make([]byte, 16)
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: id, Cmd: opShell, Args: protocol.Args{shellCommand: "echo started; sleep 30; echo never"}})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: id, Cmd: opShell, Args: protocol.Args{shellCommand: sleepy()}})
 	time.Sleep(300 * time.Millisecond)
 	r.stop(id, 0)
 	task := waitEnd(t, r, 5*time.Second)
@@ -53,7 +98,7 @@ func TestShellCancelKillsTheGroup(t *testing.T) {
 func TestShellTimeout(t *testing.T) {
 	r := newTestRunner()
 	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: opShell,
-		Args: protocol.Args{shellCommand: "sleep 30", shellTimeout: uint64(300)}})
+		Args: protocol.Args{shellCommand: sleep30(), shellTimeout: uint64(300)}})
 	task := waitEnd(t, r, 5*time.Second)
 	if task.ok || !strings.Contains(task.err, "timeout") {
 		t.Fatalf("ok %v err %q", task.ok, task.err)
@@ -104,15 +149,23 @@ func TestDirEntry(t *testing.T) {
 	for _, e := range entries {
 		got[e.Name()] = dirEntry(dir, e)
 	}
-	if e := got[".empty"]; e.Type != protocol.EntryFile || !e.Hidden || e.Size == nil || *e.Size != 0 || e.Modified == nil || e.owner == "" ||
-		protocol.RenderMode("linux", e.Mode) != "-rw-------" {
-		t.Errorf(".empty: %+v", e)
+	// Modes as each host has them: Unix's bits, or Windows' attributes (a
+	// link to a folder is a folder that is a reparse point there); owners
+	// only where the host has unix ids.
+	modes, owned := map[string]string{".empty": "-rw-------", "sub": "drwx------", "link": "lrwxrwxrwx"}, true
+	if onWindows {
+		modes, owned = map[string]string{".empty": "-a----", "sub": "d-----", "link": "d----l"}, false
 	}
-	if e := got["sub"]; e.Type != protocol.EntryDir || e.Size != nil || e.Hidden || protocol.RenderMode("linux", e.Mode) != "drwx------" {
-		t.Errorf("sub: %+v", e)
+	mode := func(e entry) string { return protocol.RenderMode(runtime.GOOS, e.Mode) }
+	if e := got[".empty"]; e.Type != protocol.EntryFile || !e.Hidden || e.Size == nil || *e.Size != 0 || e.Modified == nil ||
+		(e.owner != "") != owned || mode(e) != modes[".empty"] {
+		t.Errorf(".empty: %+v, %s", e, mode(e))
 	}
-	if e := got["link"]; e.Type != protocol.EntryLink || e.Target != "sub" || protocol.RenderMode("linux", e.Mode)[0] != 'l' {
-		t.Errorf("link: %+v", e)
+	if e := got["sub"]; e.Type != protocol.EntryDir || e.Size != nil || e.Hidden || mode(e) != modes["sub"] {
+		t.Errorf("sub: %+v, %s", e, mode(e))
+	}
+	if e := got["link"]; e.Type != protocol.EntryLink || e.Target != "sub" || mode(e) != modes["link"] {
+		t.Errorf("link: %+v, %s", e, mode(e))
 	}
 }
 
@@ -164,7 +217,7 @@ func TestLsSendsAListing(t *testing.T) {
 	if !parts[len(parts)-1].Done || !*parts[len(parts)-1].OK {
 		t.Fatalf("the last part is not a done ok: %+v", parts[len(parts)-1])
 	}
-	if len(pieces) != 3 || pieces[0].Path != dir || pieces[0].Sep != "/" || !pieces[2].Last || pieces[1].Last {
+	if len(pieces) != 3 || pieces[0].Path != dir || pieces[0].Sep != string(filepath.Separator) || !pieces[2].Last || pieces[1].Last {
 		t.Fatalf("pieces: %d, first %+v", len(pieces), pieces[0].Path)
 	}
 	n := 0
@@ -172,8 +225,9 @@ func TestLsSendsAListing(t *testing.T) {
 		if p.ID != 0 || p.Part != uint64(i) || p.Partial || p.Err != 0 {
 			t.Fatalf("piece %d: id %d part %d", i, p.ID, p.Part)
 		}
-		// Every entry is the test's: one owner, named once a piece.
-		if len(p.Owners) != 1 {
+		// Every entry is the test's: one owner, named once a piece (none
+		// on Windows, which has no unix ids).
+		if owners := len(p.Owners); owners != 1 && !onWindows || owners != 0 && onWindows {
 			t.Fatalf("piece %d: owners %v", i, p.Owners)
 		}
 		n += len(p.Entries)
@@ -185,12 +239,12 @@ func TestLsSendsAListing(t *testing.T) {
 
 // A directory ls may not read is a listing that says so, and the task fails.
 func TestLsUnreadable(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root reads every directory")
-	}
 	dir := filepath.Join(t.TempDir(), "closed")
-	if err := os.Mkdir(dir, 0); err != nil {
+	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if closeDir(t, dir) {
+		t.Skip("this account reads every directory")
 	}
 	r := newTestRunner()
 	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: opLs, Args: protocol.Args{lsPath: dir}})

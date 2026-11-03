@@ -51,6 +51,9 @@ func device(info fs.FileInfo) (uint64, bool) {
 	return uint64(st.Dev), true //nolint:unconvert // Dev is int32 on some platforms
 }
 
+// hiddenFile: a Unix file is hidden by its name alone.
+func hiddenFile(fs.FileInfo) bool { return false }
+
 // modeBits is a file's st_mode: its type and permission bits, as a listing
 // sends them (protocol.LsEntry.Mode).
 func modeBits(info fs.FileInfo) uint32 {

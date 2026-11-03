@@ -131,7 +131,12 @@ func TestUploadExists(t *testing.T) {
 	if got, _ := os.ReadFile(dest); !task.ok || len(got) != 10 {
 		t.Fatalf("overwritten: %+v, %d bytes", task, len(got))
 	}
-	if info, _ := os.Stat(dest); info.Mode().Perm() != 0o600 {
+	// Its mode is kept (Windows has none but read-only, so 0o666 there).
+	want := os.FileMode(0o600)
+	if onWindows {
+		want = 0o666
+	}
+	if info, _ := os.Stat(dest); info.Mode().Perm() != want {
 		t.Fatalf("its mode: %v", info.Mode())
 	}
 }

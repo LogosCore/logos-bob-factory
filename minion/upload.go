@@ -130,7 +130,7 @@ func (r *runner) upload(ctx context.Context, t *task, args protocol.Args, stream
 // folder; an error for a file already there unless overwrite, or a path
 // that is not a file.
 func uploadPath(path, name string, overwrite bool) (string, error) {
-	abs, err := filepath.Abs(path)
+	abs, err := hostPath(path)
 	if err != nil {
 		return "", err
 	}

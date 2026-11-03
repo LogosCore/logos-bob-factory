@@ -113,7 +113,7 @@ func (f *fakeCore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			var get protocol.GetTasksItem
-			if asked || protocol.UnmarshalCBOR(raw, &get) != nil || get.Max == nil || *get.Max != 1 {
+			if asked || protocol.UnmarshalCBOR(raw, &get) != nil || get.Max == nil || *get.Max < 1 || *get.Max > protocol.MaxTasksLimit {
 				f.t.Errorf("check-in %+v", msg)
 			}
 			asked = true
@@ -179,7 +179,7 @@ func TestMinionStages(t *testing.T) {
 		"session id " + formatUUID(core.sessionID),
 		"check-in every 100ms ± 20%",
 		"check-in 1 failed, keeping the session",
-		"check-in 2: get_tasks max 1",
+		"check-in 2: get_tasks max 5",
 		"core closed the session; starting over",
 	} {
 		if !strings.Contains(out, want) {
@@ -318,7 +318,13 @@ func TestMinionRunsTasks(t *testing.T) {
 		{T: protocol.ItemTask, Task: id(4), Cmd: op("sleep"), Args: args("sleep", map[string]any{"interval": uint64(50), "jitter": int64(0)})},
 		{T: protocol.ItemTask, Task: id(5), Cmd: op("exit")},
 	}
-	cmd, logs := startMinion(t, core, func(req *protocol.BuildRequest) { req.Commands = append(req.Commands, "shell") })
+	// One task at a time: each runs, and ends, before core gives the next
+	// (several at once: minion/max_tasks_test.go).
+	one := uint64(1)
+	cmd, logs := startMinion(t, core, func(req *protocol.BuildRequest) {
+		req.Commands = append(req.Commands, "shell")
+		req.MaxTasks = &one
+	})
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	go func() {

@@ -11,8 +11,9 @@ import (
 )
 
 // walkTree makes root/a/a1/a11, root/b, root/.h/h1, a folder it may not
-// read (root/closed) and a link to a folder (root/link → a).
-func walkTree(t *testing.T) string {
+// read (root/closed) and a link to a folder (root/link → a). It says whether
+// the test reads root/closed all the same (closeDir).
+func walkTree(t *testing.T) (string, bool) {
 	t.Helper()
 	root := t.TempDir()
 	for _, d := range []string{"a/a1/a11", "b", ".h/h1", "closed"} {
@@ -26,11 +27,7 @@ func walkTree(t *testing.T) string {
 	if err := os.Symlink(filepath.Join(root, "a"), filepath.Join(root, "link")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Join(root, "closed"), 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "closed"), 0o755) })
-	return root
+	return root, closeDir(t, filepath.Join(root, "closed"))
 }
 
 // runWalk walks with args, and returns its listings' folders (in the order
@@ -77,14 +74,12 @@ func runWalk(t *testing.T, args protocol.Args) ([]string, []string, protocol.Dir
 }
 
 func TestWalk(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root reads every directory")
-	}
-	root := walkTree(t)
+	root, readable := walkTree(t)
 	rel := func(paths []string) []string {
 		out := make([]string, len(paths))
 		for i, p := range paths {
-			out[i], _ = filepath.Rel(root, p)
+			r, _ := filepath.Rel(root, p)
+			out[i] = filepath.ToSlash(r)
 		}
 		return out
 	}
@@ -95,19 +90,25 @@ func TestWalk(t *testing.T) {
 	if !ok {
 		t.Fatal("the walk failed")
 	}
-	if got := rel(folders); !slices.Equal(got, []string{".", ".h", "a", "b", ".h/h1", "a/a1"}) {
+	// Where the test reads every folder (root, or a Windows administrator's
+	// backup privilege), closed is a folder like the others.
+	wantFolders, wantUnread := []string{".", ".h", "a", "b", ".h/h1", "a/a1"}, []string{"closed"}
+	if readable {
+		wantFolders, wantUnread = []string{".", ".h", "a", "b", "closed", ".h/h1", "a/a1"}, []string{}
+	}
+	if got := rel(folders); !slices.Equal(got, wantFolders) {
 		t.Fatalf("folders %v", got)
 	}
-	if got := rel(unread); !slices.Equal(got, []string{"closed"}) {
+	if got := rel(unread); !slices.Equal(got, wantUnread) {
 		t.Fatalf("unread %v", got)
 	}
-	if w.Root != root || w.Folders != 6 || w.Unread != 1 || w.Skipped != 1 || w.Current != "" || w.Entries != 9 {
+	if w.Root != root || int(w.Folders) != len(wantFolders) || int(w.Unread) != len(wantUnread) || w.Skipped != 1 || w.Current != "" || w.Entries != 9 {
 		t.Fatalf("where it stood: %+v", w)
 	}
 
-	// No limits at all: every folder but the one it may not read.
+	// No limits at all: every folder but the one it may not read (a11 too).
 	folders, _, w, _ = runWalk(t, protocol.Args{walkPath: root, walkDepth: int64(0), walkMaxFolders: int64(0)})
-	if len(folders) != 7 || w.Skipped != 0 {
+	if len(folders) != len(wantFolders)+1 || w.Skipped != 0 {
 		t.Fatalf("no limits: %v %+v", rel(folders), w)
 	}
 

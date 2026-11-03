@@ -34,6 +34,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/logoscore/logos-golang-protocol/protocol"
@@ -59,6 +60,17 @@ type description struct {
 	// Failover is the build's failover policy (failover.go); nil: the
 	// defaults.
 	Failover *protocol.BuildFailover `json:"failover"`
+	// MaxTasks is how many tasks the minion runs at once as it starts (core
+	// changes it live: max_tasks); nil: protocol.DefaultMaxTasks.
+	MaxTasks *uint64 `json:"max_tasks"`
+}
+
+// maxTasks is how many tasks the build says the minion runs at once.
+func (d description) maxTasks() uint64 {
+	if d.MaxTasks == nil {
+		return protocol.DefaultMaxTasks
+	}
+	return min(*d.MaxTasks, protocol.MaxTasksLimit)
 }
 
 func main() {
@@ -166,7 +178,7 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
-	sessionID, err := hello(ex, tempID, newKeys, claim, sched, tr.place())
+	sessionID, err := hello(ex, tempID, newKeys, claim, sched, tr.place(), d.maxTasks())
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
@@ -184,6 +196,8 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		h := describeHost()
 		h.Conn = uint64(tr.place()) //nolint:gosec // a small place
 		h.Sleep = &protocol.Sleep{Interval: uint64(max(1, sched.interval.Milliseconds())), Jitter: uint64(sched.jitter)}
+		// Its limit of tasks outgoing adds: it calls this under the
+		// runner's lock.
 		return h
 	}
 	// A WebSocket that closed is opened again at once, then after 1s,
@@ -329,8 +343,10 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		if ended != nil {
 			return ended
 		}
-		// What the next message keeps within: the connection in use's.
+		// What the next message keeps within, and how it asks for tasks:
+		// the connection in use's.
 		tasks.setLimit(tr.conn().MessageLimit())
+		tasks.setPersistent(tr.persistent())
 		// A switch waiting for core's dial: the dial, or its time up.
 		if awaiting != nil {
 			select {
@@ -541,10 +557,11 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		if err := answered(n, items, answer); err != nil {
 			return err
 		}
-		if asked := slices.ContainsFunc(items, func(it any) bool { _, ok := it.(protocol.GetTasksItem); return ok }); asked {
-			log.Printf("check-in %d: get_tasks max 1, %d item(s) sent, %d back", n, len(items), len(answer.Items))
+		if i := slices.IndexFunc(items, func(it any) bool { _, ok := it.(protocol.GetTasksItem); return ok }); i >= 0 {
+			log.Printf("check-in %d: get_tasks max %d, %d item(s) sent, %d back", n, *items[i].(protocol.GetTasksItem).Max, len(items),
+				len(answer.Items))
 		} else {
-			log.Printf("check-in %d: a task runs, %d item(s) sent, %d back", n, len(items), len(answer.Items))
+			log.Printf("check-in %d: no room for tasks, %d item(s) sent, %d back", n, len(items), len(answer.Items))
 		}
 	}
 }
@@ -630,7 +647,8 @@ func stage(ex exchanger, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Mate
 // hello sends the host and process under the temporary id, sealed with the
 // new keys, with its check-in schedule, claiming the persisted session when
 // claim is set, and returns the session id core gave.
-func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte, sched schedule, conn int) ([16]byte, error) {
+func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte, sched schedule, conn int,
+	maxTasks uint64) ([16]byte, error) {
 	var sessionID [16]byte
 	h := describeHost()
 	h.SID = claim
@@ -638,6 +656,8 @@ func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Mater
 	h.Conn = uint64(conn) //nolint:gosec // a small place
 	// The schedule it checks in by, for core to tell when it is late.
 	h.Sleep = &protocol.Sleep{Interval: uint64(max(1, sched.interval.Milliseconds())), Jitter: uint64(sched.jitter)}
+	// How many tasks it runs at once: the build's, which core may change.
+	h.MaxTasks = &maxTasks
 	log.Printf("hello: pid %d, %s/%s, host %q, user %q, integrity %d, addrs %v", h.PID, h.OS, h.Arch, h.Host, h.User, h.Integrity, h.Addrs)
 	answer, err := ex(tempID, keys, h)
 	if err != nil {
@@ -670,7 +690,7 @@ func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Mater
 // process.
 func describeHost() protocol.HelloItem {
 	h := protocol.HelloItem{T: protocol.ItemHello, PID: uint64(os.Getpid()), OS: runtime.GOOS, Arch: runtime.GOARCH,
-		Version: version, Integrity: protocol.IntegrityUser}
+		Version: version, Integrity: integrityLevel(), Domain: hostDomain()}
 	h.Host, _ = os.Hostname()
 	h.MachineSource, h.MachineValue = machineID()
 	if u, err := user.Current(); err == nil {
@@ -680,9 +700,6 @@ func describeHost() protocol.HelloItem {
 	// only where it was saved.
 	if exe, err := os.Executable(); err == nil {
 		h.Proc = filepath.Base(exe)
-	}
-	if os.Geteuid() == 0 {
-		h.Integrity = protocol.IntegrityRoot
 	}
 	if addrs, err := net.InterfaceAddrs(); err == nil {
 		for _, a := range addrs {
@@ -860,13 +877,42 @@ func (c connection) timeout() time.Duration {
 	return 40 * time.Second
 }
 
+// clientKey is what an HTTP client depends on: its TLS settings and its
+// timeout.
+type clientKey struct {
+	verify  bool
+	sni     string
+	timeout time.Duration
+}
+
+// clients are the minion's HTTP clients, one for each set of settings, kept
+// for as long as it runs: a client's transport keeps its connection to the
+// channel open and reuses it from one check-in to the next. A client made
+// for each request would leave its connection open behind it, one more a
+// check-in.
+var clients sync.Map // clientKey → *http.Client
+
+// idleConnTimeout closes a connection to the channel no check-in used for
+// this long: a minion that checks in rarely holds none open between.
+const idleConnTimeout = 30 * time.Second
+
+// client is the HTTP client for the connection's settings.
+func (c connection) client() *http.Client {
+	verify, _ := c.Endpoint.Params["tls_verify"].(bool)
+	k := clientKey{verify: verify, sni: c.param("sni"), timeout: c.timeout()}
+	if cl, ok := clients.Load(k); ok {
+		return cl.(*http.Client)
+	}
+	cl, _ := clients.LoadOrStore(k, &http.Client{Timeout: k.timeout, Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: !k.verify, ServerName: k.sni}, //nolint:gosec // the endpoint's own setting
+		IdleConnTimeout: idleConnTimeout,
+	}})
+	return cl.(*http.Client)
+}
+
 // send posts body to the channel as the connection's settings say.
 func (c connection) send(body []byte) ([]byte, int, time.Duration, error) {
-	timeout := c.timeout()
-	verify, _ := c.Endpoint.Params["tls_verify"].(bool)
-	client := &http.Client{Timeout: timeout, Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: !verify, ServerName: c.param("sni")}, //nolint:gosec // the endpoint's own setting
-	}}
+	client := c.client()
 	req, err := http.NewRequest(c.method(), c.url(), bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, 0, err

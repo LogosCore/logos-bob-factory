@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"debug/elf"
+	"debug/pe"
 	"encoding/json"
 	"runtime"
 	"slices"
@@ -42,7 +43,7 @@ func TestBuildDummyMinion(t *testing.T) {
 		t.Fatalf("the binary printed %s: %v", artifact, err)
 	}
 	if m.BuildID != req.BuildID || m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.BuiltBy != "bob bob-test test" ||
-		m.Connections[0].Values["path_prefix"] != "/cdn/assets/" || !slices.Equal(m.Ops, []int{1, 2, 3, 4, 12}) {
+		m.Connections[0].Values["path_prefix"] != "/cdn/assets/" || !slices.Equal(m.Ops, []int{1, 2, 3, 4, 12, 13}) {
 		t.Fatalf("minion %+v", m)
 	}
 	if strings.Contains(string(artifact), badge.URL) || !strings.Contains(res.Log, "dummy minion of build 5b0c4f6e") {
@@ -54,6 +55,31 @@ func TestBuildDummyMinion(t *testing.T) {
 	}
 	if n := len(out.Progress); n == 0 || out.Progress[n-1].Step != "upload" {
 		t.Fatalf("progress %+v", out.Progress)
+	}
+}
+
+// A windows-exe build is the same minion compiled for Windows: an .exe.
+func TestBuildWindowsMinion(t *testing.T) {
+	st := factorytest.NewStore(t)
+	req := coreRequest(t)
+	req.Artifact = protocol.ArtifactUpload{}
+	req.Target, req.Platform = "windows-exe", "windows/amd64"
+	delete(req.Values, "badge")
+	req.Files = nil
+
+	needGo(t)
+	out := factorytest.Run(t, buildSchema, &bob{builtBy: "bob bob-test test", minionSrc: testMinionSrc}, st, req)
+	res := out.Result
+	if res.Status != protocol.BuildSucceeded || res.Artifact.Filename != "bob-5b0c4f6e.exe" ||
+		res.Artifact.MediaType != "application/vnd.microsoft.portable-executable" {
+		t.Fatalf("result %+v (error %+v, log %s)", res, res.Error, res.Log)
+	}
+	f, err := pe.NewFile(bytes.NewReader(out.Artifact))
+	if err != nil || f.Machine != pe.IMAGE_FILE_MACHINE_AMD64 {
+		t.Fatalf("artifact is no amd64 PE: %v", err)
+	}
+	if !strings.Contains(res.Log, "GOOS=windows GOARCH=amd64") {
+		t.Fatalf("log: %s", res.Log)
 	}
 }
 

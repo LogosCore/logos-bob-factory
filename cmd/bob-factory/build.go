@@ -56,6 +56,9 @@ var buildSchema = protocol.BuildSchema{
 	// The minions move between their connections as the build's failover
 	// settings say (minion/failover.go).
 	Failover: true,
+	// The minions run up to the build's number of tasks at once, which core
+	// changes live (minion/tasks.go, max_tasks).
+	MaxTasks: true,
 	Fields: []protocol.FieldSpec{
 		{
 			Key: "greeting", Type: protocol.FieldString, Label: "Greeting", Default: "hello from BOB", MaxLength: 200,
@@ -78,6 +81,12 @@ var buildSchema = protocol.BuildSchema{
 		{
 			ID: "linux-elf", Label: "Linux binary", Format: "elf", Platforms: []string{"linux/amd64", "linux/386"},
 			Description: "A static Linux binary that prints the dummy minion's JSON description, baked in when it is compiled.",
+		},
+		{
+			ID: "windows-exe", Label: "Windows executable", Format: "exe",
+			Platforms: []string{"windows/amd64", "windows/386", "windows/arm64"},
+			Description: "A Windows console program (.exe), the same dummy minion: its shell is cmd.exe, its machine id " +
+				"the firmware's UUID or the install's MachineGuid, its hello says its integrity level and domain.",
 		},
 	},
 	Commands: []protocol.BuildCommand{
@@ -164,7 +173,7 @@ var buildSchema = protocol.BuildSchema{
 		},
 		{
 			ID: "shell", Op: 11, Label: "Run a shell command",
-			Description: "Runs a command in the system shell and answers with its output.",
+			Description: "Runs a command in the system shell (sh on Linux, cmd.exe on Windows) and answers with its output.",
 			Params: []protocol.FieldSpec{
 				{Key: "command", Num: 1, Type: protocol.FieldString, Label: "Command", Required: true},
 				{Key: "timeout", Num: 2, Type: protocol.FieldDuration, Label: "Timeout", Default: "30s"},
@@ -180,6 +189,12 @@ var buildSchema = protocol.BuildSchema{
 				{Key: "for", Num: 2, Type: protocol.FieldDuration, Label: "For", Default: "0s", Order: 2,
 					Description: "How long before it moves back to the connection it has now. Empty or 0s: it stays."},
 			},
+		},
+		{
+			ID: "volumes", Op: 13, Label: "List volumes", Default: true,
+			Description: "Lists the host's drives (Windows) or mounted file systems (Linux), with their kind, label, file system and space; the file browser shows them as its roots.",
+			Action:      protocol.ActionListVolumes,
+			Result:      protocol.ResultVolumes,
 		},
 	},
 }
@@ -209,6 +224,9 @@ type dummyMinion struct {
 	Connections []protocol.BuildConnection `json:"connections"`
 	// Failover is the build's failover policy, defaults filled in.
 	Failover protocol.BuildFailover `json:"failover"`
+	// MaxTasks is how many tasks the minion runs at once as it starts: the
+	// request's, or protocol.DefaultMaxTasks from a core that sends none.
+	MaxTasks uint64 `json:"max_tasks"`
 	Crypto   *protocol.BuildCrypto  `json:"crypto,omitempty"`
 	// SessionID is the persisted session the minion claims, when the build
 	// has one.
@@ -220,7 +238,8 @@ type dummyMinion struct {
 // bob builds dummy minions, the way its management says (management.go).
 type bob struct {
 	builtBy string // "bob <instance> <version>"
-	// minionSrc is the minion module's directory, compiled for linux-elf.
+	// minionSrc is the minion module's directory, compiled for each target
+	// (compiledTargets).
 	minionSrc string
 	settings  atomic.Pointer[settings]
 }
@@ -291,13 +310,20 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	job.Logf("compiled a %d-byte binary for %s", len(bin), m.Platform)
 
 	job.Step(stepUpload.ID, "")
-	name := "bob-" + m.BuildID[:8] + ".bin"
-	if err := job.UploadArtifact(ctx, name, "application/x-executable", bytes.NewReader(bin)); err != nil {
+	a := artifactKinds[m.Target]
+	name := "bob-" + m.BuildID[:8] + a.ext
+	if err := job.UploadArtifact(ctx, name, a.mediaType, bytes.NewReader(bin)); err != nil {
 		return factory.Result{}, err
 	}
 	return factory.Result{
 		Warnings: []string{"a dummy minion: it prints its description and does nothing else"},
 	}, nil
+}
+
+// artifactKinds are what each target's artifact is named and typed as.
+var artifactKinds = map[string]struct{ ext, mediaType string }{
+	"linux-elf":   {".bin", "application/x-executable"},
+	"windows-exe": {".exe", "application/vnd.microsoft.portable-executable"},
 }
 
 // describe is the dummy minion a request asks for. A badge is recorded
@@ -332,6 +358,7 @@ func describe(req protocol.BuildRequest, badge *protocol.BuildFile, builtBy stri
 		Badge:       badge,
 		Connections: req.Connections,
 		Failover:    failoverOf(req),
+		MaxTasks:    maxTasksOf(req),
 		Crypto:      req.Crypto,
 		SessionID:   req.SessionID,
 		BuiltBy:     builtBy,
@@ -348,6 +375,15 @@ func opsOf(ids []string) []int {
 		}
 	}
 	return ops
+}
+
+// maxTasksOf is how many tasks the minion runs at once as it starts: the
+// request's, or the default from a core that sends none.
+func maxTasksOf(req protocol.BuildRequest) uint64 {
+	if req.MaxTasks != nil {
+		return *req.MaxTasks
+	}
+	return protocol.DefaultMaxTasks
 }
 
 // failoverOf is the build's failover policy: the request's, or the
