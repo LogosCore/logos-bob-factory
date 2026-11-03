@@ -178,6 +178,14 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	// core's sealed session_closed, or the backstop, starts over (docs:
 	// "When an exchange fails").
 	tasks := newRunner(d, &sched)
+	// A hello core asks for (rehello) says the host and process again,
+	// through the connection in use.
+	tasks.hello = func() protocol.HelloItem {
+		h := describeHost()
+		h.Conn = uint64(tr.place()) //nolint:gosec // a small place
+		h.Sleep = &protocol.Sleep{Interval: uint64(max(1, sched.interval.Milliseconds())), Jitter: uint64(sched.jitter)}
+		return h
+	}
 	// A WebSocket that closed is opened again at once, then after 1s,
 	// doubling up to the endpoint's ws_reconnect_backoff: the check-in that
 	// reopens it links it to the session again.
@@ -321,6 +329,8 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		if ended != nil {
 			return ended
 		}
+		// What the next message keeps within: the connection in use's.
+		tasks.setLimit(tr.conn().MessageLimit())
 		// A switch waiting for core's dial: the dial, or its time up.
 		if awaiting != nil {
 			select {

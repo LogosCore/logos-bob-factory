@@ -27,17 +27,16 @@ import (
 // hours runs once. The commands are the build's (description.Ops).
 
 // maxOutPerMessage keeps a message's output well under the 768 KiB limit;
-// the rest goes in the next check-ins, which come at once.
+// the rest goes in the next check-ins, which come at once. A connection
+// that carries less (its channel's max_message, BuildConnection.MaxMessage)
+// gets two thirds of what it carries (perMessage).
 const maxOutPerMessage = 512 << 10
 
-// lsChunk is how many directory entries one listing piece carries: a big
-// directory goes in pieces (docs: contracts/minion-messages.md, Listings),
-// several to a result part while the message has room.
+// lsChunk is how many directory entries one listing piece carries at most:
+// a big directory goes in pieces (docs: contracts/minion-messages.md,
+// Listings), several to a result part while the message has room, and a
+// piece is cut sooner when its entries would not fit half a message.
 const lsChunk = 500
-
-// streamPoll is how often the minion checks in while a stream that ran is
-// held (docs: contracts/minion-messages.md, Streaming a file).
-const streamPoll = time.Second
 
 // taskMemory is how long the minion remembers a task id.
 const taskMemory = 24 * time.Hour
@@ -86,6 +85,34 @@ type runner struct {
 	wake   chan struct{}
 	// switches are connect tasks asking the session to move (conns.go).
 	switches chan switchReq
+	// limit is the largest message the connection in use carries
+	// (connection.MessageLimit), set by the session loop: what the next
+	// message keeps within.
+	limit int
+	// poll is how soon core asked the minion to come back (a poll item:
+	// a stream of its may go on any moment); 0 for none. It holds until
+	// the next message goes.
+	poll time.Duration
+	// helloAsked: core asked for a hello (rehello); hello makes it.
+	helloAsked bool
+	hello      func() protocol.HelloItem
+}
+
+// setLimit says the largest message the connection in use carries.
+func (r *runner) setLimit(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.limit = n
+}
+
+// perMessageLocked is the room a message gives output, data, listings and
+// a chunk: two thirds of what the connection carries, maxOutPerMessage at
+// most, leaving the rest to acks, errs and the message's own keys.
+func (r *runner) perMessageLocked() int {
+	if r.limit <= 0 {
+		return maxOutPerMessage
+	}
+	return min(maxOutPerMessage, r.limit*2/3)
 }
 
 func newRunner(d description, sched *schedule) *runner {
@@ -105,7 +132,7 @@ func (r *runner) nudge() {
 func (r *runner) pending() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.inflight) > 0 || len(r.acks) > 0 || len(r.errs) > 0 || r.sleepUpd != nil {
+	if len(r.inflight) > 0 || len(r.acks) > 0 || len(r.errs) > 0 || r.sleepUpd != nil || r.helloAsked {
 		return true
 	}
 	for _, t := range r.tasks {
@@ -122,10 +149,16 @@ func (r *runner) pending() bool {
 func (r *runner) outgoing() []any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// The wait core asked for was for this message.
+	r.poll = 0
 	if len(r.inflight) > 0 {
 		return r.inflight
 	}
 	var items []any
+	if r.helloAsked && r.hello != nil {
+		items = append(items, r.hello())
+	}
+	r.helloAsked = false
 	if len(r.acks) > 0 {
 		items = append(items, protocol.AckItem{T: protocol.ItemAck, Tasks: r.acks})
 		r.acks = nil
@@ -140,7 +173,8 @@ func (r *runner) outgoing() []any {
 	}
 	// Parts while the message has room: output, then a chunk of data each,
 	// then listing pieces, as many to a part as fit.
-	room := maxOutPerMessage
+	full := r.perMessageLocked()
+	room := full
 parts:
 	for _, t := range r.tasks {
 		for !t.sentEnd && (len(t.out) > 0 || len(t.chunks) > 0 || len(t.pieces) > 0 || t.ended) {
@@ -153,12 +187,12 @@ parts:
 				part.Out, t.out, room = t.out[:n], t.out[n:], room-n
 			} else if len(t.chunks) > 0 {
 				size := len(t.chunks[0])
-				if size > room && room < maxOutPerMessage {
+				if size > room && room < full {
 					break parts // the next message, which comes at once
 				}
 				part.Data, t.chunks, room = t.chunks[0], t.chunks[1:], max(room-size, 0)
 			} else if len(t.pieces) > 0 {
-				for len(t.pieces) > 0 && (t.sizes[0] <= room || (len(part.Ls) == 0 && room == maxOutPerMessage)) {
+				for len(t.pieces) > 0 && (t.sizes[0] <= room || (len(part.Ls) == 0 && room == full)) {
 					part.Ls = append(part.Ls, t.pieces[0])
 					room = max(room-t.sizes[0], 0)
 					t.pieces, t.sizes = t.pieces[1:], t.sizes[1:]
@@ -295,6 +329,28 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 				continue
 			}
 			r.stop(c.Task, i)
+		case protocol.ItemPoll:
+			// Come back sooner than the schedule: a stream of the minion's
+			// may go on any moment.
+			var p protocol.PollItem
+			if protocol.UnmarshalCBOR(raw, &p) == nil && p.Validate() == nil {
+				r.mu.Lock()
+				r.poll = time.Duration(p.Within) * time.Millisecond
+				r.mu.Unlock()
+			}
+		case protocol.ItemRehello:
+			// Core asks what host and process this is: a hello, in the
+			// next message.
+			r.mu.Lock()
+			r.helloAsked = true
+			r.mu.Unlock()
+			r.nudge()
+		case protocol.ItemStageResponse, protocol.ItemHelloResponse:
+			// Answers of staging and hello (a rehello's): nothing to do.
+		case protocol.ItemResume:
+			r.queueErr(protocol.ErrItemUnknownItem, "this minion keeps its tasks' state: it takes no resume", i)
+		default:
+			r.queueErr(protocol.ErrItemUnknownItem, fmt.Sprintf("this minion does not take %s", protocol.ItemName(protocol.ItemType(raw))), i)
 		}
 	}
 }
@@ -332,21 +388,14 @@ func (r *runner) acked(xfer []byte, next uint64, hold bool) {
 	}
 }
 
-// pollEvery is how soon to check in while a stream that ran is held: its
-// downloader may come back, or catch up, any moment. Zero: the schedule.
+// pollEvery is how soon to check in when core asked for sooner than the
+// schedule (a poll: a stream the minion holds may go on any moment, its
+// downloader or uploader there). Zero: the schedule. Over a persistent
+// connection core pushes instead, and asks for none.
 func (r *runner) pollEvery() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, t := range r.tasks {
-		if x := t.xfer; x != nil && x.stream && x.started && x.held && !x.over {
-			return streamPoll
-		}
-		// A stream core sends, held once it began.
-		if rx := t.recv; rx != nil && rx.held && rx.have > 0 && !rx.over {
-			return streamPoll
-		}
-	}
-	return 0
+	return r.poll
 }
 
 // refused ends a transfer core does not take, or does not send.
@@ -464,28 +513,46 @@ type entry struct {
 }
 
 // list adds a directory's listing to a task's result, in pieces of lsChunk
-// entries: the first names the directory, the last says so. errCode: it
-// could not be read at all (a protocol.ListingErr); partial: not all of it.
+// entries at most, cut sooner so a piece takes half a message at most: the
+// first names the directory, the last says so. errCode: it could not be
+// read at all (a protocol.ListingErr); partial: not all of it.
 func (r *runner) list(t *task, path, sep, parent string, entries []entry, partial bool, errCode int) {
 	r.mu.Lock()
 	id := t.listings
 	t.listings++
-	for i, part := 0, uint64(0); i == 0 || i < len(entries); i, part = i+lsChunk, part+1 {
+	budget := r.perMessageLocked() / 2
+	for i, part := 0, uint64(0); i == 0 || i < len(entries); part++ {
 		p := protocol.LsPiece{ID: id, Part: part}
-		for _, e := range entries[i:min(i+lsChunk, len(entries))] {
-			e.Owner, e.Group = p.Owner(e.owner), p.Owner(e.group)
-			p.Entries = append(p.Entries, e.LsEntry)
-		}
 		if part == 0 {
 			p.Path, p.Sep, p.Parent, p.Err = path, sep, parent, errCode
 		}
-		p.Last = i+lsChunk >= len(entries)
+		// Room for the piece's own keys, path and owners, then entries
+		// while they fit (one at least, so a listing always moves on).
+		used := 64 + len(p.Path) + len(p.Parent)
+		for i < len(entries) && len(p.Entries) < lsChunk {
+			e := entries[i]
+			size := 16 + len(e.owner) + len(e.group)
+			if b, err := protocol.MarshalCBOR(e.LsEntry); err == nil {
+				size += len(b)
+			}
+			if len(p.Entries) > 0 && used+size > budget {
+				break
+			}
+			e.Owner, e.Group = p.Owner(e.owner), p.Owner(e.group)
+			p.Entries = append(p.Entries, e.LsEntry)
+			used += size
+			i++
+		}
+		p.Last = i >= len(entries)
 		p.Partial = p.Last && partial
 		size := 64
 		if b, err := protocol.MarshalCBOR(p); err == nil {
 			size = len(b)
 		}
 		t.pieces, t.sizes = append(t.pieces, p), append(t.sizes, size)
+		if len(entries) == 0 {
+			break
+		}
 	}
 	r.mu.Unlock()
 	r.nudge()

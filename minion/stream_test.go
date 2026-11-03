@@ -85,10 +85,18 @@ func TestStream(t *testing.T) {
 			t.Fatal("the last chunk without its sha256")
 		}
 	}
-	// All sent, held until the downloader has it: the minion polls.
-	r.take(streamAck(t, xfer, off, true), nil)
-	if r.pollEvery() != streamPoll {
-		t.Fatal("held after it ran: no short poll")
+	// All sent, held until the downloader has it: core asks the minion to
+	// come back soon (a poll), for the next message only.
+	held := streamAck(t, xfer, off, true)
+	poll, _ := protocol.MarshalCBOR(protocol.PollItem{T: protocol.ItemPoll, Within: 1000})
+	held.Items = append(held.Items, poll)
+	r.take(held, nil)
+	if r.pollEvery() != time.Second {
+		t.Fatal("core's poll not taken")
+	}
+	r.outgoing()
+	if r.pollEvery() != 0 {
+		t.Fatal("core's poll outlived the message it was for")
 	}
 	r.take(streamAck(t, xfer, off, false), nil)
 	task := waitEnd(t, r, 2*time.Second)
