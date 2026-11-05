@@ -4,9 +4,9 @@ go 1.25.7
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.6
-	github.com/logoscore/logos-golang-factory-core v0.2.27
-	github.com/logoscore/logos-golang-module-core v0.2.26
-	github.com/logoscore/logos-golang-protocol v0.31.0
+	github.com/logoscore/logos-golang-factory-core v0.2.28
+	github.com/logoscore/logos-golang-module-core v0.2.27
+	github.com/logoscore/logos-golang-protocol v0.32.0
 )
 
 require (
