@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
@@ -124,6 +125,30 @@ func TestTaskOnceAndUnknownCancel(t *testing.T) {
 	other[0] = 9
 	r.stop(other, 3)
 	if len(r.errs) != 1 || r.errs[0].Code != protocol.ErrItemUnknownTask || *r.errs[0].Item != 3 || !bytes.Equal(r.errs[0].Task, other) {
+		t.Fatalf("errs %+v", r.errs)
+	}
+}
+
+// Core asks which tasks the minion still has: it acks those it has (one
+// running, one ended whose end core has not had) and names each it does
+// not with unknown_task.
+func TestReack(t *testing.T) {
+	r := newTestRunner()
+	running, ended, gone := bytes.Repeat([]byte{1}, 16), bytes.Repeat([]byte{2}, 16), bytes.Repeat([]byte{3}, 16)
+	r.mu.Lock()
+	r.tasks = append(r.tasks, &task{id: running}, &task{id: ended, ended: true})
+	r.mu.Unlock()
+	raw, err := protocol.MarshalCBOR(protocol.ReackItem{T: protocol.ItemReack, Tasks: [][]byte{running, ended, gone}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.take(protocol.CoreMessage{V: protocol.MinionMessageV3, Items: []cbor.RawMessage{raw}}, nil)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.acks) != 2 || !bytes.Equal(r.acks[0], running) || !bytes.Equal(r.acks[1], ended) {
+		t.Fatalf("acks %x", r.acks)
+	}
+	if len(r.errs) != 1 || r.errs[0].Code != protocol.ErrItemUnknownTask || !bytes.Equal(r.errs[0].Task, gone) || *r.errs[0].Item != 0 {
 		t.Fatalf("errs %+v", r.errs)
 	}
 }

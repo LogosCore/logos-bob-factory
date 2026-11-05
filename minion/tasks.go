@@ -418,6 +418,15 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 			r.nudge()
 		case protocol.ItemStageResponse, protocol.ItemHelloResponse:
 			// Answers of staging and hello (a rehello's): nothing to do.
+		case protocol.ItemReack:
+			// Core asks which of these tasks the minion still has (it is
+			// back over a new connection, or as a new process).
+			var rk protocol.ReackItem
+			if protocol.UnmarshalCBOR(raw, &rk) != nil || rk.Validate() != nil {
+				r.queueErr(protocol.ErrItemBadMessage, "the reack does not read", i)
+				continue
+			}
+			r.reack(rk.Tasks, i)
 		case protocol.ItemResume:
 			r.queueErr(protocol.ErrItemUnknownItem, "this minion keeps its tasks' state: it takes no resume", i)
 		default:
@@ -565,6 +574,22 @@ func (r *runner) stop(id []byte, item int) {
 	}
 	// Named, so core ends it (one this process never had: it restarted).
 	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask, Msg: "no such task running", Item: &item, Task: id})
+}
+
+// reack answers core's question about tasks (item, a reack): an ack names
+// those the minion has (running, or ended with an end core has not had),
+// an unknown_task each it does not, which core ends.
+func (r *runner) reack(ids [][]byte, item int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range ids {
+		if slices.ContainsFunc(r.tasks, func(t *task) bool { return slices.Equal(t.id, id) }) {
+			r.acks = append(r.acks, id)
+			continue
+		}
+		r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask,
+			Msg: "no such task: this process does not have it", Item: &item, Task: id})
+	}
 }
 
 // write adds output to a task (text, or a chunk of structured output: a
