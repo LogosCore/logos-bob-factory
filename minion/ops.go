@@ -20,7 +20,8 @@ const (
 	opSwitch         = 12
 	opVolumes        = 13
 	opFeedback       = 14
-	opSocks          = 15
+	opSocksProxy     = 15
+	opPortForward    = 16
 )
 
 // Params, by command.
@@ -60,7 +61,15 @@ const (
 	feedbackLevel   = 1
 	feedbackMessage = 2
 
-	socksPort       = 1
-	socksTimeout    = 2
-	socksMaxStreams = 3
+	socksProxyPort       = 1
+	socksProxyTimeout    = 2
+	socksProxyMaxStreams = 3
+
+	// A forward's host and to are core's: each stream's tunnel item names
+	// the destination.
+	portForwardPort       = 1
+	portForwardHost       = 2
+	portForwardTo         = 3
+	portForwardTimeout    = 4
+	portForwardMaxStreams = 5
 )

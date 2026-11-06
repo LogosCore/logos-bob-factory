@@ -58,9 +58,9 @@ var socksTask = bytes.Repeat([]byte{0x50}, 16)
 // startSocks is a runner running a socks task, its resends quick.
 func startSocks(t *testing.T, args protocol.Args) *runner {
 	t.Helper()
-	r := newRunner(description{Ops: []uint64{opSocks}}, &schedule{interval: time.Second})
+	r := newRunner(description{Ops: []uint64{opSocksProxy}}, &schedule{interval: time.Second})
 	r.tun.resend = 100 * time.Millisecond
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opSocks, Args: args})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opSocksProxy, Args: args})
 	t.Cleanup(func() { r.tun.closeAll() })
 	return r
 }
@@ -277,7 +277,7 @@ func TestTunnelTakesCoresDataAhead(t *testing.T) {
 // says; past max_streams core is told not allowed; asked again for a
 // stream it has, the minion answers again.
 func TestTunnelOpening(t *testing.T) {
-	r := startSocks(t, protocol.Args{socksMaxStreams: int64(1)})
+	r := startSocks(t, protocol.Args{socksProxyMaxStreams: int64(1)})
 	core := newTunnelCore(t, r)
 	host, port := echoHost(t)
 	open := core.open(1, host, port, nil)
@@ -533,5 +533,68 @@ func TestTunnelCarriesDatagrams(t *testing.T) {
 	r.tun.mu.Unlock()
 	if left != 0 {
 		t.Errorf("%d streams after the close", left)
+	}
+}
+
+// A forward's task is a tunnel as a socks one is: the same streams, its
+// limits its own params' (max_streams is its fifth).
+func TestForwardTask(t *testing.T) {
+	r := newRunner(description{Ops: []uint64{opPortForward}}, &schedule{interval: time.Second})
+	r.tun.resend = 100 * time.Millisecond
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opPortForward,
+		Args: protocol.Args{portForwardHost: "10.0.0.5", portForwardTo: int64(3389), portForwardMaxStreams: int64(1), portForwardTimeout: int64(2000)}})
+	t.Cleanup(func() { r.tun.closeAll() })
+	r.tun.mu.Lock()
+	tn := r.tun.byTask[string(socksTask)]
+	r.tun.mu.Unlock()
+	if tn == nil || tn.maxStreams != 1 || tn.timeout != 2*time.Second {
+		t.Fatalf("tunnel %+v", tn)
+	}
+	core := newTunnelCore(t, r)
+	host, port := echoHost(t)
+	st := core.open(1, host, port, randomBytes(64<<10))
+	core.until("the stream ends done", func() bool { return st.closed != nil })
+	if !bytes.Equal(st.got, st.send) {
+		t.Fatalf("%d bytes back of %d", len(st.got), len(st.send))
+	}
+	second := core.open(2, host, port, nil)
+	second.eof = false
+	third := core.open(3, host, port, nil)
+	core.until("both answered", func() bool { return second.reply != nil && third.reply != nil })
+	if second.reply.Result != protocol.TunnelOpen || third.reply.Result != protocol.TunnelNotAllowed {
+		t.Errorf("past its max_streams: %+v %+v", second.reply, third.reply)
+	}
+}
+
+// A tunnel task holds no place in the minion's max tasks: with a limit of
+// 1, a running SOCKS proxy still leaves room for a task, a shell none.
+func TestTunnelsHoldNoPlace(t *testing.T) {
+	one := uint64(1)
+	r := newRunner(description{Ops: []uint64{opSocksProxy, opShell}, MaxTasks: &one}, &schedule{interval: time.Second})
+	r.exec = func(ctx context.Context, tk *task, ti protocol.TaskItem) {
+		if tunnelCmd(ti.Cmd) {
+			r.socks(ctx, tk)
+			return
+		}
+		<-ctx.Done()
+		r.end(tk, false, nil, "cancelled")
+	}
+	room := func() uint64 {
+		t.Helper()
+		for _, it := range r.outgoing() {
+			if g, ok := it.(protocol.GetTasksItem); ok {
+				return *g.Max
+			}
+		}
+		return 0
+	}
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opSocksProxy})
+	t.Cleanup(func() { r.tun.closeAll() })
+	if n := room(); n != 1 {
+		t.Fatalf("beside a SOCKS proxy: room %d", n)
+	}
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: bytes.Repeat([]byte{0x51}, 16), Cmd: opShell})
+	if n := room(); n != 0 {
+		t.Fatalf("beside a shell: room %d", n)
 	}
 }

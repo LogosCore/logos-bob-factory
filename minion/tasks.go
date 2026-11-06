@@ -305,11 +305,13 @@ parts:
 }
 
 // roomLocked is how many more tasks the limit leaves room for: the limit
-// less the tasks whose end has not gone yet.
+// less the tasks whose end has not gone yet, but tunnels (a SOCKS proxy, a
+// port forward), which hold no place in it as long as they run: core counts
+// them out too.
 func (r *runner) roomLocked() uint64 {
 	running := uint64(0)
 	for _, t := range r.tasks {
-		if !t.sentEnd {
+		if !t.sentEnd && !tunnelCmd(t.cmd) {
 			running++
 		}
 	}
@@ -562,10 +564,11 @@ func (r *runner) start(ti protocol.TaskItem) {
 	if ti.Cmd == opExit {
 		r.exitID = ti.Task
 	}
-	if ti.Cmd == opSocks && slices.Contains(r.ops, opSocks) {
+	if tunnelCmd(ti.Cmd) && slices.Contains(r.ops, ti.Cmd) {
 		// Its tunnel now, before its ack goes: core opens streams in it
-		// once it has the ack.
-		r.tun.open(ctx, ti.Task, ti.Args)
+		// once it has the ack. A proxy and a forward are the same to the
+		// minion: core says each stream's destination.
+		r.tun.open(ctx, ti.Task, ti.Cmd, ti.Args)
 	}
 	r.mu.Unlock()
 	log.Printf("task %s: command %d %v", key[:8], ti.Cmd, ti.Args)
@@ -744,7 +747,7 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.volumes(t)
 	case opFeedback:
 		r.sendFeedback(t, ti.Args)
-	case opSocks:
+	case opSocksProxy, opPortForward:
 		r.socks(ctx, t)
 	case opExit:
 		r.exit(t)

@@ -151,14 +151,23 @@ func signal(ch chan struct{}) {
 	}
 }
 
-// socksArgs are a socks task's limits: how many streams at once, and how
-// long a connect may take.
-func socksArgs(args protocol.Args) (int, time.Duration) {
-	maxStreams, ok := protocol.ArgInt(args, socksMaxStreams)
+// tunnelCmd: a command of a tunnel action (its build's socks_proxy,
+// port_forward), whose task is a tunnel.
+func tunnelCmd(cmd uint64) bool { return cmd == opSocksProxy || cmd == opPortForward }
+
+// tunnelArgs are a tunnel task's limits, by its command's params (a socks
+// proxy's, a forward's): how many streams at once, and how long a connect
+// may take. Where its streams go is core's to say, in their tunnel items.
+func tunnelArgs(cmd uint64, args protocol.Args) (int, time.Duration) {
+	numMax, numTimeout := uint64(socksProxyMaxStreams), uint64(socksProxyTimeout)
+	if cmd == opPortForward {
+		numMax, numTimeout = portForwardMaxStreams, portForwardTimeout
+	}
+	maxStreams, ok := protocol.ArgInt(args, numMax)
 	if !ok || maxStreams <= 0 {
 		maxStreams = 256
 	}
-	timeout, ok := protocol.ArgDuration(args, socksTimeout)
+	timeout, ok := protocol.ArgDuration(args, numTimeout)
 	if !ok || timeout <= 0 {
 		timeout = 10 * time.Second
 	}
@@ -167,8 +176,8 @@ func socksArgs(args protocol.Args) (int, time.Duration) {
 
 // open makes the task's tunnel, as the task is taken: core opens streams in
 // it once it has the task's ack.
-func (ts *tunnels) open(ctx context.Context, task []byte, args protocol.Args) {
-	maxStreams, timeout := socksArgs(args)
+func (ts *tunnels) open(ctx context.Context, task []byte, cmd uint64, args protocol.Args) {
+	maxStreams, timeout := tunnelArgs(cmd, args)
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.byTask[string(task)] = &tunnel{task: task, ctx: ctx, maxStreams: maxStreams, timeout: timeout, streams: map[uint64]*tstream{}}
@@ -203,8 +212,9 @@ func (ts *tunnels) closeAll() {
 	}
 }
 
-// socks runs a tunnel task (its tunnel made as it was taken): streams come
-// and go in it until core cancels it, and close with it. It ends ok.
+// socks runs a tunnel task, a socks proxy's or a forward's (its tunnel made
+// as it was taken): streams come and go in it until core cancels it, and
+// close with it. It ends ok.
 func (r *runner) socks(ctx context.Context, t *task) {
 	<-ctx.Done()
 	n := r.tun.close(t.id)
