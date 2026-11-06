@@ -190,6 +190,8 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	// core's sealed session_closed, or the backstop, starts over (docs:
 	// "When an exchange fails").
 	tasks := newRunner(d, &sched)
+	// Its tunnels' connections go with the session.
+	defer tasks.tun.closeAll()
 	// Feedback reported meanwhile wakes this session's runner.
 	feedback.setWake(tasks.nudge)
 	defer feedback.setWake(nil)
@@ -420,14 +422,15 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		// pushes, and a failed exchange's retry.
 		if !tasks.pending() && (!tr.persistent() || n > 1) {
 			wait := sched.next()
-			if p := tasks.pollEvery(); p > 0 && p < wait {
+			p, polled := tasks.pollEvery()
+			if polled && p < wait {
 				wait = p
 			}
 			var due <-chan time.Time
 			if back != nil {
 				due = time.After(time.Until(back.at))
 			}
-			scheduled := !tr.persistent() || retrying || tasks.pollEvery() > 0
+			scheduled := !tr.persistent() || retrying || polled
 			if scheduled {
 				log.Printf("next check-in in %s", wait.Round(time.Millisecond))
 			} else {

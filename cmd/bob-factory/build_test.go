@@ -26,14 +26,15 @@ func TestBuildSchemaIsValid(t *testing.T) {
 	}
 }
 
-// The binary has every command; shell is one only the operator picks.
+// The binary has every command; shell and socks are ones only the
+// operator picks.
 func TestCommands(t *testing.T) {
 	target, _ := buildSchema.Target("linux-elf")
 	var ids []string
 	for _, c := range buildSchema.TargetCommands(target) {
 		ids = append(ids, c.ID)
 	}
-	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell switch volumes feedback" {
+	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell switch volumes feedback socks" {
 		t.Errorf("linux-elf: %s", got)
 	}
 }

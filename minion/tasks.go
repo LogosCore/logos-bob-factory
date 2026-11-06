@@ -90,9 +90,12 @@ type runner struct {
 	// message keeps within.
 	limit int
 	// poll is how soon core asked the minion to come back (a poll item:
-	// a stream of its may go on any moment); 0 for none. It holds until
-	// the next message goes.
-	poll time.Duration
+	// a stream of its may go on any moment, a tunnel's items), when polled
+	// (0: at once). It holds until the next message goes.
+	poll   time.Duration
+	polled bool
+	// tun are the session's tunnels (tunnel.go).
+	tun *tunnels
 	// helloAsked: core asked for a hello (rehello); hello makes it.
 	helloAsked bool
 	hello      func() protocol.HelloItem
@@ -125,8 +128,10 @@ func (r *runner) perMessageLocked() int {
 }
 
 func newRunner(d description, sched *schedule) *runner {
-	return &runner{greeting: d.Greeting, ops: d.Ops, sched: sched, seen: map[string]time.Time{}, wake: make(chan struct{}, 1),
+	r := &runner{greeting: d.Greeting, ops: d.Ops, sched: sched, seen: map[string]time.Time{}, wake: make(chan struct{}, 1),
 		switches: make(chan switchReq, 1), maxTasks: d.maxTasks()}
+	r.tun = newTunnels(r.nudge)
+	return r
 }
 
 // setPersistent says whether the connection in use stays open (a WebSocket,
@@ -167,7 +172,7 @@ func (r *runner) pending() bool {
 			return true
 		}
 	}
-	return false
+	return r.tun.pending()
 }
 
 // outgoing is the next message's items: the failed message's again, or
@@ -177,7 +182,7 @@ func (r *runner) outgoing() []any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// The wait core asked for was for this message.
-	r.poll = 0
+	r.poll, r.polled = 0, false
 	if len(r.inflight) > 0 {
 		return r.inflight
 	}
@@ -252,6 +257,15 @@ parts:
 			}
 		}
 	}
+	// The tunnels' items (tunnel.go): half the room left while a file
+	// goes too.
+	tunRoom := room
+	if slices.ContainsFunc(r.tasks, func(t *task) bool { return t.xfer.sending() }) {
+		tunRoom = room / 2
+	}
+	tun, used := r.tun.items(tunRoom, tunnelMaxItems)
+	items = append(items, tun...)
+	room = max(room-used, 0)
 	// A file's next chunk, one per message, in the room left.
 	for _, t := range r.tasks {
 		if !t.xfer.sending() || room == 0 {
@@ -391,8 +405,14 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 			var p protocol.PollItem
 			if protocol.UnmarshalCBOR(raw, &p) == nil && p.Validate() == nil {
 				r.mu.Lock()
-				r.poll = time.Duration(p.Within) * time.Millisecond
+				r.poll, r.polled = time.Duration(p.Within)*time.Millisecond, true
 				r.mu.Unlock()
+			}
+		case protocol.ItemTunnel, protocol.ItemTunnelData, protocol.ItemTunnelAck, protocol.ItemTunnelClose, protocol.ItemTunnelDatagram:
+			// A tunnel's stream: opened, its bytes, how far core has the
+			// host's, its end (tunnel.go).
+			if err := r.tun.take(raw); err != nil {
+				r.queueErr(protocol.ErrItemBadMessage, protocol.ItemName(protocol.ItemType(raw))+": "+err.Error(), i)
 			}
 		case protocol.ItemMaxTasks:
 			// How many tasks to run at once, from now: said back in the next
@@ -468,14 +488,20 @@ func (r *runner) acked(xfer []byte, next uint64, hold bool) {
 	}
 }
 
-// pollEvery is how soon to check in when core asked for sooner than the
-// schedule (a poll: a stream the minion holds may go on any moment, its
-// downloader or uploader there). Zero: the schedule. Over a persistent
-// connection core pushes instead, and asks for none.
-func (r *runner) pollEvery() time.Duration {
+// pollEvery is how soon to check in when sooner than the schedule: core
+// asked (a poll: a stream the minion holds may go on any moment, its
+// downloader or uploader there; a tunnel's items go), or a tunnel's stream
+// sends again unasked (from its ack, a probe), over a persistent connection
+// too. False: the schedule (over a persistent connection, none: core
+// pushes).
+func (r *runner) pollEvery() (time.Duration, bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.poll
+	p, ok := r.poll, r.polled
+	r.mu.Unlock()
+	if d, due := r.tun.due(); due && (!ok || d < p) {
+		p, ok = d, true
+	}
+	return p, ok
 }
 
 // refused ends a transfer core does not take, or does not send.
@@ -535,6 +561,11 @@ func (r *runner) start(ti protocol.TaskItem) {
 	r.tasks = append(r.tasks, t)
 	if ti.Cmd == opExit {
 		r.exitID = ti.Task
+	}
+	if ti.Cmd == opSocks && slices.Contains(r.ops, opSocks) {
+		// Its tunnel now, before its ack goes: core opens streams in it
+		// once it has the ack.
+		r.tun.open(ctx, ti.Task, ti.Args)
 	}
 	r.mu.Unlock()
 	log.Printf("task %s: command %d %v", key[:8], ti.Cmd, ti.Args)
@@ -713,6 +744,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.volumes(t)
 	case opFeedback:
 		r.sendFeedback(t, ti.Args)
+	case opSocks:
+		r.socks(ctx, t)
 	case opExit:
 		r.exit(t)
 	default:

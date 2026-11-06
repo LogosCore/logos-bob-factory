@@ -1,0 +1,41 @@
+//go:build windows
+
+package main
+
+import (
+	"errors"
+	"syscall"
+)
+
+// Why a connect failed, by Winsock's error (tunnel.go, dialResult): Go
+// gives the WSAE* numbers as they come, which syscall's Unix-like names do
+// not match on Windows.
+const (
+	wsaeNetDown     = 10050
+	wsaeNetUnreach  = 10051
+	wsaeTimedOut    = 10060
+	wsaeConnRefused = 10061
+	wsaeHostDown    = 10064
+	wsaeHostUnreach = 10065
+)
+
+func winsock(err error, codes ...syscall.Errno) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	for _, c := range codes {
+		if errno == c {
+			return true
+		}
+	}
+	return false
+}
+
+func refusedErr(err error) bool { return winsock(err, wsaeConnRefused) }
+
+func hostUnreachableErr(err error) bool { return winsock(err, wsaeHostUnreach, wsaeHostDown) }
+
+func netUnreachableErr(err error) bool { return winsock(err, wsaeNetUnreach, wsaeNetDown) }
+
+func timedOutErr(err error) bool { return winsock(err, wsaeTimedOut) }

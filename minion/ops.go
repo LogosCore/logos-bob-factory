@@ -20,6 +20,7 @@ const (
 	opSwitch         = 12
 	opVolumes        = 13
 	opFeedback       = 14
+	opSocks          = 15
 )
 
 // Params, by command.
@@ -58,4 +59,8 @@ const (
 
 	feedbackLevel   = 1
 	feedbackMessage = 2
+
+	socksPort       = 1
+	socksTimeout    = 2
+	socksMaxStreams = 3
 )

@@ -205,6 +205,19 @@ var buildSchema = protocol.BuildSchema{
 				{Key: "message", Num: 2, Type: protocol.FieldString, Label: "Message", Required: true, Order: 2},
 			},
 		},
+		{
+			ID: "socks", Op: 15, Label: "SOCKS proxy",
+			Description: "Opens a SOCKS proxy on one of core's operational ports: what a tool reaches through it, the minion connects to from its host. It runs until stopped.",
+			Action:      protocol.ActionTunnel,
+			Params: []protocol.FieldSpec{
+				{Key: "port", Num: 1, Type: protocol.FieldInt, Label: "Port", Default: 0, Min: 0, Max: 65535, Order: 1,
+					Description: "The operational port core listens on: 0 for any free one."},
+				{Key: "timeout", Num: 2, Type: protocol.FieldDuration, Label: "Connect timeout", Default: "10s", Order: 2,
+					Description: "How long the minion tries to connect to a destination."},
+				{Key: "max_streams", Num: 3, Type: protocol.FieldInt, Label: "Connections at once", Default: 256, Min: 1, Max: 4096, Order: 3,
+					Description: "How many of the tools' connections the proxy carries at once."},
+			},
+		},
 	},
 }
 

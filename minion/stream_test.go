@@ -51,7 +51,7 @@ func TestStream(t *testing.T) {
 	}
 	xfer := announce.Xfer
 	r.take(streamAck(t, xfer, 0, true), nil)
-	if r.pending() || r.pollEvery() != 0 {
+	if _, polled := r.pollEvery(); r.pending() || polled {
 		t.Fatal("held before it ran: something to send, or a short poll")
 	}
 
@@ -91,11 +91,11 @@ func TestStream(t *testing.T) {
 	poll, _ := protocol.MarshalCBOR(protocol.PollItem{T: protocol.ItemPoll, Within: 1000})
 	held.Items = append(held.Items, poll)
 	r.take(held, nil)
-	if r.pollEvery() != time.Second {
+	if p, polled := r.pollEvery(); !polled || p != time.Second {
 		t.Fatal("core's poll not taken")
 	}
 	r.outgoing()
-	if r.pollEvery() != 0 {
+	if _, polled := r.pollEvery(); polled {
 		t.Fatal("core's poll outlived the message it was for")
 	}
 	r.take(streamAck(t, xfer, off, false), nil)
