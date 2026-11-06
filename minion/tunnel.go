@@ -28,7 +28,11 @@ import (
 // probes a window shut that long with one byte past it, and keeps what
 // comes ahead of its next (messages crossing) until the bytes before it
 // come. Core speaks SOCKS to the operators' tools; the minion only
-// connects, relays and closes.
+// connects, relays and closes. A UDP association (a tunnel item that says
+// udp) is a UDP socket of the minion's: core's tunnel_datagram items go out
+// of it, each to the destination it names, and what comes back to it goes
+// to core with its source; as UDP is, no acks and no resending, and a
+// datagram that finds the queue full (udpQueue) is dropped.
 
 const (
 	// tunnelWindow is the room the minion gives core on a stream: what it
@@ -52,6 +56,10 @@ const (
 	tunnelItemSize = 64
 	// tunnelMaxItems is the most tunnel items one message carries.
 	tunnelMaxItems = 192
+	// udpQueue is the most of an association's datagrams the minion holds
+	// for core; udpRead one datagram's room.
+	udpQueue = 256 << 10
+	udpRead  = 64<<10 + 512
 )
 
 // tunnels are a session's tunnel tasks and their streams.
@@ -99,6 +107,14 @@ type tstream struct {
 	reply *protocol.TunnelReplyItem
 	gone  bool
 	done  chan struct{}
+
+	// A UDP association's: its socket, the datagrams it got for core (and
+	// their bytes), numbered from dseq; core's taken, by their numbers.
+	pc         net.PacketConn
+	dgrams     []protocol.TunnelDatagramItem
+	dgramBytes int
+	dseq       uint64
+	seen       replayWindow
 
 	// From core, toward the host: taken up to next (its eof counted), not
 	// yet written: in; ahead, what came past next.
@@ -229,10 +245,7 @@ func (ts *tunnels) take(raw cbor.RawMessage) error {
 		if err := readTunnelItem(raw, &d); err != nil {
 			return err
 		}
-		// No UDP association opens here yet: no such stream.
-		ts.mu.Lock()
-		ts.closeUnknown(d.Task, d.Stream)
-		ts.mu.Unlock()
+		ts.sendDatagram(d)
 	}
 	return nil
 }
@@ -292,12 +305,12 @@ func (ts *tunnels) openStream(it protocol.TunnelItem) {
 		t.replies = append(t.replies, protocol.TunnelReplyItem{T: protocol.ItemTunnelReply, Task: t.task, Stream: it.Stream, Result: result, Msg: msg})
 		ts.nudge()
 	}
-	switch {
-	case it.UDP:
-		refuse(protocol.TunnelFailed, "this minion carries no UDP yet")
-		return
-	case len(t.streams) >= t.maxStreams:
+	if len(t.streams) >= t.maxStreams {
 		refuse(protocol.TunnelNotAllowed, strconv.Itoa(t.maxStreams)+" streams open already")
+		return
+	}
+	if it.UDP {
+		ts.openUDP(t, it.Stream, refuse)
 		return
 	}
 	st := &tstream{t: t, id: it.Stream, done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1),
@@ -513,6 +526,9 @@ func (ts *tunnels) drop(st *tstream, reset bool) {
 	st.gone = true
 	close(st.done)
 	delete(st.t.streams, st.id)
+	if st.pc != nil {
+		_ = st.pc.Close()
+	}
 	if st.conn == nil {
 		return
 	}
@@ -667,13 +683,13 @@ func (ts *tunnels) items(room, most int) ([]any, int) {
 			t.replies = t.replies[1:]
 		}
 		for _, st := range t.sortedStreams() {
-			if st.conn != nil {
+			if st.conn != nil || st.pc != nil {
 				open = append(open, st)
 			}
 		}
 	}
 	for _, st := range open {
-		if st.ackDue && put(st.ackItem(), tunnelItemSize) {
+		if st.pc == nil && st.ackDue && put(st.ackItem(), tunnelItemSize) {
 			st.ackDue = false
 			st.ackedEnd = st.next + uint64(tunnelWindow-len(st.in))
 		}
@@ -687,6 +703,24 @@ func (ts *tunnels) items(room, most int) ([]any, int) {
 			moved = false
 			for i := range n {
 				st := open[(start+i)%n]
+				if st.pc != nil {
+					if len(st.dgrams) == 0 {
+						continue
+					}
+					d := st.dgrams[0]
+					size := len(d.Data) + len(d.Host) + tunnelItemSize
+					if !put(d, size) {
+						if len(out) == 0 && most > 0 {
+							// It fits no message: dropped, as UDP is.
+							st.takeDatagram()
+							continue
+						}
+						break rounds
+					}
+					st.takeDatagram()
+					moved = true
+					continue
+				}
 				d := st.dataItem(now, room-used-tunnelItemSize, ts.resend)
 				if d == nil {
 					continue
@@ -788,6 +822,9 @@ func (ts *tunnels) pending() bool {
 			return true
 		}
 		for _, st := range t.streams {
+			if st.pc != nil && len(st.dgrams) > 0 {
+				return true
+			}
 			if st.conn != nil && (st.ackDue || st.dataItem(now, protocol.MaxTunnelData, ts.resend) != nil) {
 				return true
 			}

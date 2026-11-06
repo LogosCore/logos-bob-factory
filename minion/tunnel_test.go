@@ -454,3 +454,84 @@ func TestTunnelProbesAndResends(t *testing.T) {
 		t.Fatalf("the eof alone: %+v", d)
 	}
 }
+
+// udpEchoHost is a UDP host that sends back what it gets.
+func udpEchoHost(t *testing.T) *net.UDPAddr {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	go func() {
+		buf := make([]byte, 64<<10)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = pc.WriteTo(buf[:n], from)
+		}
+	}()
+	return pc.LocalAddr().(*net.UDPAddr)
+}
+
+// A UDP association is a socket of the minion's: core's datagrams go out
+// of it to the destinations they name (one sent twice goes once), what
+// comes back goes to core with its source; core's close closes it.
+func TestTunnelCarriesDatagrams(t *testing.T) {
+	r := startSocks(t, nil)
+	echo := udpEchoHost(t)
+	r.take(coreSays(t, protocol.TunnelItem{T: protocol.ItemTunnel, Task: socksTask, Stream: 1, UDP: true}), nil)
+	var reply *protocol.TunnelReplyItem
+	deadline := time.Now().Add(5 * time.Second)
+	for reply == nil && time.Now().Before(deadline) {
+		items := r.outgoing()
+		r.delivered(items)
+		for _, it := range items {
+			if rep, ok := it.(protocol.TunnelReplyItem); ok {
+				reply = &rep
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if reply == nil || reply.Result != protocol.TunnelOpen || reply.Bound == "" {
+		t.Fatalf("reply %+v", reply)
+	}
+	dgram := func(seq uint64, data string) protocol.TunnelDatagramItem {
+		return protocol.TunnelDatagramItem{T: protocol.ItemTunnelDatagram, Task: socksTask, Stream: 1, Seq: seq, Host: "127.0.0.1",
+			Port: uint64(echo.Port), Data: []byte(data)}
+	}
+	r.take(coreSays(t, dgram(0, "one"), dgram(1, "two"), dgram(1, "two"), dgram(2, "three")), nil)
+	got := map[string]int{}
+	var settled time.Time
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && (settled.IsZero() || time.Since(settled) < 300*time.Millisecond) {
+		items := r.outgoing()
+		r.delivered(items)
+		for _, it := range items {
+			if d, ok := it.(protocol.TunnelDatagramItem); ok {
+				if d.Host != "127.0.0.1" || d.Port != uint64(echo.Port) {
+					t.Fatalf("from %s:%d", d.Host, d.Port)
+				}
+				got[string(d.Data)]++
+			}
+		}
+		if len(got) == 3 && settled.IsZero() {
+			settled = time.Now()
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	for _, p := range []string{"one", "two", "three"} {
+		if got[p] != 1 {
+			t.Errorf("%q came back %d times: %v", p, got[p], got)
+		}
+	}
+	r.take(coreSays(t, protocol.TunnelCloseItem{T: protocol.ItemTunnelClose, Task: socksTask, Stream: 1, Reason: protocol.TunnelCloseDone}), nil)
+	r.tun.mu.Lock()
+	left := len(r.tun.byTask[string(socksTask)].streams)
+	r.tun.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d streams after the close", left)
+	}
+}
