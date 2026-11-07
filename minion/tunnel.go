@@ -33,6 +33,18 @@ import (
 // of it, each to the destination it names, and what comes back to it goes
 // to core with its source; as UDP is, no acks and no resending, and a
 // datagram that finds the queue full (udpQueue) is dropped.
+//
+// A reverse port forward (op 17) goes the other way: the minion listens on
+// its host where the task's args say, tells core where (tunnel_listen), and
+// opens a stream for each connection that comes there: its tunnel item,
+// numbered by the minion, names who connected, and core, which connects it
+// to a destination the minion never learns, answers with tunnel_reply. The
+// connection waits, unread, for that answer: open, its bytes go both ways
+// as any stream's; not, or no answer within the task's timeout and
+// reverseSlack more, it is reset. A UDP one (its udp arg) listens for
+// datagrams (tunnel_udp.go): a stream for each address they come from, its
+// datagrams held until core answers, and ended (done) once it idled
+// udpIdle.
 
 const (
 	// tunnelWindow is the room the minion gives core on a stream: what it
@@ -60,6 +72,9 @@ const (
 	// for core; udpRead one datagram's room.
 	udpQueue = 256 << 10
 	udpRead  = 64<<10 + 512
+	// reverseSlack is how much longer than the task's timeout (core's
+	// connect) a connection to a reverse forward waits for core's answer.
+	reverseSlack = 30 * time.Second
 )
 
 // tunnels are a session's tunnel tasks and their streams.
@@ -72,13 +87,18 @@ type tunnels struct {
 	// its turn.
 	turn  int
 	nudge func()
-	// resend is tunnelResend, shorter in tests; dial connects a stream.
-	resend time.Duration
-	dial   func(ctx context.Context, address string, timeout time.Duration) (net.Conn, error)
+	// resend is tunnelResend, slack reverseSlack, udpIdle
+	// protocol.TunnelUDPIdle, each shorter in tests; dial connects a
+	// stream.
+	resend  time.Duration
+	slack   time.Duration
+	udpIdle time.Duration
+	dial    func(ctx context.Context, address string, timeout time.Duration) (net.Conn, error)
 }
 
 func newTunnels(nudge func()) *tunnels {
-	return &tunnels{byTask: map[string]*tunnel{}, nudge: nudge, resend: tunnelResend, dial: dialTCP}
+	return &tunnels{byTask: map[string]*tunnel{}, nudge: nudge, resend: tunnelResend, slack: reverseSlack, udpIdle: protocol.TunnelUDPIdle,
+		dial: dialTCP}
 }
 
 func dialTCP(ctx context.Context, address string, timeout time.Duration) (net.Conn, error) {
@@ -95,6 +115,19 @@ type tunnel struct {
 	streams    map[uint64]*tstream
 	replies    []protocol.TunnelReplyItem
 	closes     []protocol.TunnelCloseItem
+
+	// A reverse port forward's: its streams are the minion's, the last
+	// numbered last; its listener, the address it listens at, and whether
+	// core is still to be told it (a tunnel_listen).
+	reverse   bool
+	last      uint64
+	ln        net.Listener
+	bound     string
+	sayListen bool
+	// A UDP reverse forward's: its socket, and its streams by the address
+	// their datagrams come from.
+	pc       net.PacketConn
+	bySource map[string]*tstream
 }
 
 // tstream is one stream: the minion's connection to its destination.
@@ -107,6 +140,21 @@ type tstream struct {
 	reply *protocol.TunnelReplyItem
 	gone  bool
 	done  chan struct{}
+
+	// A stream the minion opens (a reverse forward's): the connection that
+	// came, held unread until core answers (then it is conn); its tunnel
+	// item while core has not, last sent at openSent.
+	accepted net.Conn
+	opening  *protocol.TunnelItem
+	openSent time.Time
+
+	// A UDP reverse forward's: the address its datagrams come from (its
+	// key in bySource), sent to core once it answered open (sourceOpen),
+	// and when a datagram last went either way.
+	source     *net.UDPAddr
+	sourceKey  string
+	sourceOpen bool
+	active     time.Time
 
 	// A UDP association's: its socket, the datagrams it got for core (and
 	// their bytes), numbered from dseq; core's taken, by their numbers.
@@ -152,16 +200,23 @@ func signal(ch chan struct{}) {
 }
 
 // tunnelCmd: a command of a tunnel action (its build's socks_proxy,
-// port_forward), whose task is a tunnel.
-func tunnelCmd(cmd uint64) bool { return cmd == opSocksProxy || cmd == opPortForward }
+// port_forward, reverse_port_forward), whose task is a tunnel.
+func tunnelCmd(cmd uint64) bool {
+	return cmd == opSocksProxy || cmd == opPortForward || cmd == opReversePortForward
+}
 
 // tunnelArgs are a tunnel task's limits, by its command's params (a socks
-// proxy's, a forward's): how many streams at once, and how long a connect
-// may take. Where its streams go is core's to say, in their tunnel items.
+// proxy's, a forward's, a reverse forward's): how many streams at once,
+// and how long a connect may take (a reverse forward's is core's, which a
+// connection waits on). Where its streams go is core's to say, in their
+// tunnel items (a reverse forward's, never).
 func tunnelArgs(cmd uint64, args protocol.Args) (int, time.Duration) {
 	numMax, numTimeout := uint64(socksProxyMaxStreams), uint64(socksProxyTimeout)
-	if cmd == opPortForward {
+	switch cmd {
+	case opPortForward:
 		numMax, numTimeout = portForwardMaxStreams, portForwardTimeout
+	case opReversePortForward:
+		numMax, numTimeout = reversePortForwardMaxStreams, reversePortForwardTimeout
 	}
 	maxStreams, ok := protocol.ArgInt(args, numMax)
 	if !ok || maxStreams <= 0 {
@@ -180,7 +235,8 @@ func (ts *tunnels) open(ctx context.Context, task []byte, cmd uint64, args proto
 	maxStreams, timeout := tunnelArgs(cmd, args)
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	ts.byTask[string(task)] = &tunnel{task: task, ctx: ctx, maxStreams: maxStreams, timeout: timeout, streams: map[uint64]*tstream{}}
+	ts.byTask[string(task)] = &tunnel{task: task, ctx: ctx, maxStreams: maxStreams, timeout: timeout, streams: map[uint64]*tstream{},
+		reverse: cmd == opReversePortForward}
 }
 
 // close ends the task's tunnel and its streams: how many it had.
@@ -192,6 +248,12 @@ func (ts *tunnels) close(task []byte) int {
 		return 0
 	}
 	delete(ts.byTask, string(task))
+	if t.ln != nil {
+		_ = t.ln.Close()
+	}
+	if t.pc != nil {
+		_ = t.pc.Close()
+	}
 	n := len(t.streams)
 	for _, st := range t.streams {
 		ts.drop(st, false)
@@ -222,6 +284,201 @@ func (r *runner) socks(ctx context.Context, t *task) {
 	r.end(t, true, nil, "")
 }
 
+// reverse runs a reverse port forward (its tunnel made as it was taken):
+// it listens where its args say (bind, 0.0.0.0 unless they say; listen;
+// udp), tells core where, and opens a stream for each connection that
+// comes (each address datagrams come from), until core cancels it, when it
+// ends ok, its listener and streams closed. A listener that does not open,
+// or fails, ends it failed, saying why.
+func (r *runner) reverse(ctx context.Context, t *task, args protocol.Args) {
+	bind, ok := protocol.ArgString(args, reversePortForwardBind)
+	if !ok || bind == "" {
+		bind = "0.0.0.0"
+	}
+	listen, _ := protocol.ArgInt(args, reversePortForwardListen)
+	udp, _ := protocol.ArgBool(args, reversePortForwardUDP)
+	err := protocol.TunnelListen(bind, listen)
+	address := net.JoinHostPort(bind, strconv.FormatInt(listen, 10))
+	switch {
+	case err != nil:
+	case udp:
+		var pc net.PacketConn
+		if pc, err = r.tun.listenUDP(t.id, address); err == nil {
+			stop := context.AfterFunc(ctx, func() { _ = pc.Close() })
+			log.Printf("task %x: listening at %s (udp)", t.id[:4], pc.LocalAddr())
+			err = r.tun.sources(t.id, pc)
+			stop()
+			_ = pc.Close()
+		}
+	default:
+		var ln net.Listener
+		if ln, err = r.tun.listen(t.id, address); err == nil {
+			stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+			log.Printf("task %x: listening at %s", t.id[:4], ln.Addr())
+			err = r.tun.accept(t.id, ln)
+			stop()
+			_ = ln.Close()
+		}
+	}
+	n := r.tun.close(t.id)
+	if ctx.Err() != nil {
+		log.Printf("task %x: the reverse forward closes, with %d stream(s)", t.id[:4], n)
+		r.end(t, true, nil, "")
+		return
+	}
+	log.Printf("task %x: the reverse forward ends: %v", t.id[:4], err)
+	r.end(t, false, nil, err.Error())
+}
+
+// listen opens a reverse forward's listener at address, and has core told
+// where it listens. An error says why it did not open.
+func (ts *tunnels) listen(task []byte, address string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	t := ts.byTask[string(task)]
+	if t == nil {
+		_ = ln.Close()
+		return nil, errors.New("the tunnel closed as it opened")
+	}
+	t.ln, t.bound, t.sayListen = ln, clip(ln.Addr().String(), protocol.MaxTunnelBound), true
+	ts.nudge()
+	return ln, nil
+}
+
+// accept takes the listener's connections, each a stream the minion opens,
+// until the listener closes (the task's end) or fails: why it stopped.
+// What the host runs short of (files, buffers) is waited out, as net/http
+// does.
+func (ts *tunnels) accept(task []byte, ln net.Listener) error {
+	ts.mu.Lock()
+	t := ts.byTask[string(task)]
+	ts.mu.Unlock()
+	if t == nil {
+		return errors.New("the tunnel is closed")
+	}
+	var wait time.Duration
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) || t.ctx.Err() != nil || !acceptAgain(err) {
+				return err
+			}
+			wait = min(max(2*wait, 5*time.Millisecond), time.Second)
+			select {
+			case <-t.ctx.Done():
+				return t.ctx.Err()
+			case <-time.After(wait):
+			}
+			continue
+		}
+		wait = 0
+		ts.opened(t, c)
+	}
+}
+
+// opened opens a stream for a connection that came to the listener: its
+// tunnel item names who connected. One past max_streams, or that comes as
+// the task ends, is reset; one core does not answer within the task's
+// timeout and reverseSlack more, too, and core is told.
+func (ts *tunnels) opened(t *tunnel, c net.Conn) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	host, port := peer(c)
+	if ts.byTask[string(t.task)] != t || len(t.streams) >= t.maxStreams || host == "" {
+		resetConn(c)
+		return
+	}
+	t.last++
+	st := &tstream{t: t, id: t.last, accepted: c, done: make(chan struct{}), inSignal: make(chan struct{}, 1),
+		outSignal: make(chan struct{}, 1), ackedEnd: tunnelWindow,
+		opening: &protocol.TunnelItem{T: protocol.ItemTunnel, Task: t.task, Stream: t.last, Host: host, Port: port}}
+	t.streams[st.id] = st
+	time.AfterFunc(t.timeout+ts.slack, func() { ts.gaveUp(st) })
+	ts.nudge()
+}
+
+// peer is the address that connected, as a tunnel item names it: "" when
+// it does not fit one.
+func peer(c net.Conn) (string, uint64) {
+	host, port, err := net.SplitHostPort(c.RemoteAddr().String())
+	if err != nil || host == "" || len(host) > protocol.MaxTunnelHost {
+		return "", 0
+	}
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || p == 0 {
+		return "", 0
+	}
+	return host, p
+}
+
+// gaveUp ends a stream the minion opened that core did not answer in time:
+// its connection reset, and core told, should it open it late.
+func (ts *tunnels) gaveUp(st *tstream) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if st.gone || st.opening == nil {
+		return
+	}
+	ts.reset(st)
+}
+
+// openDue: the stream's tunnel item goes now: never sent, or sent resend
+// ago with no answer.
+func (st *tstream) openDue(now time.Time, resend time.Duration) bool {
+	return st.opening != nil && (st.openSent.IsZero() || now.Sub(st.openSent) >= resend)
+}
+
+// takeReply: core connected a stream the minion opened, or could not.
+// Open, its bytes go both ways from now, within the room core gives; not,
+// its connection is reset. A reply again is nothing; one that says open
+// for a stream gone gets a close, so core drops its side too.
+func (ts *tunnels) takeReply(r protocol.TunnelReplyItem) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	st, _ := ts.find(r.Task, r.Stream)
+	if st == nil {
+		if r.Result == protocol.TunnelOpen {
+			ts.closeUnknown(r.Task, r.Stream)
+		}
+		return
+	}
+	if st.opening == nil {
+		return
+	}
+	if st.source != nil {
+		// A UDP stream: open, its datagrams held so far go, and every one
+		// after; not, they are dropped with it.
+		if r.Result != protocol.TunnelOpen {
+			ts.drop(st, false)
+			return
+		}
+		st.opening, st.sourceOpen, st.active = nil, true, time.Now()
+		ts.nudge()
+		return
+	}
+	if r.Result != protocol.TunnelOpen {
+		ts.drop(st, true)
+		return
+	}
+	st.conn, st.accepted, st.opening = st.accepted, nil, nil
+	st.limit = protocol.TunnelRoom(r.Room)
+	go ts.readHost(st)
+	go ts.writeHost(st)
+	ts.nudge()
+}
+
+// resetConn closes c as an abort (an RST), as a refused connection is.
+func resetConn(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0)
+	}
+	_ = c.Close()
+}
+
 // take reads one of core's tunnel items; an error says why it does not
 // read.
 func (ts *tunnels) take(raw cbor.RawMessage) error {
@@ -232,6 +489,12 @@ func (ts *tunnels) take(raw cbor.RawMessage) error {
 			return err
 		}
 		ts.openStream(it)
+	case protocol.ItemTunnelReply:
+		var r protocol.TunnelReplyItem
+		if err := readTunnelItem(raw, &r); err != nil {
+			return err
+		}
+		ts.takeReply(r)
 	case protocol.ItemTunnelData:
 		var d protocol.TunnelDataItem
 		if err := readTunnelItem(raw, &d); err != nil {
@@ -302,6 +565,13 @@ func (ts *tunnels) openStream(it protocol.TunnelItem) {
 	t := ts.byTask[string(it.Task)]
 	if t == nil {
 		ts.closeUnknown(it.Task, it.Stream)
+		return
+	}
+	if t.reverse {
+		// A reverse forward's streams are the minion's: core opens none.
+		t.closes = append(t.closes, protocol.TunnelCloseItem{T: protocol.ItemTunnelClose, Task: t.task, Stream: it.Stream,
+			Reason: protocol.TunnelCloseTaskEnded})
+		ts.nudge()
 		return
 	}
 	if st := t.streams[it.Stream]; st != nil {
@@ -539,6 +809,19 @@ func (ts *tunnels) drop(st *tstream, reset bool) {
 	if st.pc != nil {
 		_ = st.pc.Close()
 	}
+	if st.source != nil {
+		// A UDP stream: its address opens a new one next time; what it
+		// held goes with it.
+		if st.t.bySource[st.sourceKey] == st {
+			delete(st.t.bySource, st.sourceKey)
+		}
+		st.opening, st.sourceOpen, st.dgrams, st.dgramBytes = nil, false, nil, 0
+	}
+	if st.accepted != nil {
+		// Never answered, or not opened: reset, as a refused connection is.
+		resetConn(st.accepted)
+		st.accepted, st.opening = nil, nil
+	}
 	if st.conn == nil {
 		return
 	}
@@ -685,21 +968,30 @@ func (ts *tunnels) items(room, most int) ([]any, int) {
 		ts.closes = ts.closes[1:]
 	}
 	var open []*tstream
+	now := time.Now()
 	for _, t := range ts.sorted() {
 		for len(t.closes) > 0 && put(t.closes[0], tunnelItemSize) {
 			t.closes = t.closes[1:]
+		}
+		if t.sayListen && put(protocol.TunnelListenItem{T: protocol.ItemTunnelListen, Task: t.task, Bound: t.bound}, tunnelItemSize) {
+			t.sayListen = false
+		}
+		for _, st := range t.sortedStreams() {
+			if st.openDue(now, ts.resend) && put(*st.opening, len(st.opening.Host)+tunnelItemSize) {
+				st.openSent = now
+			}
 		}
 		for len(t.replies) > 0 && put(t.replies[0], tunnelItemSize) {
 			t.replies = t.replies[1:]
 		}
 		for _, st := range t.sortedStreams() {
-			if st.conn != nil || st.pc != nil {
+			if st.conn != nil || st.datagrams() {
 				open = append(open, st)
 			}
 		}
 	}
 	for _, st := range open {
-		if st.pc == nil && st.ackDue && put(st.ackItem(), tunnelItemSize) {
+		if !st.datagrams() && st.ackDue && put(st.ackItem(), tunnelItemSize) {
 			st.ackDue = false
 			st.ackedEnd = st.next + uint64(tunnelWindow-len(st.in))
 		}
@@ -707,13 +999,12 @@ func (ts *tunnels) items(room, most int) ([]any, int) {
 	if n := len(open); n > 0 {
 		start := ts.turn % n
 		ts.turn++
-		now := time.Now()
 	rounds:
 		for moved := true; moved; {
 			moved = false
 			for i := range n {
 				st := open[(start+i)%n]
-				if st.pc != nil {
+				if st.datagrams() {
 					if len(st.dgrams) == 0 {
 						continue
 					}
@@ -828,11 +1119,14 @@ func (ts *tunnels) pending() bool {
 	}
 	now := time.Now()
 	for _, t := range ts.byTask {
-		if len(t.closes) > 0 || len(t.replies) > 0 {
+		if len(t.closes) > 0 || len(t.replies) > 0 || t.sayListen {
 			return true
 		}
 		for _, st := range t.streams {
-			if st.pc != nil && len(st.dgrams) > 0 {
+			if st.openDue(now, ts.resend) {
+				return true
+			}
+			if st.datagrams() && len(st.dgrams) > 0 {
 				return true
 			}
 			if st.conn != nil && (st.ackDue || st.dataItem(now, protocol.MaxTunnelData, ts.resend) != nil) {
@@ -852,6 +1146,13 @@ func (ts *tunnels) due() (time.Duration, bool) {
 	var soonest time.Time
 	for _, t := range ts.byTask {
 		for _, st := range t.streams {
+			if st.opening != nil && !st.openSent.IsZero() {
+				// Its tunnel item again, while core has not answered.
+				if at := st.openSent.Add(ts.resend); soonest.IsZero() || at.Before(soonest) {
+					soonest = at
+				}
+				continue
+			}
 			if st.conn == nil || st.upDone {
 				continue
 			}

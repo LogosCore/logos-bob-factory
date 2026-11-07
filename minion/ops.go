@@ -22,6 +22,9 @@ const (
 	opFeedback       = 14
 	opSocksProxy     = 15
 	opPortForward    = 16
+	// opReversePortForward listens on the minion's host: its streams are
+	// the minion's (tunnel.go).
+	opReversePortForward = 17
 )
 
 // Params, by command.
@@ -72,4 +75,15 @@ const (
 	portForwardTo         = 3
 	portForwardTimeout    = 4
 	portForwardMaxStreams = 5
+
+	// A reverse forward's bind and listen are the minion's: where it
+	// listens. Its destination (host, to) is core's alone: those params
+	// carry no num, and never come.
+	reversePortForwardBind       = 1
+	reversePortForwardListen     = 2
+	reversePortForwardTimeout    = 3
+	reversePortForwardMaxStreams = 4
+	// reversePortForwardUDP: listen for datagrams, a stream for each
+	// address they come from.
+	reversePortForwardUDP = 5
 )

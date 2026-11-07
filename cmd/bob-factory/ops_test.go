@@ -8,6 +8,8 @@ import (
 	"go/types"
 	"strings"
 	"testing"
+
+	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
 // The minion dispatches by number (minion/ops.go): each command's op and
@@ -46,6 +48,14 @@ func TestOpsMatchTheMinion(t *testing.T) {
 			prefix = "uploadArg"
 		}
 		for _, p := range c.Params {
+			if protocol.IsCoreParam(c.Action, p.Key) {
+				// Core's alone (a reverse forward's destination): no num,
+				// never sent, so the minion has no constant for it.
+				if p.Num != 0 {
+					t.Errorf("command %q param %q is core's alone: num %d", c.ID, p.Key, p.Num)
+				}
+				continue
+			}
 			name := prefix + camel(p.Key, true)
 			seen[name] = true
 			if v, ok := value(name); !ok || v != int64(p.Num) {
@@ -62,13 +72,13 @@ func TestOpsMatchTheMinion(t *testing.T) {
 }
 
 // camel is snake_case in camel case: "max_folders" → "MaxFolders" (upper) or
-// "maxFolders"; "one_fs" → "OneFS".
+// "maxFolders"; "one_fs" → "OneFS", "udp" → "UDP".
 func camel(s string, upper bool) string {
 	var b strings.Builder
 	for i, w := range strings.Split(s, "_") {
 		switch {
-		case w == "fs":
-			w = "FS"
+		case w == "fs", w == "udp" && (i > 0 || upper):
+			w = strings.ToUpper(w)
 		case i > 0 || upper:
 			w = strings.ToUpper(w[:1]) + w[1:]
 		}

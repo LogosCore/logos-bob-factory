@@ -79,6 +79,15 @@ type tunnelCore struct {
 	round    int
 	// other: the minion's tunnel items about no stream core opened.
 	other []any
+	// opens are the streams the minion opened (a reverse forward's), each
+	// tunnel item as it came; answer, when set, is core's reply to each and
+	// the stream core then has (nil: none). listens are the minion's
+	// tunnel_listen items.
+	opens   []protocol.TunnelItem
+	answer  func(protocol.TunnelItem) (protocol.TunnelReplyItem, *coreStream)
+	listens []protocol.TunnelListenItem
+	// datagrams are the minion's tunnel_datagram items, as they came.
+	datagrams []protocol.TunnelDatagramItem
 }
 
 type coreStream struct {
@@ -116,8 +125,29 @@ func (c *tunnelCore) exchange() {
 	c.round++
 	items := c.r.outgoing()
 	c.r.delivered(items)
+	var replies []any
 	for _, it := range items {
+		if v, ok := it.(interface{ Validate() error }); ok && isTunnelItem(it) {
+			if err := v.Validate(); err != nil {
+				c.t.Errorf("the minion sends a %T core refuses: %v", it, err)
+			}
+		}
 		switch it := it.(type) {
+		case protocol.TunnelItem:
+			c.opens = append(c.opens, it)
+			if c.answer == nil {
+				continue
+			}
+			r, st := c.answer(it)
+			if st != nil && c.streams[it.Stream] == nil {
+				st.reply, st.limit = &r, protocol.TunnelRoom(it.Room)
+				c.streams[it.Stream] = st
+			}
+			replies = append(replies, r)
+		case protocol.TunnelListenItem:
+			c.listens = append(c.listens, it)
+		case protocol.TunnelDatagramItem:
+			c.datagrams = append(c.datagrams, it)
 		case protocol.TunnelReplyItem:
 			if st := c.streams[it.Stream]; st != nil {
 				st.reply = &it
@@ -190,7 +220,18 @@ func (c *tunnelCore) exchange() {
 	if c.lose != nil && c.lose(c.round) {
 		return
 	}
-	c.r.take(coreSays(c.t, append(rest, data...)...), items)
+	c.r.take(coreSays(c.t, append(append(replies, rest...), data...)...), items)
+}
+
+// isTunnelItem: one of the tunnel items, which core checks with the
+// protocol's Validate.
+func isTunnelItem(it any) bool {
+	switch it.(type) {
+	case protocol.TunnelItem, protocol.TunnelReplyItem, protocol.TunnelDataItem, protocol.TunnelAckItem, protocol.TunnelCloseItem,
+		protocol.TunnelDatagramItem, protocol.TunnelListenItem:
+		return true
+	}
+	return false
 }
 
 // until exchanges until done says so, failing after ten seconds.

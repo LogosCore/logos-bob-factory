@@ -39,3 +39,18 @@ func hostUnreachableErr(err error) bool { return winsock(err, wsaeHostUnreach, w
 func netUnreachableErr(err error) bool { return winsock(err, wsaeNetUnreach, wsaeNetDown) }
 
 func timedOutErr(err error) bool { return winsock(err, wsaeTimedOut) }
+
+// Why an accept failed, by Winsock's error.
+const (
+	wsaeConnAborted = 10053
+	wsaeConnReset   = 10054
+	wsaeMFile       = 10024
+	wsaeNoBufs      = 10055
+)
+
+// acceptAgain: an accept that failed for what the host ran short of
+// (sockets, buffers), or a connection that went before it was taken: the
+// listener goes on after a wait.
+func acceptAgain(err error) bool {
+	return winsock(err, wsaeMFile, wsaeNoBufs, wsaeConnAborted, wsaeConnReset)
+}

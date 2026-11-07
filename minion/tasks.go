@@ -410,9 +410,11 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 				r.poll, r.polled = time.Duration(p.Within)*time.Millisecond, true
 				r.mu.Unlock()
 			}
-		case protocol.ItemTunnel, protocol.ItemTunnelData, protocol.ItemTunnelAck, protocol.ItemTunnelClose, protocol.ItemTunnelDatagram:
-			// A tunnel's stream: opened, its bytes, how far core has the
-			// host's, its end (tunnel.go).
+		case protocol.ItemTunnel, protocol.ItemTunnelReply, protocol.ItemTunnelData, protocol.ItemTunnelAck, protocol.ItemTunnelClose,
+			protocol.ItemTunnelDatagram:
+			// A tunnel's stream: opened (by core, or core's answer to one
+			// the minion opened), its bytes, how far core has the host's,
+			// its end (tunnel.go).
 			if err := r.tun.take(raw); err != nil {
 				r.queueErr(protocol.ErrItemBadMessage, protocol.ItemName(protocol.ItemType(raw))+": "+err.Error(), i)
 			}
@@ -567,7 +569,8 @@ func (r *runner) start(ti protocol.TaskItem) {
 	if tunnelCmd(ti.Cmd) && slices.Contains(r.ops, ti.Cmd) {
 		// Its tunnel now, before its ack goes: core opens streams in it
 		// once it has the ack. A proxy and a forward are the same to the
-		// minion: core says each stream's destination.
+		// minion: core says each stream's destination. A reverse forward's
+		// streams are the minion's, opened once it listens.
 		r.tun.open(ctx, ti.Task, ti.Cmd, ti.Args)
 	}
 	r.mu.Unlock()
@@ -749,6 +752,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.sendFeedback(t, ti.Args)
 	case opSocksProxy, opPortForward:
 		r.socks(ctx, t)
+	case opReversePortForward:
+		r.reverse(ctx, t, ti.Args)
 	case opExit:
 		r.exit(t)
 	default:
