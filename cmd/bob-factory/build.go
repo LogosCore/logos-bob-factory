@@ -82,7 +82,8 @@ var buildSchema = protocol.BuildSchema{
 			ID: "linux-elf", Label: "Linux binary", Format: "elf", Platforms: []string{"linux/amd64", "linux/386"},
 			Description: "A static Linux binary that prints the dummy minion's JSON description, baked in when it is compiled.",
 			// Linux has no named pipes: its tunnels open the rest.
-			Opens: []string{protocol.OpenTCP, protocol.OpenUDP, protocol.OpenUnix, protocol.OpenSource, protocol.OpenTLS},
+			Opens: []string{protocol.OpenTCP, protocol.OpenUDP, protocol.OpenUnix, protocol.OpenSource, protocol.OpenTLS, protocol.OpenProcess,
+				protocol.OpenAccept},
 		},
 		{
 			ID: "windows-exe", Label: "Windows executable", Format: "exe",
@@ -209,12 +210,14 @@ var buildSchema = protocol.BuildSchema{
 		},
 		{
 			ID: "tunnel", Op: 15, Label: "Tunnel",
-			Description: "Opens a tunnel through the minion's host on one of core's operational ports: a SOCKS proxy, an HTTP proxy or a port forward, as its front says. Each connection a tool makes through it, the minion makes from its host. It runs until stopped.",
+			Description: "Opens a tunnel through the minion's host on one of core's operational ports: a SOCKS proxy, an HTTP proxy, a port forward or a terminal, as its front says. Each connection a tool makes through it, the minion makes from its host; a terminal's, a shell (or the program it says) on the host. It runs until stopped.",
 			Action:      protocol.ActionTunnel,
 			// TCP connections (from a source address, TLS on top), UDP
-			// associations (SOCKS UDP ASSOCIATE), unix sockets, and named
-			// pipes (Windows' alone: its target says).
-			Opens: []string{protocol.OpenTCP, protocol.OpenUDP, protocol.OpenUnix, protocol.OpenPipe, protocol.OpenSource, protocol.OpenTLS},
+			// associations (SOCKS UDP ASSOCIATE), unix sockets, named pipes
+			// (Windows' alone: its target says), processes (the terminal
+			// front: a PTY, a ConPTY, else pipes) and accepts (SOCKS BIND).
+			Opens: []string{protocol.OpenTCP, protocol.OpenUDP, protocol.OpenUnix, protocol.OpenPipe, protocol.OpenSource, protocol.OpenTLS,
+				protocol.OpenProcess, protocol.OpenAccept},
 			// Core adds the front, the port, a forward's destination and the
 			// bandwidth cap (protocol.TunnelCoreParams): no num, never sent.
 			Params: []protocol.FieldSpec{

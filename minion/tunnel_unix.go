@@ -32,3 +32,6 @@ func acceptAgain(err error) bool {
 	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.ENOBUFS) ||
 		errors.Is(err, syscall.ENOMEM) || errors.Is(err, syscall.ECONNABORTED)
 }
+
+// inUseErr: an accept's address is taken.
+func inUseErr(err error) bool { return errors.Is(err, syscall.EADDRINUSE) }

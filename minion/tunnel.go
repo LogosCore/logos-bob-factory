@@ -98,15 +98,16 @@ type tunnels struct {
 	// resend is tunnelResend, slack reverseSlack, udpIdle
 	// protocol.TunnelUDPIdle, each shorter in tests; dial connects a
 	// stream.
-	resend  time.Duration
-	slack   time.Duration
-	udpIdle time.Duration
-	dial    func(ctx context.Context, address string, timeout time.Duration) (net.Conn, error)
+	resend     time.Duration
+	slack      time.Duration
+	udpIdle    time.Duration
+	acceptWait time.Duration
+	dial       func(ctx context.Context, address string, timeout time.Duration) (net.Conn, error)
 }
 
 func newTunnels(nudge func()) *tunnels {
 	return &tunnels{byTask: map[string]*tunnel{}, nudge: nudge, resend: tunnelResend, slack: reverseSlack, udpIdle: protocol.TunnelUDPIdle,
-		dial: dialTCP}
+		acceptWait: protocol.TunnelAcceptWait, dial: dialTCP}
 }
 
 func dialTCP(ctx context.Context, address string, timeout time.Duration) (net.Conn, error) {
@@ -163,6 +164,20 @@ type tstream struct {
 	sourceKey  string
 	sourceOpen bool
 	active     time.Time
+
+	// A process's (kind process): conn as a process. An accept's (kind
+	// accept): its listener, until who came (then conn is theirs).
+	proc *proc
+	ln   net.Listener
+
+	// Its tunnel_ctl items (tunnel_ctl.go): toward core, ctlOut from
+	// ctlBase (the next core's ack has not covered), sent up to ctlSent,
+	// last at ctlSentAt; from core, ctlIn, the next the minion takes.
+	ctlOut    []protocol.TunnelCtlItem
+	ctlBase   uint64
+	ctlSent   uint64
+	ctlSentAt time.Time
+	ctlIn     uint64
 
 	// A UDP association's: its socket, the datagrams it got for core (and
 	// their bytes), numbered from dseq; core's taken, by their numbers.
@@ -524,6 +539,12 @@ func (ts *tunnels) take(raw cbor.RawMessage) error {
 			return err
 		}
 		ts.sendDatagram(d)
+	case protocol.ItemTunnelCtl:
+		var c protocol.TunnelCtlItem
+		if err := readTunnelItem(raw, &c); err != nil {
+			return err
+		}
+		ts.takeCtl(c)
 	}
 	return nil
 }
@@ -608,7 +629,14 @@ func (ts *tunnels) openStream(it protocol.TunnelItem, why error) {
 	st := &tstream{t: t, id: it.Stream, done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1),
 		limit: protocol.TunnelRoom(it.Room), ackedEnd: tunnelWindow}
 	t.streams[it.Stream] = st
-	go ts.connect(st, it)
+	switch it.Kind {
+	case protocol.TunnelKindProcess:
+		go ts.startProc(st, it)
+	case protocol.TunnelKindAccept:
+		go ts.startAccept(st, it)
+	default:
+		go ts.connect(st, it)
+	}
 }
 
 // openConn makes a stream's connection as its open says, within timeout: a
@@ -851,7 +879,8 @@ func (ts *tunnels) reset(st *tstream) {
 // doneIfOver ends the stream once both directions ended and each side has
 // the other's eof, telling core.
 func (ts *tunnels) doneIfOver(st *tstream) {
-	if st.gone || !st.upDone || !st.shut {
+	if st.gone || !st.upDone || !st.shut || len(st.ctlOut) > 0 {
+		// Done once its ctls are acked too: a process's exit.
 		return
 	}
 	st.t.closes = append(st.t.closes, protocol.TunnelCloseItem{T: protocol.ItemTunnelClose, Task: st.t.task, Stream: st.id, Reason: protocol.TunnelCloseDone})
@@ -877,6 +906,11 @@ func (ts *tunnels) drop(st *tstream, reset bool) {
 			delete(st.t.bySource, st.sourceKey)
 		}
 		st.opening, st.sourceOpen, st.dgrams, st.dgramBytes = nil, false, nil, 0
+	}
+	if st.ln != nil {
+		// An accept no one came to.
+		_ = st.ln.Close()
+		st.ln = nil
 	}
 	if st.accepted != nil {
 		// Never answered, or not opened: reset, as a refused connection is.
@@ -966,6 +1000,11 @@ func (ts *tunnels) takeAck(a protocol.TunnelAckItem) {
 		ts.closeUnknown(a.Task, a.Stream)
 		return
 	}
+	if st.ctlAcked(a.Ctl) && st.upDone {
+		// Its last ctl acked: it may be over.
+		ts.doneIfOver(st)
+		return
+	}
 	end := st.base + uint64(len(st.out))
 	if st.conn == nil || st.upDone || a.Next < st.base || a.Next > end+1 || (a.Next == end+1 && !st.eofOut) {
 		return
@@ -1044,6 +1083,11 @@ func (ts *tunnels) items(room, most int) ([]any, int) {
 		}
 		for len(t.replies) > 0 && put(t.replies[0], tunnelItemSize) {
 			t.replies = t.replies[1:]
+		}
+		// Ctls after the replies (a stream's open first), before any data:
+		// a process's exit before its eof.
+		for _, st := range t.sortedStreams() {
+			st.putCtls(put, now, ts.resend)
 		}
 		for _, st := range t.sortedStreams() {
 			if st.conn != nil || st.datagrams() {
@@ -1128,7 +1172,7 @@ func (t *tunnel) sortedStreams() []*tstream {
 
 func (st *tstream) ackItem() protocol.TunnelAckItem {
 	room := uint64(tunnelWindow - len(st.in))
-	return protocol.TunnelAckItem{T: protocol.ItemTunnelAck, Task: st.t.task, Stream: st.id, Next: st.next, Room: &room}
+	return protocol.TunnelAckItem{T: protocol.ItemTunnelAck, Task: st.t.task, Stream: st.id, Next: st.next, Room: &room, Ctl: st.ctlIn}
 }
 
 // dataItem is the stream's next tunnel_data in room bytes: what was not
@@ -1184,7 +1228,7 @@ func (ts *tunnels) pending() bool {
 			return true
 		}
 		for _, st := range t.streams {
-			if st.openDue(now, ts.resend) {
+			if st.openDue(now, ts.resend) || st.ctlDue(now, ts.resend) {
 				return true
 			}
 			if st.datagrams() && len(st.dgrams) > 0 {
@@ -1207,6 +1251,12 @@ func (ts *tunnels) due() (time.Duration, bool) {
 	var soonest time.Time
 	for _, t := range ts.byTask {
 		for _, st := range t.streams {
+			if len(st.ctlOut) > 0 && st.ctlSent > st.ctlBase {
+				// Its ctls again, while core has not acked them.
+				if at := st.ctlSentAt.Add(ts.resend); soonest.IsZero() || at.Before(soonest) {
+					soonest = at
+				}
+			}
 			if st.opening != nil && !st.openSent.IsZero() {
 				// Its tunnel item again, while core has not answered.
 				if at := st.openSent.Add(ts.resend); soonest.IsZero() || at.Before(soonest) {

@@ -65,3 +65,6 @@ const (
 func acceptAgain(err error) bool {
 	return winsock(err, wsaeMFile, wsaeNoBufs, wsaeConnAborted, wsaeConnReset)
 }
+
+// inUseErr: an accept's address is taken (WSAEADDRINUSE).
+func inUseErr(err error) bool { return winsock(err, 10048) }

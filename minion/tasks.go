@@ -411,10 +411,11 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 				r.mu.Unlock()
 			}
 		case protocol.ItemTunnel, protocol.ItemTunnelReply, protocol.ItemTunnelData, protocol.ItemTunnelAck, protocol.ItemTunnelClose,
-			protocol.ItemTunnelDatagram:
+			protocol.ItemTunnelDatagram, protocol.ItemTunnelCtl:
 			// A tunnel's stream: opened (by core, or core's answer to one
 			// the minion opened), its bytes, how far core has the host's,
-			// its end (tunnel.go).
+			// its controls (a terminal's size, a signal), its end
+			// (tunnel.go).
 			if err := r.tun.take(raw); err != nil {
 				r.queueErr(protocol.ErrItemBadMessage, protocol.ItemName(protocol.ItemType(raw))+": "+err.Error(), i)
 			}

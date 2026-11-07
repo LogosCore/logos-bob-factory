@@ -14,3 +14,5 @@ func deniedErr(error) bool          { return false }
 // acceptAgain: no host errors to tell apart here: an accept that fails ends
 // the listener.
 func acceptAgain(error) bool { return false }
+
+func inUseErr(error) bool { return false }

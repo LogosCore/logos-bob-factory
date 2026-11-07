@@ -107,6 +107,11 @@ type coreStream struct {
 	ackDue bool
 	reply  *protocol.TunnelReplyItem
 	closed *protocol.TunnelCloseItem
+	// The minion's ctls core took, in order (ctlIn the next), and how
+	// many of them it took again (dup).
+	ctls  []protocol.TunnelCtlItem
+	ctlIn uint64
+	dup   int
 }
 
 func newTunnelCore(t *testing.T, r *runner) *tunnelCore {
@@ -176,6 +181,20 @@ func (c *tunnelCore) exchange() {
 				st.acked = it.Next
 				st.limit = max(st.limit, it.Next+protocol.TunnelRoom(it.Room))
 			}
+		case protocol.TunnelCtlItem:
+			st := c.streams[it.Stream]
+			if st == nil {
+				c.other = append(c.other, it)
+				continue
+			}
+			st.ackDue = true
+			switch {
+			case it.Seq == st.ctlIn:
+				st.ctls = append(st.ctls, it)
+				st.ctlIn++
+			case it.Seq < st.ctlIn:
+				st.dup++
+			}
 		case protocol.TunnelCloseItem:
 			if st := c.streams[it.Stream]; st != nil {
 				st.closed = &it
@@ -195,7 +214,7 @@ func (c *tunnelCore) exchange() {
 				next++
 			}
 			room := uint64(protocol.DefaultTunnelRoom)
-			rest = append(rest, protocol.TunnelAckItem{T: protocol.ItemTunnelAck, Task: socksTask, Stream: id, Next: next, Room: &room})
+			rest = append(rest, protocol.TunnelAckItem{T: protocol.ItemTunnelAck, Task: socksTask, Stream: id, Next: next, Room: &room, Ctl: st.ctlIn})
 			st.ackDue = false
 		}
 		end := uint64(len(st.send))
@@ -230,7 +249,7 @@ func (c *tunnelCore) exchange() {
 func isTunnelItem(it any) bool {
 	switch it.(type) {
 	case protocol.TunnelItem, protocol.TunnelReplyItem, protocol.TunnelDataItem, protocol.TunnelAckItem, protocol.TunnelCloseItem,
-		protocol.TunnelDatagramItem, protocol.TunnelListenItem:
+		protocol.TunnelDatagramItem, protocol.TunnelListenItem, protocol.TunnelCtlItem:
 		return true
 	}
 	return false
