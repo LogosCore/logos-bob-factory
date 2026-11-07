@@ -49,7 +49,7 @@ func TestOpsMatchTheMinion(t *testing.T) {
 		}
 		for _, p := range c.Params {
 			if protocol.IsCoreParam(c.Action, p.Key) {
-				// Core's alone (a reverse forward's destination): no num,
+				// Core's alone (a tunnel's front and destination): no num,
 				// never sent, so the minion has no constant for it.
 				if p.Num != 0 {
 					t.Errorf("command %q param %q is core's alone: num %d", c.ID, p.Key, p.Num)

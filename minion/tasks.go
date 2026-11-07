@@ -750,9 +750,9 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.volumes(t)
 	case opFeedback:
 		r.sendFeedback(t, ti.Args)
-	case opSocksProxy, opPortForward:
-		r.socks(ctx, t)
-	case opReversePortForward:
+	case opTunnel:
+		r.runTunnel(ctx, t)
+	case opReverseTunnel:
 		r.reverse(ctx, t, ti.Args)
 	case opExit:
 		r.exit(t)

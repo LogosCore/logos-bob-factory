@@ -26,15 +26,15 @@ func TestBuildSchemaIsValid(t *testing.T) {
 	}
 }
 
-// The binary has every command; shell and the tunnels (socks_proxy,
-// port_forward, reverse_port_forward) are ones only the operator picks.
+// The binary has every command; shell and the tunnels (tunnel,
+// reverse_tunnel) are ones only the operator picks.
 func TestCommands(t *testing.T) {
 	target, _ := buildSchema.Target("linux-elf")
 	var ids []string
 	for _, c := range buildSchema.TargetCommands(target) {
 		ids = append(ids, c.ID)
 	}
-	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell switch volumes feedback socks_proxy port_forward reverse_port_forward" {
+	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell switch volumes feedback tunnel reverse_tunnel" {
 		t.Errorf("linux-elf: %s", got)
 	}
 }

@@ -16,7 +16,7 @@ func startReverseUDP(t *testing.T, args protocol.Args) *runner {
 	if args == nil {
 		args = protocol.Args{}
 	}
-	args[reversePortForwardUDP] = true
+	args[reverseTunnelUDP] = true
 	return startReverse(t, args)
 }
 
@@ -122,7 +122,7 @@ func TestReverseUDPRelays(t *testing.T) {
 // Each address is a stream of its own; past max_streams, a new address's
 // datagrams are dropped, with no stream for it.
 func TestReverseUDPSources(t *testing.T) {
-	r := startReverseUDP(t, protocol.Args{reversePortForwardMaxStreams: int64(2)})
+	r := startReverseUDP(t, protocol.Args{reverseTunnelMaxStreams: int64(2)})
 	core := newTunnelCore(t, r)
 	core.answer = answerUDP(protocol.TunnelOpen)
 	a, to := udpClient(t, core)
@@ -175,10 +175,10 @@ func TestReverseUDPRefused(t *testing.T) {
 // A stream with no datagram either way for udpIdle ends done, and core is
 // told; the address's next datagram opens a new stream.
 func TestReverseUDPIdle(t *testing.T) {
-	r := newRunner(description{Ops: []uint64{opReversePortForward}}, &schedule{interval: time.Second})
+	r := newRunner(description{Ops: []uint64{opReverseTunnel}}, &schedule{interval: time.Second})
 	r.tun.resend, r.tun.udpIdle = 100*time.Millisecond, 200*time.Millisecond
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opReversePortForward,
-		Args: protocol.Args{reversePortForwardBind: "127.0.0.1", reversePortForwardListen: int64(0), reversePortForwardUDP: true}})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opReverseTunnel,
+		Args: protocol.Args{reverseTunnelBind: "127.0.0.1", reverseTunnelListen: int64(0), reverseTunnelUDP: true}})
 	t.Cleanup(func() { r.tun.closeAll() })
 	core := newTunnelCore(t, r)
 	core.answer = answerUDP(protocol.TunnelOpen)
@@ -222,7 +222,7 @@ func TestReverseUDPCancelAndListenFails(t *testing.T) {
 	defer func() { _ = again.Close() }()
 
 	taken := again.LocalAddr().(*net.UDPAddr)
-	failed := startReverseUDP(t, protocol.Args{reversePortForwardListen: int64(taken.Port)})
+	failed := startReverseUDP(t, protocol.Args{reverseTunnelListen: int64(taken.Port)})
 	end := waitEnd(t, failed, 5*time.Second)
 	if end.ok || !strings.Contains(end.err, "listen udp") {
 		t.Errorf("ended %+v", end)

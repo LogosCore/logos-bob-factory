@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
@@ -58,9 +59,9 @@ var socksTask = bytes.Repeat([]byte{0x50}, 16)
 // startSocks is a runner running a socks task, its resends quick.
 func startSocks(t *testing.T, args protocol.Args) *runner {
 	t.Helper()
-	r := newRunner(description{Ops: []uint64{opSocksProxy}}, &schedule{interval: time.Second})
+	r := newRunner(description{Ops: []uint64{opTunnel}}, &schedule{interval: time.Second})
 	r.tun.resend = 100 * time.Millisecond
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opSocksProxy, Args: args})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opTunnel, Args: args})
 	t.Cleanup(func() { r.tun.closeAll() })
 	return r
 }
@@ -318,7 +319,7 @@ func TestTunnelTakesCoresDataAhead(t *testing.T) {
 // says; past max_streams core is told not allowed; asked again for a
 // stream it has, the minion answers again.
 func TestTunnelOpening(t *testing.T) {
-	r := startSocks(t, protocol.Args{socksProxyMaxStreams: int64(1)})
+	r := startSocks(t, protocol.Args{tunnelMaxStreams: int64(1)})
 	core := newTunnelCore(t, r)
 	host, port := echoHost(t)
 	open := core.open(1, host, port, nil)
@@ -577,14 +578,10 @@ func TestTunnelCarriesDatagrams(t *testing.T) {
 	}
 }
 
-// A forward's task is a tunnel as a socks one is: the same streams, its
-// limits its own params' (max_streams is its fifth).
-func TestForwardTask(t *testing.T) {
-	r := newRunner(description{Ops: []uint64{opPortForward}}, &schedule{interval: time.Second})
-	r.tun.resend = 100 * time.Millisecond
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opPortForward,
-		Args: protocol.Args{portForwardHost: "10.0.0.5", portForwardTo: int64(3389), portForwardMaxStreams: int64(1), portForwardTimeout: int64(2000)}})
-	t.Cleanup(func() { r.tun.closeAll() })
+// A tunnel task's limits are its own params' (max_streams its third,
+// timeout its second), whatever front core puts before it.
+func TestTunnelLimits(t *testing.T) {
+	r := startSocks(t, protocol.Args{tunnelMaxStreams: int64(1), tunnelTimeout: int64(2000)})
 	r.tun.mu.Lock()
 	tn := r.tun.byTask[string(socksTask)]
 	r.tun.mu.Unlock()
@@ -607,14 +604,69 @@ func TestForwardTask(t *testing.T) {
 	}
 }
 
+// An open the minion does not take as it is, a later version's (a key it
+// does not know) or one that does not read though its task and stream do,
+// is answered unsupported at once and connects nowhere; one with no task
+// to answer by is an err, as any item that does not read.
+func TestTunnelUnsupported(t *testing.T) {
+	r := startSocks(t, nil)
+	dialed := 0
+	r.tun.dial = func(ctx context.Context, address string, timeout time.Duration) (net.Conn, error) {
+		dialed++
+		return nil, errors.New("no connect expected")
+	}
+	raw := func(m map[int]any) cbor.RawMessage {
+		t.Helper()
+		b, err := protocol.MarshalCBOR(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	msg := protocol.CoreMessage{Items: []cbor.RawMessage{
+		// TLS to it, from a source address: a later version's open.
+		raw(map[int]any{0: protocol.ItemTunnel, 1: socksTask, 2: 1, 3: "10.0.0.5", 4: 443, 7: true, 8: "10.0.0.99"}),
+		// A path, no host: a later kind of open.
+		raw(map[int]any{0: protocol.ItemTunnel, 1: socksTask, 2: 2, 9: "/var/run/docker.sock"}),
+		// No task to answer by.
+		raw(map[int]any{0: protocol.ItemTunnel, 2: 3, 3: "10.0.0.5", 4: 445}),
+	}}
+	r.take(msg, nil)
+	replies, errs := map[uint64]protocol.TunnelReplyItem{}, 0
+	for _, it := range r.outgoing() {
+		switch it := it.(type) {
+		case protocol.TunnelReplyItem:
+			replies[it.Stream] = it
+		case protocol.ErrItem:
+			if it.Code == protocol.ErrItemBadMessage && it.Item != nil && *it.Item == 2 {
+				errs++
+			}
+		}
+	}
+	for _, id := range []uint64{1, 2} {
+		if rep, ok := replies[id]; !ok || rep.Result != protocol.TunnelUnsupported || rep.Msg == "" {
+			t.Errorf("stream %d: %+v", id, rep)
+		}
+	}
+	if errs != 1 || dialed != 0 {
+		t.Errorf("errs %d, dialed %d", errs, dialed)
+	}
+	r.tun.mu.Lock()
+	open := len(r.tun.byTask[string(socksTask)].streams)
+	r.tun.mu.Unlock()
+	if open != 0 {
+		t.Errorf("%d streams opened", open)
+	}
+}
+
 // A tunnel task holds no place in the minion's max tasks: with a limit of
 // 1, a running SOCKS proxy still leaves room for a task, a shell none.
 func TestTunnelsHoldNoPlace(t *testing.T) {
 	one := uint64(1)
-	r := newRunner(description{Ops: []uint64{opSocksProxy, opShell}, MaxTasks: &one}, &schedule{interval: time.Second})
+	r := newRunner(description{Ops: []uint64{opTunnel, opShell}, MaxTasks: &one}, &schedule{interval: time.Second})
 	r.exec = func(ctx context.Context, tk *task, ti protocol.TaskItem) {
 		if tunnelCmd(ti.Cmd) {
-			r.socks(ctx, tk)
+			r.runTunnel(ctx, tk)
 			return
 		}
 		<-ctx.Done()
@@ -629,7 +681,7 @@ func TestTunnelsHoldNoPlace(t *testing.T) {
 		}
 		return 0
 	}
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opSocksProxy})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opTunnel})
 	t.Cleanup(func() { r.tun.closeAll() })
 	if n := room(); n != 1 {
 		t.Fatalf("beside a SOCKS proxy: room %d", n)

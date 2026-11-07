@@ -20,11 +20,13 @@ const (
 	opSwitch         = 12
 	opVolumes        = 13
 	opFeedback       = 14
-	opSocksProxy     = 15
-	opPortForward    = 16
-	// opReversePortForward listens on the minion's host: its streams are
-	// the minion's (tunnel.go).
-	opReversePortForward = 17
+	// opTunnel: core opens streams through the minion's host (its front,
+	// SOCKS, HTTP or a forward, is core's alone). 16 was a port forward's
+	// before the fronts were core's: never used again.
+	opTunnel = 15
+	// opReverseTunnel listens on the minion's host: its streams are the
+	// minion's.
+	opReverseTunnel = 17
 )
 
 // Params, by command.
@@ -64,26 +66,19 @@ const (
 	feedbackLevel   = 1
 	feedbackMessage = 2
 
-	socksProxyPort       = 1
-	socksProxyTimeout    = 2
-	socksProxyMaxStreams = 3
+	// A tunnel's front, port and destination are core's: each stream's
+	// tunnel item names where it goes.
+	tunnelTimeout    = 2
+	tunnelMaxStreams = 3
 
-	// A forward's host and to are core's: each stream's tunnel item names
-	// the destination.
-	portForwardPort       = 1
-	portForwardHost       = 2
-	portForwardTo         = 3
-	portForwardTimeout    = 4
-	portForwardMaxStreams = 5
-
-	// A reverse forward's bind and listen are the minion's: where it
-	// listens. Its destination (host, to) is core's alone: those params
+	// A reverse tunnel's bind and listen are the minion's: where it
+	// listens. Its front and destination are core's alone: those params
 	// carry no num, and never come.
-	reversePortForwardBind       = 1
-	reversePortForwardListen     = 2
-	reversePortForwardTimeout    = 3
-	reversePortForwardMaxStreams = 4
-	// reversePortForwardUDP: listen for datagrams, a stream for each
-	// address they come from.
-	reversePortForwardUDP = 5
+	reverseTunnelBind       = 1
+	reverseTunnelListen     = 2
+	reverseTunnelTimeout    = 3
+	reverseTunnelMaxStreams = 4
+	// reverseTunnelUDP: listen for datagrams, a stream for each address
+	// they come from.
+	reverseTunnelUDP = 5
 )

@@ -18,24 +18,28 @@ import (
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
-// Tunnels (docs: contracts/minion-messages/tunnels.md): the socks_proxy and
-// port_forward commands (ops 15 and 16, of the actions of the same names)
-// run until core cancels them, and while one runs core opens streams in it,
-// each a TCP connection the minion makes from its host
+// Tunnels (docs: contracts/minion-messages/tunnels.md): the tunnel command
+// (op 15, action tunnel) runs until core cancels it, and while it runs core
+// opens streams in it, whatever it puts in front of them (its front: SOCKS,
+// HTTP or a forward, core's alone), each a TCP connection the minion makes
+// from its host
 // to the destination core names (a name resolved here, so internal names
 // work). Both sides carry a stream's bytes in their messages, by offset,
 // within a window each way: each keeps what it sent until the other's ack
 // covers it, sends again from the ack what stays unacked tunnelResend,
 // probes a window shut that long with one byte past it, and keeps what
 // comes ahead of its next (messages crossing) until the bytes before it
-// come. Core speaks SOCKS to the operators' tools; the minion only
-// connects, relays and closes. A UDP association (a tunnel item that says
+// come. Core speaks SOCKS or HTTP to the operators' tools; the minion only
+// connects, relays and closes. An open is read strictly
+// (protocol.ReadTunnel): one with a key this version does not know, or that
+// does not read though its task and stream do, is answered unsupported,
+// never misread as a plain connect. A UDP association (a tunnel item that says
 // udp) is a UDP socket of the minion's: core's tunnel_datagram items go out
 // of it, each to the destination it names, and what comes back to it goes
 // to core with its source; as UDP is, no acks and no resending, and a
 // datagram that finds the queue full (udpQueue) is dropped.
 //
-// A reverse port forward (op 17) goes the other way: the minion listens on
+// A reverse tunnel (op 17) goes the other way: the minion listens on
 // its host where the task's args say, tells core where (tunnel_listen), and
 // opens a stream for each connection that comes there: its tunnel item,
 // numbered by the minion, names who connected, and core, which connects it
@@ -200,24 +204,21 @@ func signal(ch chan struct{}) {
 	}
 }
 
-// tunnelCmd: a command of a tunnel action (its build's socks_proxy,
-// port_forward, reverse_port_forward), whose task is a tunnel.
+// tunnelCmd: a command of a tunnel action (its build's tunnel and
+// reverse_tunnel), whose task is a tunnel.
 func tunnelCmd(cmd uint64) bool {
-	return cmd == opSocksProxy || cmd == opPortForward || cmd == opReversePortForward
+	return cmd == opTunnel || cmd == opReverseTunnel
 }
 
-// tunnelArgs are a tunnel task's limits, by its command's params (a socks
-// proxy's, a forward's, a reverse forward's): how many streams at once,
-// and how long a connect may take (a reverse forward's is core's, which a
-// connection waits on). Where its streams go is core's to say, in their
-// tunnel items (a reverse forward's, never).
+// tunnelArgs are a tunnel task's limits, by its command's params (a
+// tunnel's, a reverse tunnel's): how many streams at once, and how long a
+// connect may take (a reverse tunnel's is core's, which a connection waits
+// on). Where its streams go is core's to say, in their tunnel items (a
+// reverse tunnel's, never).
 func tunnelArgs(cmd uint64, args protocol.Args) (int, time.Duration) {
-	numMax, numTimeout := uint64(socksProxyMaxStreams), uint64(socksProxyTimeout)
-	switch cmd {
-	case opPortForward:
-		numMax, numTimeout = portForwardMaxStreams, portForwardTimeout
-	case opReversePortForward:
-		numMax, numTimeout = reversePortForwardMaxStreams, reversePortForwardTimeout
+	numMax, numTimeout := uint64(tunnelMaxStreams), uint64(tunnelTimeout)
+	if cmd == opReverseTunnel {
+		numMax, numTimeout = reverseTunnelMaxStreams, reverseTunnelTimeout
 	}
 	maxStreams, ok := protocol.ArgInt(args, numMax)
 	if !ok || maxStreams <= 0 {
@@ -237,7 +238,7 @@ func (ts *tunnels) open(ctx context.Context, task []byte, cmd uint64, args proto
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.byTask[string(task)] = &tunnel{task: task, ctx: ctx, maxStreams: maxStreams, timeout: timeout, streams: map[uint64]*tstream{},
-		reverse: cmd == opReversePortForward}
+		reverse: cmd == opReverseTunnel}
 }
 
 // close ends the task's tunnel and its streams: how many it had.
@@ -275,10 +276,10 @@ func (ts *tunnels) closeAll() {
 	}
 }
 
-// socks runs a tunnel task, a socks proxy's or a forward's (its tunnel made
-// as it was taken): streams come and go in it until core cancels it, and
-// close with it. It ends ok.
-func (r *runner) socks(ctx context.Context, t *task) {
+// runTunnel runs a tunnel task (its tunnel made as it was taken), whatever
+// core puts in front of it: streams come and go in it until core cancels
+// it, and close with it. It ends ok.
+func (r *runner) runTunnel(ctx context.Context, t *task) {
 	<-ctx.Done()
 	n := r.tun.close(t.id)
 	log.Printf("task %x: the tunnel closes, with %d stream(s)", t.id[:4], n)
@@ -292,12 +293,12 @@ func (r *runner) socks(ctx context.Context, t *task) {
 // ends ok, its listener and streams closed. A listener that does not open,
 // or fails, ends it failed, saying why.
 func (r *runner) reverse(ctx context.Context, t *task, args protocol.Args) {
-	bind, ok := protocol.ArgString(args, reversePortForwardBind)
+	bind, ok := protocol.ArgString(args, reverseTunnelBind)
 	if !ok || bind == "" {
 		bind = "0.0.0.0"
 	}
-	listen, _ := protocol.ArgInt(args, reversePortForwardListen)
-	udp, _ := protocol.ArgBool(args, reversePortForwardUDP)
+	listen, _ := protocol.ArgInt(args, reverseTunnelListen)
+	udp, _ := protocol.ArgBool(args, reverseTunnelUDP)
 	err := protocol.TunnelListen(bind, listen)
 	address := net.JoinHostPort(bind, strconv.FormatInt(listen, 10))
 	switch {
@@ -485,11 +486,11 @@ func resetConn(c net.Conn) {
 func (ts *tunnels) take(raw cbor.RawMessage) error {
 	switch protocol.ItemType(raw) {
 	case protocol.ItemTunnel:
-		var it protocol.TunnelItem
-		if err := readTunnelItem(raw, &it); err != nil {
+		it, err := protocol.ReadTunnel(raw)
+		if err != nil && !it.Answerable() {
 			return err
 		}
-		ts.openStream(it)
+		ts.openStream(it, err)
 	case protocol.ItemTunnelReply:
 		var r protocol.TunnelReplyItem
 		if err := readTunnelItem(raw, &r); err != nil {
@@ -560,7 +561,9 @@ func (ts *tunnels) closeUnknown(task []byte, id uint64) {
 }
 
 // openStream connects a stream core opens; asked again, it answers again.
-func (ts *tunnels) openStream(it protocol.TunnelItem) {
+// One the minion does not take as it is (why: a key it does not know, or
+// an item that does not read) is answered unsupported, and opens nothing.
+func (ts *tunnels) openStream(it protocol.TunnelItem, why error) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	t := ts.byTask[string(it.Task)]
@@ -583,8 +586,13 @@ func (ts *tunnels) openStream(it protocol.TunnelItem) {
 		return
 	}
 	refuse := func(result int, msg string) {
-		t.replies = append(t.replies, protocol.TunnelReplyItem{T: protocol.ItemTunnelReply, Task: t.task, Stream: it.Stream, Result: result, Msg: msg})
+		t.replies = append(t.replies, protocol.TunnelReplyItem{T: protocol.ItemTunnelReply, Task: t.task, Stream: it.Stream, Result: result,
+			Msg: clip(msg, protocol.MaxTunnelMsg)})
 		ts.nudge()
+	}
+	if why != nil {
+		refuse(protocol.TunnelUnsupported, why.Error())
+		return
 	}
 	if len(t.streams) >= t.maxStreams {
 		refuse(protocol.TunnelNotAllowed, strconv.Itoa(t.maxStreams)+" streams open already")

@@ -17,18 +17,18 @@ import (
 // 127.0.0.1, at a free port unless args say, its resends quick.
 func startReverse(t *testing.T, args protocol.Args) *runner {
 	t.Helper()
-	r := newRunner(description{Ops: []uint64{opReversePortForward}}, &schedule{interval: time.Second})
+	r := newRunner(description{Ops: []uint64{opReverseTunnel}}, &schedule{interval: time.Second})
 	r.tun.resend = 100 * time.Millisecond
 	if args == nil {
 		args = protocol.Args{}
 	}
-	if _, ok := args[reversePortForwardBind]; !ok {
-		args[reversePortForwardBind] = "127.0.0.1"
+	if _, ok := args[reverseTunnelBind]; !ok {
+		args[reverseTunnelBind] = "127.0.0.1"
 	}
-	if _, ok := args[reversePortForwardListen]; !ok {
-		args[reversePortForwardListen] = int64(0)
+	if _, ok := args[reverseTunnelListen]; !ok {
+		args[reverseTunnelListen] = int64(0)
 	}
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opReversePortForward, Args: args})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opReverseTunnel, Args: args})
 	t.Cleanup(func() { r.tun.closeAll() })
 	return r
 }
@@ -144,7 +144,7 @@ func TestReverseForwardRefused(t *testing.T) {
 // core does not answer is opened again every resend, and given up after
 // the task's timeout and the slack: reset, and core told so.
 func TestReverseForwardLimits(t *testing.T) {
-	r := startReverse(t, protocol.Args{reversePortForwardMaxStreams: int64(1), reversePortForwardTimeout: int64(300)})
+	r := startReverse(t, protocol.Args{reverseTunnelMaxStreams: int64(1), reverseTunnelTimeout: int64(300)})
 	r.tun.slack = 300 * time.Millisecond
 	core := newTunnelCore(t, r)
 	first := dialListener(t, core)
@@ -212,8 +212,8 @@ func TestReverseForwardListenFails(t *testing.T) {
 		args protocol.Args
 		want string
 	}{
-		{protocol.Args{reversePortForwardListen: int64(taken.Addr().(*net.TCPAddr).Port)}, "listen tcp"},
-		{protocol.Args{reversePortForwardListen: int64(70000)}, "listen: a port"},
+		{protocol.Args{reverseTunnelListen: int64(taken.Addr().(*net.TCPAddr).Port)}, "listen tcp"},
+		{protocol.Args{reverseTunnelListen: int64(70000)}, "listen: a port"},
 	} {
 		r := startReverse(t, c.args)
 		end := waitEnd(t, r, 5*time.Second)
@@ -253,13 +253,13 @@ func TestReverseForwardUnknown(t *testing.T) {
 // A reverse forward holds no place in max tasks, as every tunnel: with a
 // limit of 1 a shell still has room beside it.
 func TestReverseForwardHoldsNoPlace(t *testing.T) {
-	if !tunnelCmd(opReversePortForward) {
+	if !tunnelCmd(opReverseTunnel) {
 		t.Fatal("not a tunnel command")
 	}
 	one := uint64(1)
-	r := newRunner(description{Ops: []uint64{opReversePortForward, opShell}, MaxTasks: &one}, &schedule{interval: time.Second})
-	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opReversePortForward,
-		Args: protocol.Args{reversePortForwardBind: "127.0.0.1", reversePortForwardListen: int64(0)}})
+	r := newRunner(description{Ops: []uint64{opReverseTunnel, opShell}, MaxTasks: &one}, &schedule{interval: time.Second})
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: socksTask, Cmd: opReverseTunnel,
+		Args: protocol.Args{reverseTunnelBind: "127.0.0.1", reverseTunnelListen: int64(0)}})
 	t.Cleanup(func() { r.tun.closeAll() })
 	asked := false
 	for _, it := range r.outgoing() {
