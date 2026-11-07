@@ -34,11 +34,22 @@ func winsock(err error, codes ...syscall.Errno) bool {
 
 func refusedErr(err error) bool { return winsock(err, wsaeConnRefused) }
 
-func hostUnreachableErr(err error) bool { return winsock(err, wsaeHostUnreach, wsaeHostDown) }
+func hostUnreachableErr(err error) bool {
+	return winsock(err, wsaeHostUnreach, wsaeHostDown, errorBadNetpath)
+}
 
 func netUnreachableErr(err error) bool { return winsock(err, wsaeNetUnreach, wsaeNetDown) }
 
 func timedOutErr(err error) bool { return winsock(err, wsaeTimedOut) }
+
+// Why a pipe did not open, by Windows' error: another host's refused the
+// minion's logon (its rights), or it is not there to reach.
+const (
+	errorLogonFailure = 1326
+	errorBadNetpath   = 53
+)
+
+func deniedErr(err error) bool { return winsock(err, errorLogonFailure) }
 
 // Why an accept failed, by Winsock's error.
 const (

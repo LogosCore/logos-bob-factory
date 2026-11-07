@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	mrand "math/rand/v2"
 	"net"
@@ -458,6 +459,11 @@ func TestDialResult(t *testing.T) {
 		"timed out":   {context.DeadlineExceeded, protocol.TunnelTimedOut},
 		"kernel gave": {sys(syscall.ETIMEDOUT), protocol.TunnelTimedOut},
 		"other":       {errors.New("something else"), protocol.TunnelFailed},
+		"no socket":   {&net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", syscall.ENOENT)}, protocol.TunnelNotFound},
+		"its rights":  {&net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", syscall.EACCES)}, protocol.TunnelDenied},
+		"a firewall":  {sys(syscall.EPERM), protocol.TunnelDenied},
+		"no pipes":    {errNoPipes, protocol.TunnelUnsupported},
+		"tls late":    {fmt.Errorf("tls: %w", context.DeadlineExceeded), protocol.TunnelTimedOut},
 	} {
 		if got := dialResult(c.err); got != c.want {
 			t.Errorf("%s: %d, want %d", name, got, c.want)

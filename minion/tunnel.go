@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"slices"
@@ -605,13 +608,53 @@ func (ts *tunnels) openStream(it protocol.TunnelItem, why error) {
 	st := &tstream{t: t, id: it.Stream, done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1),
 		limit: protocol.TunnelRoom(it.Room), ackedEnd: tunnelWindow}
 	t.streams[it.Stream] = st
-	go ts.connect(st, net.JoinHostPort(it.Host, strconv.FormatUint(it.Port, 10)))
+	go ts.connect(st, it)
+}
+
+// openConn makes a stream's connection as its open says, within timeout: a
+// TCP connection to its host and port (from its source address, TLS on top
+// when it says: the destination's name its host, no certificate checked,
+// since the operator reaches what is there), a unix socket, or a named
+// pipe (pipe_windows.go).
+func (ts *tunnels) openConn(ctx context.Context, it protocol.TunnelItem, timeout time.Duration) (net.Conn, error) {
+	// One deadline for all of it: the connect, and a TLS handshake after.
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	switch it.Kind {
+	case protocol.TunnelKindUnix:
+		d := net.Dialer{Timeout: timeout}
+		return d.DialContext(ctx, "unix", it.Path)
+	case protocol.TunnelKindPipe:
+		return dialPipe(ctx, it.Path, timeout)
+	}
+	address := net.JoinHostPort(it.Host, strconv.FormatUint(it.Port, 10))
+	var conn net.Conn
+	var err error
+	if it.Source != "" {
+		d := net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: net.ParseIP(it.Source)}}
+		conn, err = d.DialContext(ctx, "tcp", address)
+	} else {
+		conn, err = ts.dial(ctx, address, timeout)
+	}
+	if err != nil || !it.TLS {
+		return conn, err
+	}
+	cfg := &tls.Config{InsecureSkipVerify: true}
+	if net.ParseIP(it.Host) == nil {
+		cfg.ServerName = it.Host
+	}
+	tc := tls.Client(conn, cfg)
+	if err := tc.HandshakeContext(ctx); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("tls: %w", err)
+	}
+	return tc, nil
 }
 
 // connect makes the stream's connection, within the task's timeout, and
 // answers core: open, with the socket's address, or why not.
-func (ts *tunnels) connect(st *tstream, address string) {
-	conn, err := ts.dial(st.t.ctx, address, st.t.timeout)
+func (ts *tunnels) connect(st *tstream, it protocol.TunnelItem) {
+	conn, err := ts.openConn(st.t.ctx, it, st.t.timeout)
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	if st.gone {
@@ -641,14 +684,23 @@ func dialResult(err error) int {
 	var dns *net.DNSError
 	var ne net.Error
 	switch {
+	case errors.Is(err, errNoPipes):
+		return protocol.TunnelUnsupported
 	case errors.As(err, &dns):
 		return protocol.TunnelHostUnreachable
 	case refusedErr(err):
 		return protocol.TunnelRefused
 	case hostUnreachableErr(err):
+		// Before not found: Windows' "network path not found" (a remote
+		// pipe's host not there) is fs.ErrNotExist too.
 		return protocol.TunnelHostUnreachable
 	case netUnreachableErr(err):
 		return protocol.TunnelNetUnreachable
+	case errors.Is(err, fs.ErrNotExist):
+		return protocol.TunnelNotFound
+	case errors.Is(err, fs.ErrPermission), deniedErr(err):
+		// A socket's or a pipe's rights; a firewall of the host's.
+		return protocol.TunnelDenied
 	case timedOutErr(err), errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
 		return protocol.TunnelTimedOut
 	}

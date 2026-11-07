@@ -21,6 +21,10 @@ func netUnreachableErr(err error) bool {
 
 func timedOutErr(err error) bool { return errors.Is(err, syscall.ETIMEDOUT) }
 
+// deniedErr: none past fs.ErrPermission, which says EACCES and EPERM (a
+// socket's rights, a firewall's refusal).
+func deniedErr(error) bool { return false }
+
 // acceptAgain: an accept that failed for what the host ran short of (files,
 // buffers, memory), or a connection that went before it was taken: the
 // listener goes on after a wait.
