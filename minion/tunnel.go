@@ -18,9 +18,10 @@ import (
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
-// Tunnels (docs: contracts/minion-messages/tunnels.md): the socks command
-// (op 15, action tunnel) runs until core cancels it, and while it runs core
-// opens streams in it, each a TCP connection the minion makes from its host
+// Tunnels (docs: contracts/minion-messages/tunnels.md): the socks_proxy and
+// port_forward commands (ops 15 and 16, of the actions of the same names)
+// run until core cancels them, and while one runs core opens streams in it,
+// each a TCP connection the minion makes from its host
 // to the destination core names (a name resolved here, so internal names
 // work). Both sides carry a stream's bytes in their messages, by offset,
 // within a window each way: each keeps what it sent until the other's ack
