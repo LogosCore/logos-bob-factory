@@ -230,7 +230,7 @@ var buildSchema = protocol.BuildSchema{
 		},
 		{
 			ID: "reverse_tunnel", Op: 17, Label: "Reverse tunnel",
-			Description: "Listens on a port of the minion's host, TCP or UDP: each connection to it (each address datagrams come from), core takes from its own network, as its front says: a reverse port forward to a destination (an operator's handler, a server core reaches), or a SOCKS5 proxy behind a password. The minion never learns where. It runs until stopped.",
+			Description: "Listens on a port of the minion's host, TCP or UDP: each connection to it (each address datagrams come from), core connects to a destination from its own network (an operator's handler, a server core reaches): a reverse port forward. The minion never learns where. It runs until stopped.",
 			Action:      protocol.ActionReverseTunnel,
 			Opens:       []string{protocol.OpenTCP, protocol.OpenUDP},
 			// Core adds the front, the destination, when it stops the tunnel
