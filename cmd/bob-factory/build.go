@@ -220,12 +220,15 @@ var buildSchema = protocol.BuildSchema{
 				protocol.OpenProcess, protocol.OpenAccept},
 			// Core adds the front, the port, a forward's destination, when it
 			// stops the tunnel idle (stop_idle, 1h) and the bandwidth cap
-			// (protocol.TunnelCoreParams): no num, never sent.
+			// (protocol.TunnelCoreParams): no num, never sent. Its own are
+			// seldom changed (Advanced); a terminal connects to nothing, so
+			// the timeout is the other fronts' alone.
 			Params: []protocol.FieldSpec{
-				{Key: "timeout", Num: 2, Type: protocol.FieldDuration, Label: "Connect timeout", Default: "10s", Order: 10,
-					Description: "How long the minion tries to connect to a destination."},
+				{Key: "timeout", Num: 2, Type: protocol.FieldDuration, Label: "Connect timeout", Default: "10s", Order: 10, Advanced: true,
+					Description: "How long the minion tries to connect to a destination.",
+					When:        &protocol.FieldCondition{Key: protocol.ParamFront, Values: []string{protocol.FrontSOCKS, protocol.FrontHTTP, protocol.FrontForward}}},
 				{Key: "max_streams", Num: 3, Type: protocol.FieldInt, Label: "Connections at once", Default: 256, Min: 1, Max: 4096, Order: 11,
-					Description: "How many of the tools' connections the tunnel carries at once."},
+					Advanced: true, Description: "How many of the tools' connections the tunnel carries at once."},
 			},
 		},
 		{
@@ -233,20 +236,21 @@ var buildSchema = protocol.BuildSchema{
 			Description: "Listens on a port of the minion's host, TCP or UDP: each connection to it (each address datagrams come from), core connects to a destination from its own network (an operator's handler, a server core reaches): a reverse port forward. The minion never learns where. It runs until stopped.",
 			Action:      protocol.ActionReverseTunnel,
 			Opens:       []string{protocol.OpenTCP, protocol.OpenUDP},
-			// Core adds the front, the destination, when it stops the tunnel
-			// idle (stop_idle, never by default) and the bandwidth cap
-			// (protocol.TunnelCoreParams): no num, never sent.
+			// Core adds the destination, when it stops the tunnel idle
+			// (stop_idle, never by default) and the bandwidth cap
+			// (protocol.TunnelCoreParams): no num, never sent. Its one
+			// front, a forward, no param names.
 			Params: []protocol.FieldSpec{
 				{Key: "bind", Num: 1, Type: protocol.FieldString, Label: "Listen address", Default: "0.0.0.0", MaxLength: 255, Order: 1,
 					Description: "The address the minion listens on: 0.0.0.0 for all of its host's, 127.0.0.1 for its host alone."},
 				{Key: "listen", Num: 2, Type: protocol.FieldInt, Label: "Listen port", Required: true, Min: 0, Max: 65535, Order: 2,
 					Description: "The port on the minion's host: 0 for any free one."},
 				{Key: "udp", Num: 5, Type: protocol.FieldBool, Label: "UDP", Default: false, Order: 3,
-					Description: "Listen for UDP datagrams instead: a stream for each address they come from, ending after two minutes without a datagram either way. A reverse port forward's only."},
-				{Key: "timeout", Num: 3, Type: protocol.FieldDuration, Label: "Connect timeout", Default: "10s", Order: 10,
+					Description: "Listen for UDP datagrams instead: a stream for each address they come from, ending after two minutes without a datagram either way."},
+				{Key: "timeout", Num: 3, Type: protocol.FieldDuration, Label: "Connect timeout", Default: "10s", Order: 10, Advanced: true,
 					Description: "How long core tries to connect to a destination; a connection to the minion waits that long, and 30 s more, for it."},
 				{Key: "max_streams", Num: 4, Type: protocol.FieldInt, Label: "Connections at once", Default: 256, Min: 1, Max: 4096, Order: 11,
-					Description: "How many connections (UDP: addresses) the tunnel carries at once: one past it is reset (a new address's datagrams, dropped)."},
+					Advanced: true, Description: "How many connections (UDP: addresses) the tunnel carries at once: one past it is reset (a new address's datagrams, dropped)."},
 			},
 		},
 	},
