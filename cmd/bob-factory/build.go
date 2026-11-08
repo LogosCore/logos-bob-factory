@@ -83,7 +83,7 @@ var buildSchema = protocol.BuildSchema{
 			Description: "A static Linux binary that prints the dummy minion's JSON description, baked in when it is compiled.",
 			// Linux has no named pipes: its tunnels open the rest.
 			Opens: []string{protocol.OpenTCP, protocol.OpenUDP, protocol.OpenUnix, protocol.OpenSource, protocol.OpenTLS, protocol.OpenProcess,
-				protocol.OpenAccept},
+				protocol.OpenAccept, protocol.OpenICMP},
 		},
 		{
 			ID: "windows-exe", Label: "Windows executable", Format: "exe",
@@ -215,9 +215,11 @@ var buildSchema = protocol.BuildSchema{
 			// TCP connections (from a source address, TLS on top), UDP
 			// associations (SOCKS UDP ASSOCIATE), unix sockets, named pipes
 			// (Windows' alone: its target says), processes (the terminal
-			// front: a PTY, a ConPTY, else pipes) and accepts (SOCKS BIND).
+			// front: a PTY, a ConPTY, else pipes), accepts (SOCKS BIND) and
+			// pings (the VPN front's: an unprivileged ICMP socket, a raw one,
+			// Windows' IcmpSendEcho).
 			Opens: []string{protocol.OpenTCP, protocol.OpenUDP, protocol.OpenUnix, protocol.OpenPipe, protocol.OpenSource, protocol.OpenTLS,
-				protocol.OpenProcess, protocol.OpenAccept},
+				protocol.OpenProcess, protocol.OpenAccept, protocol.OpenICMP},
 			// Core adds the front, the port, a forward's destination, when it
 			// stops the tunnel idle (stop_idle, 1h) and the bandwidth cap
 			// (protocol.TunnelCoreParams): no num, never sent. Its own are
@@ -226,7 +228,8 @@ var buildSchema = protocol.BuildSchema{
 			Params: []protocol.FieldSpec{
 				{Key: "timeout", Num: 2, Type: protocol.FieldDuration, Label: "Connect timeout", Default: "10s", Order: 10, Advanced: true,
 					Description: "How long the minion tries to connect to a destination.",
-					When:        &protocol.FieldCondition{Key: protocol.ParamFront, Values: []string{protocol.FrontSOCKS, protocol.FrontHTTP, protocol.FrontForward}}},
+					When: &protocol.FieldCondition{Key: protocol.ParamFront,
+						Values: []string{protocol.FrontSOCKS, protocol.FrontHTTP, protocol.FrontForward, protocol.FrontVPN}}},
 				{Key: "max_streams", Num: 3, Type: protocol.FieldInt, Label: "Connections at once", Default: 256, Min: 1, Max: 4096, Order: 11,
 					Advanced: true, Description: "How many of the tools' connections the tunnel carries at once."},
 			},

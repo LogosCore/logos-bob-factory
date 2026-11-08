@@ -64,8 +64,13 @@ const (
 	// probed.
 	tunnelResend = 5 * time.Second
 	// tunnelHeld is the most the minion reads of a host ahead of core's
-	// ack, whatever room core gives.
-	tunnelHeld = 1 << 20
+	// ack, whatever room core gives: as much as core's window grows to.
+	tunnelHeld = 4 << 20
+	// maxWindow is the most a stream's window, the room the minion gives
+	// core, grows to; maxTunnelExtra what a tunnel's windows grew past
+	// tunnelWindow together (rtt.go).
+	maxWindow      = 4 << 20
+	maxTunnelExtra = 32 << 20
 	// tunnelRead is one read of a host, or write to it, at most.
 	tunnelRead = 32 << 10
 	// tunnelMinPiece is the least a tunnel_data carries when the stream has
@@ -98,7 +103,9 @@ type tunnels struct {
 	// resend is tunnelResend, slack reverseSlack, udpIdle
 	// protocol.TunnelUDPIdle, each shorter in tests; dial connects a
 	// stream.
-	resend     time.Duration
+	resend time.Duration
+	// rtt is the session's round trip, as core's acks measure it (rtt.go).
+	rtt        rttState
 	slack      time.Duration
 	udpIdle    time.Duration
 	acceptWait time.Duration
@@ -137,6 +144,8 @@ type tunnel struct {
 	// their datagrams come from.
 	pc       net.PacketConn
 	bySource map[string]*tstream
+	// extra is what its streams' windows grew past tunnelWindow, together.
+	extra int
 }
 
 // tstream is one stream: the minion's connection to its destination.
@@ -182,6 +191,7 @@ type tstream struct {
 	// A UDP association's: its socket, the datagrams it got for core (and
 	// their bytes), numbered from dseq; core's taken, by their numbers.
 	pc         net.PacketConn
+	icmp       pinger
 	dgrams     []protocol.TunnelDatagramItem
 	dgramBytes int
 	dseq       uint64
@@ -198,6 +208,9 @@ type tstream struct {
 	shut     bool
 	ackDue   bool
 	ackedEnd uint64
+	// window is the room the minion gives core (win: tunnelWindow until it
+	// grew).
+	window   int
 	inSignal chan struct{}
 	// finishing: core said done; the stream goes once the host has it all.
 	finishing bool
@@ -213,6 +226,10 @@ type tstream struct {
 	eofOut    bool
 	upDone    bool
 	outSignal chan struct{}
+	// rttEnd and rttAt: a round trip being measured, the offset whose ack
+	// ends it and when its bytes went (zero: none).
+	rttEnd uint64
+	rttAt  time.Time
 }
 
 func signal(ch chan struct{}) {
@@ -626,6 +643,10 @@ func (ts *tunnels) openStream(it protocol.TunnelItem, why error) {
 		ts.openUDP(t, it.Stream, refuse)
 		return
 	}
+	if it.Kind == protocol.TunnelKindICMP {
+		ts.openICMP(t, it.Stream, refuse)
+		return
+	}
 	st := &tstream{t: t, id: it.Stream, done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1),
 		limit: protocol.TunnelRoom(it.Room), ackedEnd: tunnelWindow}
 	t.streams[it.Stream] = st
@@ -846,6 +867,9 @@ func (ts *tunnels) writeHost(st *tstream) {
 			st.in = nil
 		}
 		wake := st.roomGrew()
+		if len(st.in) == 0 && st.grow() {
+			wake = true
+		}
 		ts.mu.Unlock()
 		if wake {
 			ts.nudge()
@@ -859,7 +883,7 @@ func (st *tstream) roomGrew() bool {
 	if st.ackDue || st.eofIn {
 		return false
 	}
-	if st.next+uint64(tunnelWindow-len(st.in)) >= st.ackedEnd+tunnelWindow/4 {
+	if w := st.win(); st.next+uint64(w-len(st.in)) >= st.ackedEnd+uint64(w/4) {
 		st.ackDue = true
 		return true
 	}
@@ -896,8 +920,12 @@ func (ts *tunnels) drop(st *tstream, reset bool) {
 	st.gone = true
 	close(st.done)
 	delete(st.t.streams, st.id)
+	st.shrink()
 	if st.pc != nil {
 		_ = st.pc.Close()
+	}
+	if st.icmp != nil {
+		st.icmp.close()
 	}
 	if st.source != nil {
 		// A UDP stream: its address opens a new one next time; what it
@@ -944,7 +972,7 @@ func (ts *tunnels) takeData(d protocol.TunnelDataItem) {
 		return
 	case d.Off > st.next:
 		// Its bytes within the room (its eof needs none).
-		if d.Off+uint64(len(d.Data)) <= st.next+uint64(tunnelWindow-len(st.in)) && st.aheadBytes+len(d.Data) <= tunnelWindow {
+		if w := st.win(); d.Off+uint64(len(d.Data)) <= st.next+uint64(w-len(st.in)) && st.aheadBytes+len(d.Data) <= w {
 			d.Data = bytes.Clone(d.Data)
 			st.ahead = append(st.ahead, d)
 			st.aheadBytes += len(d.Data)
@@ -977,7 +1005,7 @@ func (ts *tunnels) takeData(d protocol.TunnelDataItem) {
 func (st *tstream) take(d protocol.TunnelDataItem) {
 	data := d.Data[min(st.next-d.Off, uint64(len(d.Data))):]
 	eof := d.EOF
-	if free := tunnelWindow - len(st.in); len(data) > free {
+	if free := st.win() - len(st.in); len(data) > free {
 		data, eof = data[:free], false
 	}
 	st.in = append(st.in, data...)
@@ -1013,6 +1041,7 @@ func (ts *tunnels) takeAck(a protocol.TunnelAckItem) {
 	if a.Room != nil {
 		room = *a.Room
 	}
+	ts.measured(st, a.Next)
 	if a.Next > st.base {
 		st.sentAt = time.Now()
 	}
@@ -1077,7 +1106,7 @@ func (ts *tunnels) items(room, most int) ([]any, int) {
 			t.sayListen = false
 		}
 		for _, st := range t.sortedStreams() {
-			if st.openDue(now, ts.resend) && put(*st.opening, len(st.opening.Host)+tunnelItemSize) {
+			if st.openDue(now, ts.resendAfter()) && put(*st.opening, len(st.opening.Host)+tunnelItemSize) {
 				st.openSent = now
 			}
 		}
@@ -1087,7 +1116,7 @@ func (ts *tunnels) items(room, most int) ([]any, int) {
 		// Ctls after the replies (a stream's open first), before any data:
 		// a process's exit before its eof.
 		for _, st := range t.sortedStreams() {
-			st.putCtls(put, now, ts.resend)
+			st.putCtls(put, now, ts.resendAfter())
 		}
 		for _, st := range t.sortedStreams() {
 			if st.conn != nil || st.datagrams() {
@@ -1098,7 +1127,7 @@ func (ts *tunnels) items(room, most int) ([]any, int) {
 	for _, st := range open {
 		if !st.datagrams() && st.ackDue && put(st.ackItem(), tunnelItemSize) {
 			st.ackDue = false
-			st.ackedEnd = st.next + uint64(tunnelWindow-len(st.in))
+			st.ackedEnd = st.next + uint64(st.win()-len(st.in))
 		}
 	}
 	if n := len(open); n > 0 {
@@ -1127,13 +1156,14 @@ func (ts *tunnels) items(room, most int) ([]any, int) {
 					moved = true
 					continue
 				}
-				d := st.dataItem(now, room-used-tunnelItemSize, ts.resend)
+				d := st.dataItem(now, room-used-tunnelItemSize, ts.resendAfter())
 				if d == nil {
 					continue
 				}
 				if !put(*d, len(d.Data)+tunnelItemSize) {
 					break rounds
 				}
+				st.measure(d.End(), d.Off < st.sent, now)
 				st.sent, st.sentAt = d.End(), now
 				moved = true
 			}
@@ -1171,7 +1201,7 @@ func (t *tunnel) sortedStreams() []*tstream {
 }
 
 func (st *tstream) ackItem() protocol.TunnelAckItem {
-	room := uint64(tunnelWindow - len(st.in))
+	room := uint64(max(st.win()-len(st.in), 0))
 	return protocol.TunnelAckItem{T: protocol.ItemTunnelAck, Task: st.t.task, Stream: st.id, Next: st.next, Room: &room, Ctl: st.ctlIn}
 }
 
@@ -1228,13 +1258,13 @@ func (ts *tunnels) pending() bool {
 			return true
 		}
 		for _, st := range t.streams {
-			if st.openDue(now, ts.resend) || st.ctlDue(now, ts.resend) {
+			if st.openDue(now, ts.resendAfter()) || st.ctlDue(now, ts.resendAfter()) {
 				return true
 			}
 			if st.datagrams() && len(st.dgrams) > 0 {
 				return true
 			}
-			if st.conn != nil && (st.ackDue || st.dataItem(now, protocol.MaxTunnelData, ts.resend) != nil) {
+			if st.conn != nil && (st.ackDue || st.dataItem(now, protocol.MaxTunnelData, ts.resendAfter()) != nil) {
 				return true
 			}
 		}
@@ -1253,13 +1283,13 @@ func (ts *tunnels) due() (time.Duration, bool) {
 		for _, st := range t.streams {
 			if len(st.ctlOut) > 0 && st.ctlSent > st.ctlBase {
 				// Its ctls again, while core has not acked them.
-				if at := st.ctlSentAt.Add(ts.resend); soonest.IsZero() || at.Before(soonest) {
+				if at := st.ctlSentAt.Add(ts.resendAfter()); soonest.IsZero() || at.Before(soonest) {
 					soonest = at
 				}
 			}
 			if st.opening != nil && !st.openSent.IsZero() {
 				// Its tunnel item again, while core has not answered.
-				if at := st.openSent.Add(ts.resend); soonest.IsZero() || at.Before(soonest) {
+				if at := st.openSent.Add(ts.resendAfter()); soonest.IsZero() || at.Before(soonest) {
 					soonest = at
 				}
 				continue
@@ -1269,7 +1299,7 @@ func (ts *tunnels) due() (time.Duration, bool) {
 			}
 			end := st.base + uint64(len(st.out))
 			waiting := st.sent > st.base || (st.sent < end && st.sent >= st.limit)
-			if at := st.sentAt.Add(ts.resend); waiting && (soonest.IsZero() || at.Before(soonest)) {
+			if at := st.sentAt.Add(ts.resendAfter()); waiting && (soonest.IsZero() || at.Before(soonest)) {
 				soonest = at
 			}
 		}

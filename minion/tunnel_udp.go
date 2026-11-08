@@ -24,7 +24,7 @@ import (
 
 // datagrams: the stream carries datagrams, as an association or a UDP
 // reverse forward's stream core opened.
-func (st *tstream) datagrams() bool { return st.pc != nil || st.sourceOpen }
+func (st *tstream) datagrams() bool { return st.pc != nil || st.sourceOpen || st.icmp != nil }
 
 // listenUDP opens a UDP reverse forward's socket at address, and has core
 // told where it listens. An error says why it did not open.
@@ -228,6 +228,10 @@ func (ts *tunnels) sendDatagram(d protocol.TunnelDatagramItem) {
 	if st == nil {
 		ts.closeUnknown(d.Task, d.Stream)
 		ts.mu.Unlock()
+		return
+	}
+	if st.icmp != nil {
+		ts.ping(st, d)
 		return
 	}
 	if st.source != nil {
