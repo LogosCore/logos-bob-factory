@@ -218,17 +218,14 @@ var buildSchema = protocol.BuildSchema{
 			// front: a PTY, a ConPTY, else pipes) and accepts (SOCKS BIND).
 			Opens: []string{protocol.OpenTCP, protocol.OpenUDP, protocol.OpenUnix, protocol.OpenPipe, protocol.OpenSource, protocol.OpenTLS,
 				protocol.OpenProcess, protocol.OpenAccept},
-			// Core adds the front, the port, a forward's destination and the
-			// bandwidth cap (protocol.TunnelCoreParams): no num, never sent.
+			// Core adds the front, the port, a forward's destination, when it
+			// stops the tunnel idle (stop_idle, 1h) and the bandwidth cap
+			// (protocol.TunnelCoreParams): no num, never sent.
 			Params: []protocol.FieldSpec{
 				{Key: "timeout", Num: 2, Type: protocol.FieldDuration, Label: "Connect timeout", Default: "10s", Order: 10,
 					Description: "How long the minion tries to connect to a destination."},
 				{Key: "max_streams", Num: 3, Type: protocol.FieldInt, Label: "Connections at once", Default: 256, Min: 1, Max: 4096, Order: 11,
 					Description: "How many of the tools' connections the tunnel carries at once."},
-				// Core's alone (no num): core stops the task once no stream has
-				// been open this long.
-				{Key: protocol.ParamStopIdle, Type: protocol.FieldDuration, Label: "Stop when idle for", Default: "1h", Order: 12,
-					Description: "Core stops the tunnel once no connection has been open this long: 0s never."},
 			},
 		},
 		{
@@ -236,7 +233,8 @@ var buildSchema = protocol.BuildSchema{
 			Description: "Listens on a port of the minion's host, TCP or UDP: each connection to it (each address datagrams come from), core takes from its own network, as its front says: a reverse port forward to a destination (an operator's handler, a server core reaches), or a SOCKS5 proxy behind a password. The minion never learns where. It runs until stopped.",
 			Action:      protocol.ActionReverseTunnel,
 			Opens:       []string{protocol.OpenTCP, protocol.OpenUDP},
-			// Core adds the front, the destination and the bandwidth cap
+			// Core adds the front, the destination, when it stops the tunnel
+			// idle (stop_idle, never by default) and the bandwidth cap
 			// (protocol.TunnelCoreParams): no num, never sent.
 			Params: []protocol.FieldSpec{
 				{Key: "bind", Num: 1, Type: protocol.FieldString, Label: "Listen address", Default: "0.0.0.0", MaxLength: 255, Order: 1,
@@ -249,10 +247,6 @@ var buildSchema = protocol.BuildSchema{
 					Description: "How long core tries to connect to a destination; a connection to the minion waits that long, and 30 s more, for it."},
 				{Key: "max_streams", Num: 4, Type: protocol.FieldInt, Label: "Connections at once", Default: 256, Min: 1, Max: 4096, Order: 11,
 					Description: "How many connections (UDP: addresses) the tunnel carries at once: one past it is reset (a new address's datagrams, dropped)."},
-				// Core's alone (no num): core stops the task once no stream has
-				// been open this long.
-				{Key: protocol.ParamStopIdle, Type: protocol.FieldDuration, Label: "Stop when idle for", Default: "0s", Order: 12,
-					Description: "Core stops the tunnel once no connection has been open this long: 0s never, the default: a reverse tunnel often waits for a callback."},
 			},
 		},
 	},
