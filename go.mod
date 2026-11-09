@@ -4,12 +4,13 @@ go 1.25.7
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.6
-	github.com/logoscore/logos-golang-factory-core v0.2.44
-	github.com/logoscore/logos-golang-module-core v0.2.43
+	github.com/logoscore/logos-golang-factory-core v0.3.1
+	github.com/logoscore/logos-golang-module-core v0.3.0
 	github.com/logoscore/logos-golang-protocol v0.48.1
 )
 
 require (
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/rabbitmq/amqp091-go v1.10.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 )
