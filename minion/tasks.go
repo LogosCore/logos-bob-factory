@@ -467,6 +467,10 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 			r.reack(rk.Tasks, i)
 		case protocol.ItemResume:
 			r.queueErr(protocol.ErrItemUnknownItem, "this minion keeps its tasks' state: it takes no resume", i)
+		case protocol.ItemPacked:
+			// One that did not unpack: readCore took the rest in place.
+			code, why := packedErr(answer.Items, i)
+			r.queueErr(code, why, i)
 		default:
 			r.queueErr(protocol.ErrItemUnknownItem, fmt.Sprintf("this minion does not take %s", protocol.ItemName(protocol.ItemType(raw))), i)
 		}

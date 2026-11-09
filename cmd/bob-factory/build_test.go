@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,24 @@ func TestDescribe(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "X-Amz-Signature") {
 		t.Fatalf("a presigned URL reached the artifact: %s", raw)
+	}
+}
+
+// The build's compression goes into the minion as the request says it: the
+// algorithm, or none when the operator turned it off.
+func TestDescribeCompression(t *testing.T) {
+	if !slices.Contains(buildSchema.Compression, protocol.CompressionDeflate) {
+		t.Fatalf("the schema declares %v", buildSchema.Compression)
+	}
+	req := coreRequest(t)
+	if m := describe(req, nil, "bob", time.Now()); m.Compression != "" {
+		t.Fatalf("compression %q from a request without it", m.Compression)
+	}
+	req.Compression = protocol.CompressionDeflate
+	m := describe(req, nil, "bob", time.Now())
+	raw, _ := json.Marshal(m)
+	if m.Compression != protocol.CompressionDeflate || !strings.Contains(string(raw), `"compression":"deflate"`) {
+		t.Fatalf("compression %q: %s", m.Compression, raw)
 	}
 }
 

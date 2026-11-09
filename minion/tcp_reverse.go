@@ -108,10 +108,7 @@ func openReply(keys protocol.AES256CBCHMACSHA256Material, id [16]byte, msgID, se
 	if err != nil {
 		return answer, fmt.Errorf("core's reply: %w", err)
 	}
-	if err := protocol.UnmarshalCBOR(plain, &answer); err != nil {
-		return answer, fmt.Errorf("core's reply: %w", err)
-	}
-	if err := protocol.ValidateMessageHead(answer.V, answer.ID, answer.Re, len(answer.Items)); err != nil {
+	if answer, err = readCore(plain); err != nil {
 		return answer, fmt.Errorf("core's reply: %w", err)
 	}
 	if !bytes.Equal(answer.Re, msgID) {
@@ -186,9 +183,8 @@ func (l *tcpDialLink) read(c net.Conn) {
 			log.Printf("a frame that does not open: %v", err)
 			continue
 		}
-		var msg protocol.CoreMessage
-		if err := protocol.UnmarshalCBOR(plain, &msg); err != nil ||
-			protocol.ValidateMessageHead(msg.V, msg.ID, msg.Re, len(msg.Items)) != nil {
+		msg, err := readCore(plain)
+		if err != nil {
 			log.Printf("a message from core that does not read")
 			continue
 		}

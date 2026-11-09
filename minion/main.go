@@ -63,6 +63,9 @@ type description struct {
 	// MaxTasks is how many tasks the minion runs at once as it starts (core
 	// changes it live: max_tasks); nil: protocol.DefaultMaxTasks.
 	MaxTasks *uint64 `json:"max_tasks"`
+	// Compression is the algorithm the minion packs its items with
+	// (packing.go); "": the build has compression off.
+	Compression string `json:"compression"`
 }
 
 // maxTasks is how many tasks the build says the minion runs at once.
@@ -108,6 +111,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	packs = d.Compression == protocol.CompressionDeflate
 	// The schedule is the first connection's; a connect leaves it as it is.
 	sched := tr.conn().schedule()
 	log.Printf("build %s, crypto %s", d.BuildID, d.Crypto.Suite)
@@ -809,10 +813,7 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 	if err != nil {
 		return answer, fmt.Errorf("core's reply: %w", err)
 	}
-	if err := protocol.UnmarshalCBOR(plain, &answer); err != nil {
-		return answer, fmt.Errorf("core's reply: %w", err)
-	}
-	if err := protocol.ValidateMessageHead(answer.V, answer.ID, answer.Re, len(answer.Items)); err != nil {
+	if answer, err = readCore(plain); err != nil {
 		return answer, fmt.Errorf("core's reply: %w", err)
 	}
 	if !bytes.Equal(answer.Re, msgID) {
@@ -832,7 +833,8 @@ func seal(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items []any) (
 		if err != nil {
 			return nil, nil, 0, err
 		}
-		msg.Items = append(msg.Items, raw)
+		// Packed where the build packs and it pays (packing.go).
+		msg.Items = append(msg.Items, packItem(raw))
 	}
 	plain, err := protocol.MarshalCBOR(msg)
 	if err != nil {

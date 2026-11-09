@@ -171,9 +171,8 @@ func (l *wsLink) read(ws *websocket.Conn) {
 			log.Printf("a frame that does not open: %v", err)
 			continue
 		}
-		var msg protocol.CoreMessage
-		if err := protocol.UnmarshalCBOR(plain, &msg); err != nil ||
-			protocol.ValidateMessageHead(msg.V, msg.ID, msg.Re, len(msg.Items)) != nil {
+		msg, err := readCore(plain)
+		if err != nil {
 			log.Printf("a message from core that does not read")
 			continue
 		}
