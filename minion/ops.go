@@ -27,6 +27,12 @@ const (
 	// opReverseTunnel listens on the minion's host: its streams are the
 	// minion's.
 	opReverseTunnel = 17
+	// opDelegate makes the minion a delegate (delegate.go): it dials the
+	// minions of targets that name its session, for core.
+	opDelegate = 18
+	// opReverseDelegate makes it a delegate the other way: it listens, and
+	// carries the minions that dial it (delegate_reverse.go).
+	opReverseDelegate = 19
 )
 
 // Params, by command.
@@ -81,4 +87,12 @@ const (
 	// reverseTunnelUDP: listen for datagrams, a stream for each address
 	// they come from.
 	reverseTunnelUDP = 5
+)
+
+// A reverse delegate's params.
+const (
+	reverseDelegateBind           = 1
+	reverseDelegateListen         = 2
+	reverseDelegateKind           = 3
+	reverseDelegateMaxConnections = 4
 )

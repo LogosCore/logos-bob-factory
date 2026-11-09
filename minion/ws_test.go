@@ -14,15 +14,18 @@ import (
 )
 
 // wsChannel is a fake channel and core on a WebSocket: it answers each
-// message with an empty reply naming it, pushes a task after the first, and
-// closes the socket after a message it is told to drop at.
+// message with an empty reply naming it (after burst pushes, when told; not
+// at all to message silentAt), pushes a task after the first, and closes
+// the socket after a message it is told to drop at.
 type wsChannel struct {
-	srv   *httptest.Server
-	keys  protocol.AES256CBCHMACSHA256Material
-	mu    sync.Mutex
-	conns int
-	drop  int // closes the socket after this many messages, 0 never
-	got   int
+	srv      *httptest.Server
+	keys     protocol.AES256CBCHMACSHA256Material
+	mu       sync.Mutex
+	conns    int
+	drop     int // closes the socket after this many messages, 0 never
+	burst    int // pushes before each reply
+	silentAt int // the message it does not answer, 0 none
+	got      int
 }
 
 func newWSChannel(t *testing.T, keys protocol.AES256CBCHMACSHA256Material) *wsChannel {
@@ -57,9 +60,17 @@ func newWSChannel(t *testing.T, keys protocol.AES256CBCHMACSHA256Material) *wsCh
 			}
 			c.mu.Lock()
 			c.got++
-			n, drop := c.got, c.drop
+			n, drop, burst, silent := c.got, c.drop, c.burst, c.silentAt
 			c.mu.Unlock()
-			out := []protocol.CoreMessage{{V: protocol.MinionMessageV3, Re: msg.ID}}
+			if n == silent {
+				continue
+			}
+			var out []protocol.CoreMessage
+			for range burst {
+				cancel, _ := protocol.MarshalCBOR(protocol.CancelItem{T: protocol.ItemCancel, Task: bytes.Repeat([]byte{1}, 16)})
+				out = append(out, protocol.CoreMessage{V: protocol.MinionMessageV3, ID: protocol.NewMessageID(), Items: []cbor.RawMessage{cancel}})
+			}
+			out = append(out, protocol.CoreMessage{V: protocol.MinionMessageV3, Re: msg.ID})
 			if n == 1 {
 				task, _ := protocol.MarshalCBOR(protocol.TaskItem{T: protocol.ItemTask, Task: bytes.Repeat([]byte{3}, 16), Cmd: opHello})
 				out = append(out, protocol.CoreMessage{V: protocol.MinionMessageV3, ID: protocol.NewMessageID(), Items: []cbor.RawMessage{task}})
@@ -102,9 +113,10 @@ func TestWSLink(t *testing.T) {
 		t.Fatalf("reply %+v %v", reply, err)
 	}
 	select {
-	case push := <-link.pushes:
-		if push.ID == nil || len(push.Items) != 1 || protocol.ItemType(push.Items[0]) != protocol.ItemTask {
-			t.Fatalf("push %+v", push)
+	case <-link.pushes.readyCh():
+		pushes := link.pushes.take()
+		if len(pushes) != 1 || pushes[0].ID == nil || len(pushes[0].Items) != 1 || protocol.ItemType(pushes[0].Items[0]) != protocol.ItemTask {
+			t.Fatalf("pushes %+v", pushes)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no push")

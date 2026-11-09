@@ -94,8 +94,10 @@ type runner struct {
 	// (0: at once). It holds until the next message goes.
 	poll   time.Duration
 	polled bool
-	// tun are the session's tunnels (tunnel.go).
+	// tun are the session's tunnels (tunnel.go); dlg its delegate tasks'
+	// connections (delegate.go).
 	tun *tunnels
+	dlg *delegates
 	// helloAsked: core asked for a hello (rehello); hello makes it.
 	helloAsked bool
 	hello      func() protocol.HelloItem
@@ -131,6 +133,7 @@ func newRunner(d description, sched *schedule) *runner {
 	r := &runner{greeting: d.Greeting, ops: d.Ops, sched: sched, seen: map[string]time.Time{}, wake: make(chan struct{}, 1),
 		switches: make(chan switchReq, 1), maxTasks: d.maxTasks()}
 	r.tun = newTunnels(r.nudge)
+	r.dlg = newDelegates(r.nudge)
 	return r
 }
 
@@ -172,7 +175,7 @@ func (r *runner) pending() bool {
 			return true
 		}
 	}
-	return r.tun.pending()
+	return r.tun.pending() || r.dlg.pending()
 }
 
 // outgoing is the next message's items: the failed message's again, or
@@ -257,6 +260,10 @@ parts:
 			}
 		}
 	}
+	// What the delegate tasks carry (delegate.go), in the room left.
+	dlg, dlgUsed := r.dlg.items(room, tunnelMaxItems)
+	items = append(items, dlg...)
+	room = max(room-dlgUsed, 0)
 	// The tunnels' items (tunnel.go): half the room left while a file
 	// goes too.
 	tunRoom := room
@@ -311,7 +318,7 @@ parts:
 func (r *runner) roomLocked() uint64 {
 	running := uint64(0)
 	for _, t := range r.tasks {
-		if !t.sentEnd && !tunnelCmd(t.cmd) {
+		if !t.sentEnd && !holdsNoSlot(t.cmd) {
 			running++
 		}
 	}
@@ -418,6 +425,12 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 			// (tunnel.go).
 			if err := r.tun.take(raw); err != nil {
 				r.queueErr(protocol.ErrItemBadMessage, protocol.ItemName(protocol.ItemType(raw))+": "+err.Error(), i)
+			}
+		case protocol.ItemDelegate:
+			// What a delegate task carries: an open to dial, a frame for a
+			// connection it dialed, a close (delegate.go).
+			if err := r.dlg.take(raw); err != nil {
+				r.queueErr(protocol.ErrItemBadMessage, "delegate: "+err.Error(), i)
 			}
 		case protocol.ItemMaxTasks:
 			// How many tasks to run at once, from now: said back in the next
@@ -573,6 +586,11 @@ func (r *runner) start(ti protocol.TaskItem) {
 		// minion: core says each stream's destination. A reverse forward's
 		// streams are the minion's, opened once it listens.
 		r.tun.open(ctx, ti.Task, ti.Cmd, ti.Args)
+	}
+	if (ti.Cmd == opDelegate || ti.Cmd == opReverseDelegate) && slices.Contains(r.ops, ti.Cmd) {
+		// Its delegation now, before its ack goes: core sends opens once it
+		// has the ack.
+		r.dlg.open(ti.Task)
 	}
 	r.mu.Unlock()
 	log.Printf("task %s: command %d %v", key[:8], ti.Cmd, ti.Args)
@@ -755,6 +773,10 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.runTunnel(ctx, t)
 	case opReverseTunnel:
 		r.reverse(ctx, t, ti.Args)
+	case opDelegate:
+		r.runDelegate(ctx, t)
+	case opReverseDelegate:
+		r.runReverseDelegate(ctx, t, ti.Args)
 	case opExit:
 		r.exit(t)
 	default:

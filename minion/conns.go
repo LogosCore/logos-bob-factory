@@ -40,22 +40,37 @@ type transport struct {
 // persistentLink is a connection kept open, which core pushes over.
 type persistentLink interface {
 	exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error)
-	pushesCh() chan protocol.CoreMessage
+	// pushed is what core pushes over it, queued for the loop.
+	pushed() *pushQueue
 	lostCh() chan struct{}
 	close()
 }
 
 // usable reports whether this minion can use c: an http connection of a
-// reverse kind, or a tcp one it listens on (bind-persistent).
+// reverse kind, or a tcp one: one it listens on (bind-persistent), or one
+// it dials the channel through (reverse-persistent, reverse-call:
+// tcp_reverse.go).
 func usable(c connection) bool {
 	k := c.ConnectionKind()
 	switch c.Endpoint.Channel.ModuleName {
 	case "http":
 		return k == protocol.KindReverseCall || k == protocol.KindReversePersistent
 	case "tcp":
-		return k == protocol.KindBindPersistent
+		return k == protocol.KindBindPersistent || k == protocol.KindReverseCall || k == protocol.KindReversePersistent
 	}
 	return false
+}
+
+// tcp reports whether c goes through the TCP channel.
+func (c connection) tcp() bool { return c.Endpoint.Channel.ModuleName == "tcp" }
+
+// dialLink is a link to keep open for c, a reverse-persistent connection:
+// a WebSocket to the HTTP channel, or a TCP connection to the TCP one.
+func dialLink(c connection) persistentLink {
+	if c.tcp() {
+		return newTCPDialLink(c)
+	}
+	return newWSLink(c)
 }
 
 // bound reports whether c is one the minion is reached through (it
@@ -74,19 +89,19 @@ func newTransport(all []protocol.BuildConnection) (*transport, error) {
 			return t, nil
 		}
 	}
-	return nil, errors.New("built without a connection this minion can use (http, or tcp to listen on)")
+	return nil, errors.New("built without a connection this minion can use (http, or tcp)")
 }
 
-// use makes connection i the one in use, with its WebSocket when it has
-// one (ws: one opened already; nil opens one when needed), closing the
-// previous one's.
-func (t *transport) use(i int, ws *wsLink) {
+// use makes connection i the one in use, with the link it keeps open when
+// it has one (ws: one opened already; nil opens one when needed), closing
+// the previous one's.
+func (t *transport) use(i int, ws persistentLink) {
 	old := t.link
 	t.cur, t.link = i, nil
 	switch t.conn().ConnectionKind() {
 	case protocol.KindReversePersistent:
 		if ws == nil {
-			ws = newWSLink(t.conn())
+			ws = dialLink(t.conn())
 		}
 		t.link = ws
 	case protocol.KindBindPersistent:
@@ -112,7 +127,12 @@ func (t *transport) describe() string {
 	if c.bound() {
 		return fmt.Sprintf("connection %d, tcp %q (listening on %s)", t.place(), c.Endpoint.Name, c.listenAddr())
 	}
-	if c.ConnectionKind() == protocol.KindReversePersistent {
+	switch {
+	case c.tcp() && c.ConnectionKind() == protocol.KindReversePersistent:
+		return fmt.Sprintf("connection %d, tcp %q (connected to %s)", t.place(), c.Endpoint.Name, c.dialAddr())
+	case c.tcp():
+		return fmt.Sprintf("connection %d, tcp %q (a connection to %s for each exchange)", t.place(), c.Endpoint.Name, c.dialAddr())
+	case c.ConnectionKind() == protocol.KindReversePersistent:
 		return fmt.Sprintf("connection %d, http %q (WebSocket %s)", t.place(), c.Endpoint.Name, c.wsURL())
 	}
 	return fmt.Sprintf("connection %d, http %q (%s %s)", t.place(), c.Endpoint.Name, c.method(), c.url())
@@ -126,13 +146,13 @@ func (t *transport) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Mater
 	return exchange(t.conn(), id, keys, items...)
 }
 
-// pushes and lost are the WebSocket's, when one is in use; nil channels,
-// which never deliver, otherwise.
-func (t *transport) pushes() chan protocol.CoreMessage {
+// pushes and lost are the kept-open connection's, when one is in use; a
+// nil queue and a nil channel, which never deliver, otherwise.
+func (t *transport) pushes() *pushQueue {
 	if t.link == nil {
 		return nil
 	}
-	return t.link.pushesCh()
+	return t.link.pushed()
 }
 
 func (t *transport) lost() chan struct{} {
@@ -186,7 +206,7 @@ func (t *transport) check(place int) error {
 // on. When it fails nothing changes.
 func (t *transport) try(place int, id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
 	c := t.conns[place-1]
-	var ws *wsLink
+	var ws persistentLink
 	var answer protocol.CoreMessage
 	var err error
 	if c.bound() {
@@ -202,7 +222,7 @@ func (t *transport) try(place int, id [16]byte, keys protocol.AES256CBCHMACSHA25
 		return answer, nil
 	}
 	if c.ConnectionKind() == protocol.KindReversePersistent {
-		ws = newWSLink(c)
+		ws = dialLink(c)
 		answer, err = ws.exchange(id, keys, items...)
 	} else {
 		answer, err = exchange(c, id, keys, items...)

@@ -42,8 +42,8 @@ type wsLink struct {
 	keys map[[16]byte]protocol.AES256CBCHMACSHA256Material
 	// waiting are the minion's messages waiting for their replies, by id.
 	waiting map[string]chan protocol.CoreMessage
-	// pushes are the messages core starts.
-	pushes chan protocol.CoreMessage
+	// pushes are the messages core starts, until the loop takes them.
+	pushes *pushQueue
 	// lost says the WebSocket closed: the session connects again, backing
 	// off.
 	lost chan struct{}
@@ -51,7 +51,7 @@ type wsLink struct {
 
 func newWSLink(conn connection) *wsLink {
 	return &wsLink{conn: conn, keys: map[[16]byte]protocol.AES256CBCHMACSHA256Material{},
-		waiting: map[string]chan protocol.CoreMessage{}, pushes: make(chan protocol.CoreMessage, 16), lost: make(chan struct{}, 1)}
+		waiting: map[string]chan protocol.CoreMessage{}, pushes: newPushQueue(), lost: make(chan struct{}, 1)}
 }
 
 // wsURL is the connection's URL as a WebSocket's.
@@ -137,9 +137,9 @@ func (l *wsLink) ping(ws *websocket.Conn) {
 }
 
 // read takes what comes over ws until it closes: replies to their waiters,
-// what core starts to pushes.
+// what core starts to pushes (never waiting on the loop).
 func (l *wsLink) read(ws *websocket.Conn) {
-	defer l.dropped(ws)
+	defer l.drop(ws)
 	for {
 		typ, data, err := ws.Read(context.Background())
 		if err != nil {
@@ -188,25 +188,29 @@ func (l *wsLink) read(ws *websocket.Conn) {
 			continue
 		}
 		log.Printf("core sent a message: %d item(s)", len(msg.Items))
-		l.pushes <- msg
+		l.pushes.put(msg)
 	}
 }
 
-// dropped forgets ws once it closed: what waits for a reply over it fails.
-func (l *wsLink) dropped(ws *websocket.Conn) {
+// drop forgets ws and closes it: it closed, or failed an exchange (a
+// write, a reply not in time), so the next exchange opens another. When it
+// was the one in use, what waits for a reply over it fails and the session
+// hears it lost; one dropped already changes nothing.
+func (l *wsLink) drop(ws *websocket.Conn) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.ws == ws {
 		l.ws = nil
 		select {
 		case l.lost <- struct{}{}:
 		default:
 		}
+		for id, ch := range l.waiting {
+			close(ch)
+			delete(l.waiting, id)
+		}
 	}
-	for id, ch := range l.waiting {
-		close(ch)
-		delete(l.waiting, id)
-	}
+	l.mu.Unlock()
+	_ = ws.CloseNow()
 }
 
 // exchange sends one message with items under id, sealed with keys, and
@@ -235,7 +239,7 @@ func (l *wsLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material
 	defer cancel()
 	if err := ws.Write(ctx, websocket.MessageBinary, body); err != nil {
 		l.forget(msgID)
-		_ = ws.CloseNow()
+		l.drop(ws)
 		return answer, fmt.Errorf("write: %w", err)
 	}
 	select {
@@ -249,8 +253,10 @@ func (l *wsLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material
 		log.Printf("core's reply over the WebSocket: %d item(s)", len(msg.Items))
 		return msg, nil
 	case <-ctx.Done():
+		// A WebSocket that does not answer in time is taken for dead.
 		l.forget(msgID)
-		return answer, errors.New("no reply over the WebSocket in time")
+		l.drop(ws)
+		return answer, errors.New("no reply over the WebSocket in time: it is closed, the next exchange opens another")
 	}
 }
 
@@ -260,8 +266,8 @@ func (l *wsLink) forget(msgID []byte) {
 	l.mu.Unlock()
 }
 
-func (l *wsLink) pushesCh() chan protocol.CoreMessage { return l.pushes }
-func (l *wsLink) lostCh() chan struct{}               { return l.lost }
+func (l *wsLink) pushed() *pushQueue    { return l.pushes }
+func (l *wsLink) lostCh() chan struct{} { return l.lost }
 
 // close closes the WebSocket, if one is open.
 func (l *wsLink) close() {

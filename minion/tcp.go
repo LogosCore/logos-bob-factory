@@ -48,7 +48,7 @@ type tcpLink struct {
 	arrived chan struct{}
 	keys    map[[16]byte]protocol.AES256CBCHMACSHA256Material
 	waiting map[string]chan protocol.CoreMessage
-	pushes  chan protocol.CoreMessage
+	pushes  *pushQueue
 	lost    chan struct{}
 }
 
@@ -56,7 +56,7 @@ type tcpLink struct {
 // until closed: a listen that fails (the port taken) is tried again.
 func newTCPLink(conn connection) *tcpLink {
 	l := &tcpLink{conn: conn, arrived: make(chan struct{}, 1), keys: map[[16]byte]protocol.AES256CBCHMACSHA256Material{},
-		waiting: map[string]chan protocol.CoreMessage{}, pushes: make(chan protocol.CoreMessage, 16), lost: make(chan struct{}, 1)}
+		waiting: map[string]chan protocol.CoreMessage{}, pushes: newPushQueue(), lost: make(chan struct{}, 1)}
 	go l.listen()
 	return l
 }
@@ -179,7 +179,7 @@ func (l *tcpLink) wait() net.Conn {
 }
 
 // read takes what comes over c until it closes: replies to their waiters,
-// what core starts to pushes.
+// what core starts to pushes (never waiting on the loop).
 func (l *tcpLink) read(c net.Conn) {
 	defer l.dropped(c)
 	r := bufio.NewReaderSize(c, 64<<10)
@@ -220,29 +220,37 @@ func (l *tcpLink) read(c net.Conn) {
 			continue
 		}
 		log.Printf("core sent a message: %d item(s)", len(msg.Items))
-		l.pushes <- msg
+		l.pushes.put(msg)
 	}
 }
 
-// dropped forgets c once it closed: what waits for a reply over it fails,
-// and the session hears it lost when it was the one in use.
+// dropped is c closed: one connection fewer in, and c forgotten.
 func (l *tcpLink) dropped(c net.Conn) {
-	_ = c.Close()
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.open--
-	if l.cur != c {
-		return
+	l.mu.Unlock()
+	l.drop(c)
+}
+
+// drop forgets c and closes it: it closed, or failed an exchange (a write,
+// a reply not in time), so the next exchange waits for the channel's next
+// dial. When it was the one in use, what waits for a reply over it fails
+// and the session hears it lost; one dropped already changes nothing.
+func (l *tcpLink) drop(c net.Conn) {
+	l.mu.Lock()
+	if l.cur == c {
+		l.cur = nil
+		select {
+		case l.lost <- struct{}{}:
+		default:
+		}
+		for id, ch := range l.waiting {
+			close(ch)
+			delete(l.waiting, id)
+		}
 	}
-	l.cur = nil
-	select {
-	case l.lost <- struct{}{}:
-	default:
-	}
-	for id, ch := range l.waiting {
-		close(ch)
-		delete(l.waiting, id)
-	}
+	l.mu.Unlock()
+	_ = c.Close()
 }
 
 // exchange sends one message with items under id, sealed with keys, over
@@ -264,7 +272,7 @@ func (l *tcpLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Materia
 	_ = c.SetWriteDeadline(time.Now().Add(l.conn.timeout()))
 	if err := writeTCPFrame(c, id[:], frame); err != nil {
 		l.forget(msgID)
-		_ = c.Close()
+		l.drop(c)
 		return answer, fmt.Errorf("write: %w", err)
 	}
 	timer := time.NewTimer(l.conn.timeout())
@@ -280,8 +288,10 @@ func (l *tcpLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Materia
 		log.Printf("core's reply over the connection: %d item(s)", len(msg.Items))
 		return msg, nil
 	case <-timer.C:
+		// A connection that does not answer in time is taken for dead.
 		l.forget(msgID)
-		return answer, errors.New("no reply over the connection in time")
+		l.drop(c)
+		return answer, errors.New("no reply over the connection in time: it is closed, the next exchange waits for the channel's dial")
 	}
 }
 
@@ -307,8 +317,8 @@ func (l *tcpLink) close() {
 	}
 }
 
-func (l *tcpLink) pushesCh() chan protocol.CoreMessage { return l.pushes }
-func (l *tcpLink) lostCh() chan struct{}               { return l.lost }
+func (l *tcpLink) pushed() *pushQueue    { return l.pushes }
+func (l *tcpLink) lostCh() chan struct{} { return l.lost }
 
 // readTCPFrame reads one frame: the id it is sent under and the sealed
 // message.

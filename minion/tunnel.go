@@ -245,6 +245,13 @@ func tunnelCmd(cmd uint64) bool {
 	return cmd == opTunnel || cmd == opReverseTunnel
 }
 
+// holdsNoSlot reports whether a task of cmd holds no place in the minion's
+// max tasks: a tunnel's or a delegate's, which runs as long as what it
+// lends (protocol.HoldsNoSlot).
+func holdsNoSlot(cmd uint64) bool {
+	return tunnelCmd(cmd) || cmd == opDelegate || cmd == opReverseDelegate
+}
+
 // tunnelArgs are a tunnel task's limits, by its command's params (a
 // tunnel's, a reverse tunnel's): how many streams at once, and how long a
 // connect may take (a reverse tunnel's is core's, which a connection waits

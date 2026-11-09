@@ -42,11 +42,13 @@ var buildSchema = protocol.BuildSchema{
 			}},
 		},
 	}, {
-		// A minion that listens, which core reaches by asking the TCP
-		// channel to dial it (bind-persistent): the listen port and the
-		// rest are the channel's own fields, BOB adds none.
+		// The TCP channel: a minion that listens, which core reaches by
+		// asking the channel to dial it (bind-persistent), or one that
+		// dials the channel and stays (reverse-persistent) or dials it for
+		// each exchange (reverse-call). The ports and the rest are the
+		// channel's own fields: BOB adds none.
 		ModuleName: "tcp", Versions: []int{1},
-		Kinds: []protocol.BuildKind{{Kind: protocol.KindBindPersistent}},
+		Kinds: []protocol.BuildKind{{Kind: protocol.KindBindPersistent}, {Kind: protocol.KindReversePersistent}, {Kind: protocol.KindReverseCall}},
 	}},
 	// Its minions encrypt with AES-256-CBC and HMAC-SHA256; core generates
 	// each one's keys and BOB writes them into the artifact.
@@ -254,6 +256,37 @@ var buildSchema = protocol.BuildSchema{
 					Description: "How long core tries to connect to a destination; a connection to the minion waits that long, and 30 s more, for it."},
 				{Key: "max_streams", Num: 4, Type: protocol.FieldInt, Label: "Connections at once", Default: 256, Min: 1, Max: 4096, Order: 11,
 					Advanced: true, Description: "How many connections (UDP: addresses) the tunnel carries at once: one past it is reset (a new address's datagrams, dropped)."},
+			},
+		},
+		{
+			ID: "delegate", Op: 18, Label: "Delegate",
+			Description: "Carries other minions' messages: while it runs, core opens the targets that name this session as their delegate through it, and the minion dials each from its host as the TCP channel would (a minion listening for the TCP channel, in a network only this host reaches). Core starts it itself when such a target needs it; it runs until stopped.",
+			Action:      protocol.ActionDelegate,
+			// It serves what the minion speaks the other end of: the TCP
+			// channel's framing. Core adds stop_idle (1h): no num, never
+			// sent.
+			Serves: []protocol.ChannelVersions{{ModuleName: "tcp", Versions: []int{1}, Kinds: []string{protocol.KindBindPersistent}}},
+			Kinds:  []string{protocol.KindReverseCall, protocol.KindReversePersistent, protocol.KindBindPersistent},
+		},
+		{
+			ID: "reverse_delegate", Op: 19, Label: "Reverse delegate",
+			Description: "Carries other minions' messages the other way: while it runs, the minion listens on a port of its host as the TCP channel does, and minions built with this host's address for their tcp connection dial it (reverse-persistent: each stays connected; reverse-call: a connection for each exchange). It runs until stopped.",
+			Action:      protocol.ActionReverseDelegate,
+			// Core adds stop_idle (never by default): no num, never sent.
+			Serves: []protocol.ChannelVersions{{ModuleName: "tcp", Versions: []int{1},
+				Kinds: []string{protocol.KindReverseCall, protocol.KindReversePersistent}}},
+			Kinds: []string{protocol.KindReverseCall, protocol.KindReversePersistent, protocol.KindBindPersistent},
+			Params: []protocol.FieldSpec{
+				{Key: "bind", Num: 1, Type: protocol.FieldString, Label: "Listen address", Default: "0.0.0.0", MaxLength: 255, Order: 1,
+					Description: "The address the minion listens on: 0.0.0.0 for all of its host's."},
+				{Key: "listen", Num: 2, Type: protocol.FieldInt, Label: "Listen port", Required: true, Min: 1, Max: 65535, Order: 2,
+					Description: "The port the minions it carries dial: their tcp connection's port."},
+				{Key: "kind", Num: 3, Type: protocol.FieldEnum, Label: "Kind", Default: protocol.KindReversePersistent, Order: 3,
+					Description: "How the minions it carries are built: connected (reverse-persistent), or a connection for each exchange (reverse-call).",
+					Options: []protocol.EnumOption{{Value: protocol.KindReversePersistent, Label: "Reverse-persistent"},
+						{Value: protocol.KindReverseCall, Label: "Reverse-call"}}},
+				{Key: "max_connections", Num: 4, Type: protocol.FieldInt, Label: "Connections at once", Default: 16, Min: 1, Max: 256, Order: 10,
+					Advanced: true, Description: "Minions it carries at once (calls under way, for reverse-call): one past it is closed."},
 			},
 		},
 	},

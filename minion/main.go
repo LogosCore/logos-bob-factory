@@ -190,8 +190,10 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	// core's sealed session_closed, or the backstop, starts over (docs:
 	// "When an exchange fails").
 	tasks := newRunner(d, &sched)
-	// Its tunnels' connections go with the session.
+	// Its tunnels' connections go with the session, and its delegate
+	// tasks'.
 	defer tasks.tun.closeAll()
+	defer tasks.dlg.closeAll()
 	// Feedback reported meanwhile wakes this session's runner.
 	feedback.setWake(tasks.nudge)
 	defer feedback.setWake(nil)
@@ -347,6 +349,19 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			awaiting.req.place, listenWait, tr.place()))
 		awaiting = nil
 	}
+	// takePushes takes everything core pushed over the connection in use
+	// (tasks within the allowance, cancels, tunnel data and acks): their
+	// acks and answers go with the next message. An error once core said
+	// it closed the session.
+	takePushes := func() error {
+		for _, push := range tr.pushes().take() {
+			if e, ok := coreErrItem(push); ok && e.Code == protocol.ErrItemSessionClosed {
+				return errors.New("core closed the session")
+			}
+			tasks.take(push, nil)
+		}
+		return nil
+	}
 	for n := 1; ; n++ {
 		if ended != nil {
 			return ended
@@ -487,14 +502,13 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 						log.Printf("the connection closed: waiting for the channel to dial again")
 					}
 					break waiting
-				case push := <-tr.pushes():
-					// What core starts over the WebSocket: tasks within the
-					// allowance, cancels. Their acks go with the next message.
-					if e, ok := coreErrItem(push); ok && e.Code == protocol.ErrItemSessionClosed {
+				case <-tr.pushes().readyCh():
+					// What core starts over the connection kept open, all
+					// that came at once.
+					if err := takePushes(); err != nil {
 						timer.Stop()
-						return errors.New("core closed the session")
+						return err
 					}
-					tasks.take(push, nil)
 					// A task is acknowledged on receipt: its ack goes now.
 					if tasks.pending() {
 						timer.Stop()
@@ -509,6 +523,11 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		// A connect that came meanwhile goes first.
 		if len(tasks.switches) > 0 {
 			continue
+		}
+		// What core pushed meanwhile goes with this message: pushes never
+		// wait on a loop busy exchanging, or retrying.
+		if err := takePushes(); err != nil {
+			return err
 		}
 		items := tasks.outgoing()
 		answer, err := tr.exchange(sessionID, newKeys, items...)
@@ -738,6 +757,24 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 	if err != nil {
 		return answer, err
 	}
+	if conn.tcp() {
+		// A reverse call through the TCP channel: a connection for it.
+		log.Printf("message %x under %s: %d bytes of CBOR, a %d-byte sealed frame, to %s", msgID, formatUUID(id[:]), plainLen,
+			len(frame), conn.dialAddr())
+		sealed, took, err := conn.tcpCall(id, frame)
+		if err != nil {
+			return answer, err
+		}
+		log.Printf("the channel answered with %d bytes in %s", len(sealed), took.Round(time.Millisecond))
+		if len(sealed) == 0 {
+			return answer, nil
+		}
+		answer, err = openReply(keys, id, msgID, sealed)
+		if err == nil {
+			log.Printf("opened core's reply: %d item(s)", len(answer.Items))
+		}
+		return answer, err
+	}
 	body, err := pack(id, frame)
 	if err != nil {
 		return answer, err
@@ -874,10 +911,14 @@ func (c connection) url() string {
 	return strings.TrimRight(c.param("base_url"), "/") + prefix
 }
 
-// wsBackoff is the endpoint's longest wait between WebSocket reconnects.
+// wsBackoff is the endpoint's longest wait between reconnects: a
+// WebSocket's (ws_reconnect_backoff), a TCP connection's
+// (reconnect_backoff).
 func (c connection) wsBackoff() time.Duration {
-	if d, err := time.ParseDuration(c.param("ws_reconnect_backoff")); err == nil && d > 0 {
-		return d
+	for _, key := range []string{"ws_reconnect_backoff", "reconnect_backoff"} {
+		if d, err := time.ParseDuration(c.param(key)); err == nil && d > 0 {
+			return d
+		}
 	}
 	return 60 * time.Second
 }
