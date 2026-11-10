@@ -165,6 +165,7 @@ and `draining`), BOB declares:
 | Env | Default | |
 |---|---|---|
 | `FACTORY_ID` | `bob-local` | Instance id, unique per running process |
+| `LOGOS_CORE_BASE_URL` | `http://localhost:8002` | Core's address (its front, wherever BOB runs): builds fetch their files from it and upload the binary to it. Over HTTPS to a self-signed core, `LOGOS_CORE_CA_FILE`, `LOGOS_CORE_CERT_SHA256` or `LOGOS_CORE_TLS_INSECURE` ([How modules reach core](https://logoscore.github.io/logos-docs/core-infrastructure/#how-modules-reach-core)) |
 | `RABBITMQ_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_VHOST` | `localhost` / `5672` / `guest` / `guest` / `/` | Core's broker |
 | `LOG_FORMAT` | `json` | `json` or `text`, on stderr |
 | `MINION_SRC` | `/app/minion` | The minion module compiled for `linux-elf` builds; `./minion` when running from the repository |

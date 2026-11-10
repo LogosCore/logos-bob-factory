@@ -26,7 +26,7 @@ func TestManagementJoinsTheBuildsSection(t *testing.T) {
 	schema := buildSchema
 	err = factory.Run(context.Background(), factory.Config{
 		Config: module.Config{Identity: lifecycle.Identity{ModuleName: "bob", Instance: "bob-test"}, Management: s},
-		Build:  &schema, Builder: &bob{},
+		Build:  &schema, Builder: &bob{}, CoreURL: "http://127.0.0.1:1",
 	})
 	if err == nil || !strings.Contains(err.Error(), "AMQPURL") {
 		t.Fatalf("Run: %v", err)

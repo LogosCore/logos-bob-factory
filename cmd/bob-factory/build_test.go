@@ -66,13 +66,13 @@ func coreRequest(t *testing.T) protocol.BuildRequest {
 		}},
 		Files: map[string]protocol.BuildFile{"badge-1": {
 			ID: "badge-1", Name: "badge.png", Size: 3, SHA256: strings.Repeat("ab", 32), MediaType: "image/png",
-			URL: "http://logos-seaweedfs-s3:8333/badge-1?X-Amz-Signature=x",
+			URL: "/api/factory/builds/b/files/badge-1?expires=1&sig=badge-link",
 		}},
 		Crypto: &protocol.BuildCrypto{
 			Suite:    protocol.CryptoAES256CBCHMACSHA256,
 			Material: json.RawMessage(`{"enc_key":"ZW5j","mac_key":"bWFj"}`),
 		},
-		Artifact: protocol.ArtifactUpload{UploadURL: "http://logos-seaweedfs-s3:8333/artifact", MaxSize: 1 << 20},
+		Artifact: protocol.ArtifactUpload{UploadURL: "/api/factory/builds/b/artifact?expires=1&sig=artifact-link", MaxSize: 1 << 20},
 		Deadline: time.Now().Add(time.Minute),
 	}
 	if p := protocol.ValidateBuildRequest(buildSchema, r); p != nil {
@@ -109,8 +109,8 @@ func TestDescribe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "X-Amz-Signature") {
-		t.Fatalf("a presigned URL reached the artifact: %s", raw)
+	if strings.Contains(string(raw), "badge-link") || strings.Contains(string(raw), "artifact-link") {
+		t.Fatalf("a build's link reached the artifact: %s", raw)
 	}
 }
 

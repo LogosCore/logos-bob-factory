@@ -1,4 +1,5 @@
-# Local development: joins logos-core's network to reach its RabbitMQ.
+# Local development: joins logos-core's network to reach core and its
+# RabbitMQ.
 # Start logos-core first, set RABBITMQ_PASSWORD in .env, then:
 #
 #   docker compose up -d --build
@@ -13,6 +14,9 @@ services:
     restart: unless-stopped
     environment:
       FACTORY_ID: ${FACTORY_ID:-bob-local}
+      # Core's address: builds fetch their files from it and upload the
+      # artifact to it.
+      LOGOS_CORE_BASE_URL: ${LOGOS_CORE_BASE_URL:-http://logos-core-dev:8002}
       RABBITMQ_HOST: ${RABBITMQ_HOST:-logos-rabbitmq}
       RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
       RABBITMQ_USER: ${RABBITMQ_USER:-logos}
