@@ -75,10 +75,10 @@ type description struct {
 func readDescription(raw []byte) (description, error) {
 	c, err := protocol.ReadMinionConfig(raw)
 	if err != nil {
-		return description{}, err
+		return description{}, withCode(exitConfig, err)
 	}
 	if c.Crypto == nil || c.Crypto.EncKey == nil {
-		return description{}, errors.New("built without core's keys")
+		return description{}, withCode(exitNoKeys, errors.New("built without core's keys"))
 	}
 	d := description{
 		Keys: c.Crypto.Keys(), Connections: c.Connections, Session: c.Session, Ops: c.Ops,
@@ -105,9 +105,33 @@ func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.SetPrefix("minion ")
 	// run goes on until the process is stopped: it returns only when it
-	// cannot start (a config it cannot read).
-	log.Printf("failed: %v", run())
-	os.Exit(1)
+	// cannot start (a config it cannot read), with the exit code that says
+	// why (exits.go).
+	err := run()
+	code := exitCode(err)
+	log.Printf("failed (exit code %d): %v", code, err)
+	os.Exit(code)
+}
+
+// exitError is why the minion cannot start, with the code it exits with.
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Unwrap() error { return e.err }
+
+// withCode gives err the exit code code.
+func withCode(code int, err error) error { return &exitError{code: code, err: err} }
+
+// exitCode is the code the minion exits with for err: the one it was given,
+// or exitFailed.
+func exitCode(err error) int {
+	if e := (*exitError)(nil); errors.As(err, &e) {
+		return e.code
+	}
+	return exitFailed
 }
 
 // run stages, says hello under the temporary id with the new keys, and
@@ -120,7 +144,7 @@ func run() error {
 	buildID, keys := d.Build, d.Keys
 	tr, err := newTransport(d.Connections)
 	if err != nil {
-		return err
+		return withCode(exitNoConnection, err)
 	}
 	packs = d.Packs
 	// The schedule is the first connection's; a connect leaves it as it is.

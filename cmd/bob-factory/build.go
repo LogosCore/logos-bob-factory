@@ -296,6 +296,19 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 	},
+	// What the minion's exit codes mean (minion/exits.go, which
+	// exits_test.go checks against these): it exits with one when it cannot
+	// start. Once running it goes on until stopped, and exit ends it with 0.
+	ErrorCodes: []protocol.ErrorCode{
+		{Code: 1, Label: "Could not start", Description: "For a reason without a code of its own: the minion's log says which."},
+		{Code: 2, Label: "Crashed", Description: "Go's own exit code: a panic no task recovered, or a fatal error of the Go runtime " +
+			"(out of memory, say). A bug in the minion: its output says where."},
+		{Code: 3, Label: "Its config does not read", Description: "The settings built into it do not read as a minion config: " +
+			"the binary is damaged. Build it again."},
+		{Code: 4, Label: "Built without core's keys", Description: "Its config has no payload keys, and BOB's minions speak core's crypto. Build it again."},
+		{Code: 5, Label: "No connection it can use", Description: "None of its connections is one it speaks: an http connection of a " +
+			"reverse kind, or a tcp one. Build it with one."},
+	},
 }
 
 // pathPrefix is BOB's path prefix parameter, described for its kind.
