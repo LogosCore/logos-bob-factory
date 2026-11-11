@@ -208,6 +208,9 @@ func newFakeCore(t *testing.T, script map[int]string) *fakeCore {
 	_, _ = rand.Read(core.keys.MACKey)
 	_, _ = rand.Read(core.tempID[:])
 	_, _ = rand.Read(core.sessionID[:])
+	// A UUIDv4, as core's session ids are: a build claims one by it.
+	core.sessionID[6] = core.sessionID[6]&0x0f | 0x40
+	core.sessionID[8] = core.sessionID[8]&0x3f | 0x80
 	core.checkIns = make(chan int, 16)
 	core.script = script
 	core.newKeys = protocol.AES256CBCHMACSHA256Material{EncKey: make([]byte, 32), MACKey: make([]byte, 32)}
@@ -231,8 +234,11 @@ func startMinion(t *testing.T, core *fakeCore, mutate func(req *protocol.BuildRe
 	if mutate != nil {
 		mutate(&req)
 	}
-	desc, _ := json.Marshal(describe(req, nil, "bob", req.Deadline))
-	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/amd64", desc, io.Discard)
+	req, err := withConfig(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/amd64", req.MinionConfig, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

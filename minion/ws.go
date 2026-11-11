@@ -73,23 +73,18 @@ func (l *wsLink) open() (*websocket.Conn, error) {
 	if l.ws != nil {
 		return l.ws, nil
 	}
-	verify, _ := l.conn.Endpoint.Params["tls_verify"].(bool)
 	client := &http.Client{Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: !verify, ServerName: l.conn.param("sni")}, //nolint:gosec // the endpoint's own setting
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: !l.conn.verify(), ServerName: l.conn.param(httpSNI)}, //nolint:gosec // the endpoint's own setting
 	}}
 	h := http.Header{}
-	if ua := l.conn.param("user_agent"); ua != "" {
+	if ua := l.conn.param(httpUserAgent); ua != "" {
 		h.Set("User-Agent", ua)
 	}
-	if headers, ok := l.conn.Endpoint.Params["headers"].(map[string]any); ok {
-		for k, v := range headers {
-			if s, ok := v.(string); ok {
-				h.Set(k, s)
-			}
-		}
+	for k, v := range l.conn.headers() {
+		h.Set(k, v)
 	}
 	opts := &websocket.DialOptions{HTTPClient: client, HTTPHeader: h, CompressionMode: websocket.CompressionDisabled}
-	if host := l.conn.param("host_header"); host != "" {
+	if host := l.conn.param(httpHostHeader); host != "" {
 		opts.Host = host
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), l.conn.timeout())

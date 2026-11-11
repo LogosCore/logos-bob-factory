@@ -13,17 +13,25 @@ import (
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
-func buildConn(module, kind, url string) protocol.BuildConnection {
-	return protocol.BuildConnection{Endpoint: protocol.ChannelEndpointExport{
-		Name: module + "-" + kind, Kind: kind, Channel: protocol.ExportChannel{ModuleName: module},
-		Params: map[string]any{"base_url": url, "request_timeout": "2s"},
-	}}
+// testConn is a connection of kind through module (http, tcp, or one this
+// minion does not speak), its channel's fields by number (fields.go):
+// durations in milliseconds, as a minion config carries them.
+func testConn(module, kind string, params protocol.Args) protocol.MinionConnection {
+	ch := map[string]uint64{"http": chanHTTP, "tcp": chanTCP}[module]
+	if ch == 0 {
+		ch = 9 // a channel BOB does not number
+	}
+	return protocol.MinionConnection{Channel: ch, Version: 1, Kind: protocol.KindNumber(kind), Params: params}
+}
+
+func buildConn(module, kind, url string) protocol.MinionConnection {
+	return testConn(module, kind, protocol.Args{httpBaseURL: url, httpRequestTimeout: 2000})
 }
 
 // The minion starts on the first connection it can use, and says why it
 // cannot move where it cannot.
 func TestTransportStartAndChecks(t *testing.T) {
-	tr, err := newTransport([]protocol.BuildConnection{
+	tr, err := newTransport([]protocol.MinionConnection{
 		buildConn("dns", protocol.KindReverseCall, "x"),
 		buildConn("http", protocol.KindReverseCall, "http://127.0.0.1:1"),
 		buildConn("http", protocol.KindReversePersistent, "http://127.0.0.1:1"),
@@ -37,7 +45,7 @@ func TestTransportStartAndChecks(t *testing.T) {
 	}
 	for place, want := range map[int]string{
 		0: "there is no connection 0", 5: "there is no connection 5", 2: "already on connection 2",
-		1: "reverse-call through dns", 4: "bind-call through http",
+		1: "reverse-call through channel 9", 4: "bind-call through channel 1",
 	} {
 		if err := tr.check(place); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("check(%d) = %v, want %q", place, err, want)
@@ -46,7 +54,7 @@ func TestTransportStartAndChecks(t *testing.T) {
 	if err := tr.check(3); err != nil {
 		t.Errorf("check(3): %v", err)
 	}
-	if _, err := newTransport([]protocol.BuildConnection{buildConn("dns", protocol.KindReverseCall, "x")}); err == nil {
+	if _, err := newTransport([]protocol.MinionConnection{buildConn("dns", protocol.KindReverseCall, "x")}); err == nil {
 		t.Error("a build with no http connection started")
 	}
 }
@@ -56,7 +64,7 @@ func TestTransportStartAndChecks(t *testing.T) {
 func TestTransportTry(t *testing.T) {
 	keys := protocol.AES256CBCHMACSHA256Material{EncKey: bytes.Repeat([]byte{1}, 32), MACKey: bytes.Repeat([]byte{2}, 32)}
 	ch := newWSChannel(t, keys)
-	tr, err := newTransport([]protocol.BuildConnection{
+	tr, err := newTransport([]protocol.MinionConnection{
 		buildConn("http", protocol.KindReverseCall, "http://127.0.0.1:1"),
 		buildConn("http", protocol.KindReversePersistent, "http://127.0.0.1:1"),
 		buildConn("http", protocol.KindReversePersistent, ch.srv.URL),
@@ -133,10 +141,8 @@ func TestListener(t *testing.T) {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
-	tcp := protocol.BuildConnection{Endpoint: protocol.ChannelEndpointExport{Name: "listener", Kind: protocol.KindBindPersistent,
-		Channel: protocol.ExportChannel{ModuleName: "tcp", SchemaVersion: 1},
-		Params:  map[string]any{"listen_port": float64(port), "listen_address": "127.0.0.1", "request_timeout": "5s"}}}
-	tr, err := newTransport([]protocol.BuildConnection{tcp})
+	tcp := testConn("tcp", protocol.KindBindPersistent, protocol.Args{tcpListenPort: port, tcpListenAddress: "127.0.0.1", tcpRequestTimeout: 5000})
+	tr, err := newTransport([]protocol.MinionConnection{tcp})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,10 +217,8 @@ func TestSwitchToListener(t *testing.T) {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
-	tcp := protocol.BuildConnection{Endpoint: protocol.ChannelEndpointExport{Name: "listener", Kind: protocol.KindBindPersistent,
-		Channel: protocol.ExportChannel{ModuleName: "tcp", SchemaVersion: 1},
-		Params:  map[string]any{"listen_port": float64(port), "listen_address": "127.0.0.1", "request_timeout": "5s"}}}
-	tr, err := newTransport([]protocol.BuildConnection{buildConn("http", protocol.KindReverseCall, "http://127.0.0.1:1"), tcp})
+	tcp := testConn("tcp", protocol.KindBindPersistent, protocol.Args{tcpListenPort: port, tcpListenAddress: "127.0.0.1", tcpRequestTimeout: 5000})
+	tr, err := newTransport([]protocol.MinionConnection{buildConn("http", protocol.KindReverseCall, "http://127.0.0.1:1"), tcp})
 	if err != nil {
 		t.Fatal(err)
 	}

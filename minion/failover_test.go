@@ -9,7 +9,7 @@ import (
 
 // conns are three http connections (reverse-call), and a listening one
 // last, as a build lists them.
-func failoverConns(over ...*protocol.ConnectionFailover) []connection {
+func failoverConns(over ...*protocol.MinionConnectionFailover) []connection {
 	out := []connection{}
 	for i := range 3 {
 		c := connection{buildConn("http", protocol.KindReverseCall, "http://127.0.0.1:1")}
@@ -18,8 +18,13 @@ func failoverConns(over ...*protocol.ConnectionFailover) []connection {
 		}
 		out = append(out, c)
 	}
-	return append(out, connection{protocol.BuildConnection{Endpoint: protocol.ChannelEndpointExport{Kind: protocol.KindBindPersistent,
-		Channel: protocol.ExportChannel{ModuleName: "tcp"}}}})
+	return append(out, connection{testConn("tcp", protocol.KindBindPersistent, nil)})
+}
+
+// policy is p as the minion's config carries it.
+func policy(p protocol.BuildFailover) *protocol.MinionFailover {
+	m := p.Minion()
+	return &m
 }
 
 // fail_after failures in a row move the minion to the next connection,
@@ -28,7 +33,7 @@ func failoverConns(over ...*protocol.ConnectionFailover) []connection {
 func TestFailoverMoves(t *testing.T) {
 	p := protocol.DefaultBuildFailover()
 	p.FailAfter, p.FailFor = 3, "1m"
-	f := newFailover(&p, failoverConns())
+	f := newFailover(policy(p), failoverConns())
 	now := time.Now()
 	for i := range 2 {
 		if to, _, _ := f.failed(1, now.Add(time.Duration(i)*time.Minute)); to != 0 {
@@ -54,7 +59,7 @@ func TestFailoverMoves(t *testing.T) {
 func TestFailoverRound(t *testing.T) {
 	p := protocol.DefaultBuildFailover()
 	p.FailAfter = 1
-	f := newFailover(&p, failoverConns())
+	f := newFailover(policy(p), failoverConns())
 	now := time.Now()
 	to, _, _ := f.failed(1, now)
 	f.missed(to)
@@ -73,7 +78,7 @@ func TestFailoverRound(t *testing.T) {
 		t.Fatalf("the next round starts at %d", to4)
 	}
 	p.Wrap = false
-	f = newFailover(&p, failoverConns())
+	f = newFailover(policy(p), failoverConns())
 	if to, _, _ := f.failed(3, now); to != 0 {
 		t.Fatalf("without wrap the last moved to %d", to)
 	}
@@ -83,12 +88,12 @@ func TestFailoverRound(t *testing.T) {
 func TestFailoverPerConnection(t *testing.T) {
 	off := false
 	p := protocol.DefaultBuildFailover()
-	f := newFailover(&p, failoverConns(&protocol.ConnectionFailover{FailAfter: 1}, &protocol.ConnectionFailover{Auto: &off}))
+	f := newFailover(policy(p), failoverConns(&protocol.MinionConnectionFailover{FailAfter: 1}, &protocol.MinionConnectionFailover{Auto: &off}))
 	if to, _, _ := f.failed(1, time.Now()); to != 3 {
 		t.Fatalf("connection 1 (fail_after 1) moved to %d, past the one left out", to)
 	}
 	p.Enabled = false
-	f = newFailover(&p, failoverConns())
+	f = newFailover(policy(p), failoverConns())
 	for range 10 {
 		if to, _, _ := f.failed(1, time.Now()); to != 0 {
 			t.Fatal("moved with failover off")
@@ -101,7 +106,7 @@ func TestFailoverPerConnection(t *testing.T) {
 // switch is not failover's to undo.
 func TestFailback(t *testing.T) {
 	p := protocol.DefaultBuildFailover()
-	f := newFailover(&p, failoverConns())
+	f := newFailover(policy(p), failoverConns())
 	now := time.Now()
 	f.moved(2, now)
 	if f.failbackDue(2, now.Add(59*time.Minute)) != 0 || f.failbackDue(2, now.Add(time.Hour)) != 1 {
@@ -116,7 +121,7 @@ func TestFailback(t *testing.T) {
 		t.Fatal("failback after an operator's switch")
 	}
 	p.FailbackAfter = "0s"
-	f = newFailover(&p, failoverConns())
+	f = newFailover(policy(p), failoverConns())
 	f.moved(2, now)
 	if f.failbackDue(2, now.Add(100*time.Hour)) != 0 {
 		t.Fatal("failback with 0s")

@@ -1,13 +1,15 @@
-// Command minion is the program BOB compiles for its linux-elf target: a
-// dummy minion. BOB writes the build's description to minion.json before
-// compiling, so it is baked into the binary (the minion.json kept here is a
-// placeholder). Run, the minion stages with core through the first of its
+// Command minion is the program BOB compiles for its targets: a dummy
+// minion. BOB writes the build's minion config (core's, numbered CBOR:
+// protocol.MinionConfig) to minion.cfg before compiling, so it is baked into
+// the binary as it came (the empty minion.cfg kept here is a placeholder),
+// and the minion reads it by numbers alone (fields.go). Run, the minion
+// stages with core through the first of its
 // connections it can use (conns.go), says hello to open a session, then checks in with a get_tasks
 // every check-in interval of the connection, with its jitter, and logs each
 // step (docs: contracts/minion-messages.md). It keeps its session through
 // failures on the way, and starts over when core closes the session, after
 // 24 hours of nothing but failures, or when staging or the hello fails.
-// "minion describe" prints the description instead.
+// "minion describe" prints its config instead, the bytes as they are.
 package main
 
 import (
@@ -19,7 +21,6 @@ import (
 	"crypto/x509"
 	_ "embed"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -40,32 +41,52 @@ import (
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
-//go:embed minion.json
+//go:embed minion.cfg
 var minion []byte
 
 // version is the minion implementation's own, sent in its hello.
 const version = "0.2.0"
 
-// description is what the minion reads of the description it was built with.
+// description is what the minion reads of the config it was built with
+// (readDescription).
 type description struct {
-	BuildID     string                     `json:"build_id"`
-	Crypto      *protocol.BuildCrypto      `json:"crypto"`
-	Connections []protocol.BuildConnection `json:"connections"`
-	// SessionID is the persisted session to claim; empty for none.
-	SessionID string `json:"session_id"`
+	Build       [16]byte
+	Keys        protocol.AES256CBCHMACSHA256Material
+	Connections []protocol.MinionConnection
+	// Session is the persisted session to claim; nil for none.
+	Session []byte
 	// Ops are the numbers of the commands the minion was built with
 	// (ops.go); Greeting what its hello command answers.
-	Ops      []uint64 `json:"ops"`
-	Greeting string   `json:"greeting"`
+	Ops      []uint64
+	Greeting string
 	// Failover is the build's failover policy (failover.go); nil: the
 	// defaults.
-	Failover *protocol.BuildFailover `json:"failover"`
+	Failover *protocol.MinionFailover
 	// MaxTasks is how many tasks the minion runs at once as it starts (core
 	// changes it live: max_tasks); nil: protocol.DefaultMaxTasks.
-	MaxTasks *uint64 `json:"max_tasks"`
-	// Compression is the algorithm the minion packs its items with
-	// (packing.go); "": the build has compression off.
-	Compression string `json:"compression"`
+	MaxTasks *uint64
+	// Packs says the minion packs its items (packing.go): the build has
+	// compression on.
+	Packs bool
+}
+
+// readDescription reads the minion's config: built with core's keys, as
+// BOB's builds are.
+func readDescription(raw []byte) (description, error) {
+	c, err := protocol.ReadMinionConfig(raw)
+	if err != nil {
+		return description{}, err
+	}
+	if c.Crypto == nil || c.Crypto.EncKey == nil {
+		return description{}, errors.New("built without core's keys")
+	}
+	d := description{
+		Keys: c.Crypto.Keys(), Connections: c.Connections, Session: c.Session, Ops: c.Ops,
+		Failover: c.Failover, MaxTasks: c.MaxTasks, Packs: c.Compression == protocol.PackDeflate,
+	}
+	copy(d.Build[:], c.Build)
+	d.Greeting, _ = protocol.ArgString(c.Values, fieldGreeting)
+	return d, nil
 }
 
 // maxTasks is how many tasks the build says the minion runs at once.
@@ -84,7 +105,7 @@ func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.SetPrefix("minion ")
 	// run goes on until the process is stopped: it returns only when it
-	// cannot start (a description or keys it cannot read).
+	// cannot start (a config it cannot read).
 	log.Printf("failed: %v", run())
 	os.Exit(1)
 }
@@ -92,29 +113,19 @@ func main() {
 // run stages, says hello under the temporary id with the new keys, and
 // checks in once under the session id.
 func run() error {
-	var d description
-	if err := json.Unmarshal(minion, &d); err != nil {
-		return fmt.Errorf("read the description: %w", err)
-	}
-	buildID, err := parseUUID(d.BuildID)
+	d, err := readDescription(minion)
 	if err != nil {
-		return fmt.Errorf("build id: %w", err)
+		return fmt.Errorf("read the config: %w", err)
 	}
-	if d.Crypto == nil || d.Crypto.Suite != protocol.CryptoAES256CBCHMACSHA256 {
-		return errors.New("built without the aes-256-cbc-hmac-sha256 keys")
-	}
-	var keys protocol.AES256CBCHMACSHA256Material
-	if err := json.Unmarshal(d.Crypto.Material, &keys); err != nil {
-		return fmt.Errorf("the build's keys: %w", err)
-	}
+	buildID, keys := d.Build, d.Keys
 	tr, err := newTransport(d.Connections)
 	if err != nil {
 		return err
 	}
-	packs = d.Compression == protocol.CompressionDeflate
+	packs = d.Packs
 	// The schedule is the first connection's; a connect leaves it as it is.
 	sched := tr.conn().schedule()
-	log.Printf("build %s, crypto %s", d.BuildID, d.Crypto.Suite)
+	log.Printf("build %s", formatUUID(buildID[:]))
 	// A reverse-persistent connection keeps a WebSocket open: core pushes
 	// tasks over it; check-ins go on, on the schedule, to restate the
 	// allowance.
@@ -123,13 +134,9 @@ func run() error {
 	// The persisted session the build claims, if it has one: given up for
 	// this process once another process takes it (session_replaced).
 	var claim []byte
-	if d.SessionID != "" {
-		sid, err := parseUUID(d.SessionID)
-		if err != nil {
-			return fmt.Errorf("session id: %w", err)
-		}
-		claim = sid[:]
-		log.Printf("persisted session %s: claimed in every hello", d.SessionID)
+	if d.Session != nil {
+		claim = d.Session
+		log.Printf("persisted session %s: claimed in every hello", formatUUID(claim))
 	}
 
 	// Starting over: a stage or hello that fails, core closing the session,
@@ -873,32 +880,55 @@ func item(answer protocol.CoreMessage, t int) []byte {
 	return nil
 }
 
-// connection is the minion's HTTP connection: the channel's settings and
-// BOB's own parameters for it.
+// connection is one of the minion's connections: its channel's settings and
+// BOB's own parameters for it, by number (fields.go).
 type connection struct {
-	protocol.BuildConnection
+	protocol.MinionConnection
 }
 
-func (c connection) param(key string) string {
-	s, _ := c.Endpoint.Params[key].(string)
+// pick is the number of a field both channels have: the HTTP channel's, or
+// the TCP channel's.
+func (c connection) pick(http, tcp uint64) uint64 {
+	if c.tcp() {
+		return tcp
+	}
+	return http
+}
+
+// param is the channel's text field n; "" when it has none.
+func (c connection) param(n uint64) string {
+	s, _ := protocol.ArgString(c.Params, n)
 	return s
 }
 
-// schedule is the endpoint's check-in interval and jitter, or the HTTP
-// channel's defaults (60s, 20%) where it has none.
-func (c connection) schedule() schedule {
-	s := schedule{interval: 60 * time.Second, jitter: 20}
-	if d, err := time.ParseDuration(c.param("checkin_interval")); err == nil && d > 0 {
-		s.interval = d
+// duration is the channel's duration field n, def when it has none.
+func (c connection) duration(n uint64, def time.Duration) time.Duration {
+	if d, ok := protocol.ArgDuration(c.Params, n); ok && d > 0 {
+		return d
 	}
-	if j, ok := c.Endpoint.Params["checkin_jitter"].(float64); ok && j >= 0 && j <= 100 {
-		s.jitter = j
+	return def
+}
+
+// intParam is the channel's integer field n, def when it has none.
+func (c connection) intParam(n uint64, def int) int {
+	if v, ok := protocol.ArgInt(c.Params, n); ok {
+		return int(v)
+	}
+	return def
+}
+
+// schedule is the endpoint's check-in interval and jitter, or the
+// channels' defaults (60s, 20%) where it has none.
+func (c connection) schedule() schedule {
+	s := schedule{interval: c.duration(c.pick(httpCheckinInterval, tcpCheckinInterval), 60*time.Second), jitter: 20}
+	if j, ok := protocol.ArgInt(c.Params, c.pick(httpCheckinJitter, tcpCheckinJitter)); ok && j >= 0 && j <= 100 {
+		s.jitter = float64(j)
 	}
 	return s
 }
 
 func (c connection) method() string {
-	if m, _ := c.Values["method"].(string); m != "" {
+	if m, _ := protocol.ArgString(c.Values, paramMethod); m != "" {
 		return m
 	}
 	return http.MethodPost
@@ -906,32 +936,35 @@ func (c connection) method() string {
 
 // url is the base URL with BOB's path prefix.
 func (c connection) url() string {
-	prefix, _ := c.Values["path_prefix"].(string)
+	prefix, _ := protocol.ArgString(c.Values, paramPathPrefix)
 	if prefix == "" {
 		prefix = "/"
 	}
-	return strings.TrimRight(c.param("base_url"), "/") + prefix
+	return strings.TrimRight(c.param(httpBaseURL), "/") + prefix
 }
 
 // wsBackoff is the endpoint's longest wait between reconnects: a
-// WebSocket's (ws_reconnect_backoff), a TCP connection's
-// (reconnect_backoff).
+// WebSocket's, a TCP connection's.
 func (c connection) wsBackoff() time.Duration {
-	for _, key := range []string{"ws_reconnect_backoff", "reconnect_backoff"} {
-		if d, err := time.ParseDuration(c.param(key)); err == nil && d > 0 {
-			return d
-		}
-	}
-	return 60 * time.Second
+	return c.duration(c.pick(httpWSReconnectBackoff, tcpReconnectBackoff), 60*time.Second)
 }
 
 // timeout is the endpoint's request timeout: how long the minion waits for
 // a reply.
 func (c connection) timeout() time.Duration {
-	if d, err := time.ParseDuration(c.param("request_timeout")); err == nil && d > 0 {
-		return d
-	}
-	return 40 * time.Second
+	return c.duration(c.pick(httpRequestTimeout, tcpRequestTimeout), 40*time.Second)
+}
+
+// headers are the extra headers the HTTP channel's endpoint adds.
+func (c connection) headers() map[string]string {
+	h, _ := protocol.ArgStringMap(c.Params, httpHeaders)
+	return h
+}
+
+// verify says whether the HTTP channel's certificate is checked.
+func (c connection) verify() bool {
+	v, _ := protocol.ArgBool(c.Params, httpTLSVerify)
+	return v
 }
 
 // clientKey is what an HTTP client depends on: its TLS settings and its
@@ -955,8 +988,7 @@ const idleConnTimeout = 30 * time.Second
 
 // client is the HTTP client for the connection's settings.
 func (c connection) client() *http.Client {
-	verify, _ := c.Endpoint.Params["tls_verify"].(bool)
-	k := clientKey{verify: verify, sni: c.param("sni"), timeout: c.timeout()}
+	k := clientKey{verify: c.verify(), sni: c.param(httpSNI), timeout: c.timeout()}
 	if cl, ok := clients.Load(k); ok {
 		return cl.(*http.Client)
 	}
@@ -975,18 +1007,14 @@ func (c connection) send(body []byte) ([]byte, int, time.Duration, error) {
 		return nil, 0, 0, err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	if h := c.param("host_header"); h != "" {
+	if h := c.param(httpHostHeader); h != "" {
 		req.Host = h
 	}
-	if ua := c.param("user_agent"); ua != "" {
+	if ua := c.param(httpUserAgent); ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
-	if headers, ok := c.Endpoint.Params["headers"].(map[string]any); ok {
-		for k, v := range headers {
-			if s, ok := v.(string); ok {
-				req.Header.Set(k, s)
-			}
-		}
+	for k, v := range c.headers() {
+		req.Header.Set(k, v)
 	}
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -1022,16 +1050,6 @@ func unpack(body []byte) ([16]byte, []byte, error) {
 	off := int(body[0])
 	copy(id[:], body[1+off:1+off+16])
 	return id, append(append([]byte{}, body[1:1+off]...), body[1+off+16:]...), nil
-}
-
-func parseUUID(s string) ([16]byte, error) {
-	var id [16]byte
-	raw, err := hex.DecodeString(strings.ReplaceAll(s, "-", ""))
-	if err != nil || len(raw) != 16 {
-		return id, fmt.Errorf("%q is not a UUID", s)
-	}
-	copy(id[:], raw)
-	return id, nil
 }
 
 func formatUUID(b []byte) string {

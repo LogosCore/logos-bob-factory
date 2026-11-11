@@ -82,7 +82,7 @@ func TestTCPDialLinkDropsADeadConnection(t *testing.T) {
 	id := [16]byte{8}
 	conns := make(chan net.Conn, 4)
 	conn := tcpEndpoint(t, protocol.KindReversePersistent, fakeTCPChannel(t, func(c net.Conn) { conns <- c }))
-	conn.Endpoint.Params["request_timeout"] = "300ms"
+	conn.Params[tcpRequestTimeout] = 300
 	l := newTCPDialLink(conn)
 	defer l.close()
 	if _, err := l.exchange(id, tcpKeys); err == nil {
@@ -103,9 +103,8 @@ func TestTCPDialLinkDropsADeadConnection(t *testing.T) {
 func TestTCPLinkPushesNeverBlock(t *testing.T) {
 	id := [16]byte{7}
 	port := freePort(t)
-	conn := connection{protocol.BuildConnection{Endpoint: protocol.ChannelEndpointExport{Name: "tcp-b", Kind: protocol.KindBindPersistent,
-		Channel: protocol.ExportChannel{ModuleName: "tcp", SchemaVersion: 1},
-		Params:  map[string]any{"listen_address": "127.0.0.1", "listen_port": float64(port), "request_timeout": "1s"}}}}
+	conn := connection{testConn("tcp", protocol.KindBindPersistent, protocol.Args{tcpListenAddress: "127.0.0.1", tcpListenPort: port,
+		tcpRequestTimeout: 1000})}
 	l := newTCPLink(conn)
 	defer l.close()
 	dial := func() net.Conn {
@@ -195,7 +194,7 @@ func TestWSLinkDropsADeadSocket(t *testing.T) {
 	ch := newWSChannel(t, keys)
 	ch.silentAt = 2
 	conn := wsTestConnection(ch.srv.URL)
-	conn.Endpoint.Params["request_timeout"] = "300ms"
+	conn.Params[httpRequestTimeout] = 300
 	link := newWSLink(conn)
 	defer link.close()
 	id := [16]byte{9}

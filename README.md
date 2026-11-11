@@ -3,9 +3,10 @@
 BOB (Body Opponent Bag, the human-shaped boxing dummy) is a bare Logos
 factory, the module type that builds minions. It registers with core as
 `factory` / `bob`, says hello, keeps heartbeating, and builds **dummy
-minions**: Linux and Windows programs that print a JSON description of the
-minion (its build id, commands, values, connections and badge) when asked,
-and otherwise run as a minion that talks to core. It is the dummy the factory
+minions**: Linux and Windows programs that print the config they were built
+with (core's minion config: the build id, keys, connections, commands and
+values, numbered CBOR) when asked, and otherwise run as a minion that talks
+to core. It is the dummy the factory
 contracts are worked out against.
 
 Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang-factory-core).
@@ -46,10 +47,13 @@ stage or hello fails. Built with a persisted session ("Build with persisted
 session" on a session in core's Sessions page), it claims that session in its
 hello, so a restarted minion comes back to it; told `session_replaced` (another
 process took it), it goes on in a session of its own and stops claiming. `./bob-<id>.bin describe`
-prints the JSON description it was built with instead. The
-description is **baked in at compile time**. The minion's sources are their
-own Go module, `minion/` in this repository. For each build BOB copies that
-directory, writes the build's description into it as `minion.json`, and runs
+prints the config it was built with instead, the bytes as they are. The
+config is **baked in at compile time**: core makes it with the build request
+(BOB declares `minion_config`), and the minion reads it by numbers alone
+(`minion/fields.go`), so it carries no names of its settings. The minion's
+sources are their own Go module, `minion/` in this repository. For each
+build BOB copies that directory, writes the config into it as `minion.cfg`,
+and runs
 `go build` there for the build's platform (`GOOS=linux`, `GOARCH=amd64` or
 `386`) with `-mod=readonly`. Its modules (the protocol package, the CBOR
 library, coder/websocket) come from the module cache, which the image warms

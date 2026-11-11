@@ -20,9 +20,7 @@ func tcpEndpoint(t *testing.T, kind, addr string) connection {
 	t.Helper()
 	host, port, _ := net.SplitHostPort(addr)
 	p, _ := strconv.Atoi(port)
-	return connection{protocol.BuildConnection{Endpoint: protocol.ChannelEndpointExport{Name: "tcp-r", Kind: kind,
-		Channel: protocol.ExportChannel{ModuleName: "tcp", SchemaVersion: 1},
-		Params:  map[string]any{"host": host, "port": float64(p), "connect_timeout": "2s", "request_timeout": "3s"}}}}
+	return connection{testConn("tcp", kind, protocol.Args{tcpHost: host, tcpPort: p, tcpConnectTimeout: 2000, tcpRequestTimeout: 3000})}
 }
 
 // coreAnswer is core's sealed answer to the minion's frame under id: a

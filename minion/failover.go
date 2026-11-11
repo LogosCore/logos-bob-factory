@@ -8,7 +8,7 @@ import (
 )
 
 // Failover (docs: contracts/channel-core-connections/, Failover): the build's
-// policy (protocol.BuildFailover) over its connections. The minion counts
+// policy (protocol.MinionFailover) over its connections. The minion counts
 // failed exchanges on the connection in use; once fail_after of them in a
 // row came, over at least fail_for, it moves to the next connection it may
 // (each connection's auto, its own fail_after), in the build's order,
@@ -25,7 +25,7 @@ import (
 
 // failover is the policy and where the minion stands with it.
 type failover struct {
-	policy                       protocol.BuildFailover
+	policy                       protocol.MinionFailover
 	failFor, pause, failbackWait time.Duration
 	conns                        []connection
 
@@ -43,8 +43,8 @@ type failover struct {
 	away time.Time
 }
 
-func newFailover(p *protocol.BuildFailover, conns []connection) *failover {
-	policy := protocol.DefaultBuildFailover()
+func newFailover(p *protocol.MinionFailover, conns []connection) *failover {
+	policy := protocol.DefaultMinionFailover()
 	if p != nil {
 		policy = *p
 	}
@@ -121,7 +121,7 @@ func (f *failover) failed(on int, now time.Time) (to int, pause time.Duration, w
 	if !f.policy.Enabled || f.candidates() < 2 {
 		return 0, 0, ""
 	}
-	threshold := f.conns[on-1].FailAfter(f.policy)
+	threshold := int(f.conns[on-1].FailAfter(f.policy))
 	if f.fails < threshold || now.Sub(f.firstFail) < f.failFor {
 		return 0, 0, ""
 	}

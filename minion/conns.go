@@ -51,18 +51,21 @@ type persistentLink interface {
 // it dials the channel through (reverse-persistent, reverse-call:
 // tcp_reverse.go).
 func usable(c connection) bool {
-	k := c.ConnectionKind()
-	switch c.Endpoint.Channel.ModuleName {
-	case "http":
-		return k == protocol.KindReverseCall || k == protocol.KindReversePersistent
-	case "tcp":
-		return k == protocol.KindBindPersistent || k == protocol.KindReverseCall || k == protocol.KindReversePersistent
+	switch c.Channel {
+	case chanHTTP:
+		return c.Kind == protocol.KindNumReverseCall || c.Kind == protocol.KindNumReversePersistent
+	case chanTCP:
+		return c.Kind == protocol.KindNumBindPersistent || c.Kind == protocol.KindNumReverseCall ||
+			c.Kind == protocol.KindNumReversePersistent
 	}
 	return false
 }
 
 // tcp reports whether c goes through the TCP channel.
-func (c connection) tcp() bool { return c.Endpoint.Channel.ModuleName == "tcp" }
+func (c connection) tcp() bool { return c.Channel == chanTCP }
+
+// persists reports whether c is kept open: a reverse-persistent connection.
+func (c connection) persists() bool { return c.Kind == protocol.KindNumReversePersistent }
 
 // dialLink is a link to keep open for c, a reverse-persistent connection:
 // a WebSocket to the HTTP channel, or a TCP connection to the TCP one.
@@ -75,10 +78,10 @@ func dialLink(c connection) persistentLink {
 
 // bound reports whether c is one the minion is reached through (it
 // listens) rather than one it reaches out through.
-func (c connection) bound() bool { return c.ConnectionKind() == protocol.KindBindPersistent }
+func (c connection) bound() bool { return c.Kind == protocol.KindNumBindPersistent }
 
 // newTransport uses the first connection the minion can use.
-func newTransport(all []protocol.BuildConnection) (*transport, error) {
+func newTransport(all []protocol.MinionConnection) (*transport, error) {
 	t := &transport{cur: -1}
 	for _, c := range all {
 		t.conns = append(t.conns, connection{c})
@@ -98,13 +101,13 @@ func newTransport(all []protocol.BuildConnection) (*transport, error) {
 func (t *transport) use(i int, ws persistentLink) {
 	old := t.link
 	t.cur, t.link = i, nil
-	switch t.conn().ConnectionKind() {
-	case protocol.KindReversePersistent:
+	switch c := t.conn(); {
+	case c.persists():
 		if ws == nil {
-			ws = dialLink(t.conn())
+			ws = dialLink(c)
 		}
 		t.link = ws
-	case protocol.KindBindPersistent:
+	case c.bound():
 		if t.listener != nil && t.listening == i+1 {
 			// The one a switch opened, which core dialed.
 			t.link, t.listener, t.listening = t.listener, nil, 0
@@ -125,17 +128,17 @@ func (t *transport) place() int       { return t.cur + 1 }
 func (t *transport) describe() string {
 	c := t.conn()
 	if c.bound() {
-		return fmt.Sprintf("connection %d, tcp %q (listening on %s)", t.place(), c.Endpoint.Name, c.listenAddr())
+		return fmt.Sprintf("connection %d, tcp (listening on %s)", t.place(), c.listenAddr())
 	}
 	switch {
-	case c.tcp() && c.ConnectionKind() == protocol.KindReversePersistent:
-		return fmt.Sprintf("connection %d, tcp %q (connected to %s)", t.place(), c.Endpoint.Name, c.dialAddr())
+	case c.tcp() && c.persists():
+		return fmt.Sprintf("connection %d, tcp (connected to %s)", t.place(), c.dialAddr())
 	case c.tcp():
-		return fmt.Sprintf("connection %d, tcp %q (a connection to %s for each exchange)", t.place(), c.Endpoint.Name, c.dialAddr())
-	case c.ConnectionKind() == protocol.KindReversePersistent:
-		return fmt.Sprintf("connection %d, http %q (WebSocket %s)", t.place(), c.Endpoint.Name, c.wsURL())
+		return fmt.Sprintf("connection %d, tcp (a connection to %s for each exchange)", t.place(), c.dialAddr())
+	case c.persists():
+		return fmt.Sprintf("connection %d, http (WebSocket %s)", t.place(), c.wsURL())
 	}
-	return fmt.Sprintf("connection %d, http %q (%s %s)", t.place(), c.Endpoint.Name, c.method(), c.url())
+	return fmt.Sprintf("connection %d, http (%s %s)", t.place(), c.method(), c.url())
 }
 
 // exchange sends a message through the connection in use.
@@ -195,8 +198,8 @@ func (t *transport) check(place int) error {
 		return fmt.Errorf("already on connection %d", place)
 	case !usable(t.conns[place-1]):
 		c := t.conns[place-1]
-		return fmt.Errorf("connection %d is %s through %s, which this minion cannot use", place, c.ConnectionKind(),
-			c.Endpoint.Channel.ModuleName)
+		kind, _ := protocol.KindOfNumber(c.Kind)
+		return fmt.Errorf("connection %d is %s through channel %d, which this minion cannot use", place, kind, c.Channel)
 	}
 	return nil
 }
@@ -221,7 +224,7 @@ func (t *transport) try(place int, id [16]byte, keys protocol.AES256CBCHMACSHA25
 		t.use(place-1, nil)
 		return answer, nil
 	}
-	if c.ConnectionKind() == protocol.KindReversePersistent {
+	if c.persists() {
 		ws = dialLink(c)
 		answer, err = ws.exchange(id, keys, items...)
 	} else {

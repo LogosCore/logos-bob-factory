@@ -69,11 +69,16 @@ func coreRequest(t *testing.T) protocol.BuildRequest {
 			URL: "/api/factory/builds/b/files/badge-1?expires=1&sig=badge-link",
 		}},
 		Crypto: &protocol.BuildCrypto{
-			Suite:    protocol.CryptoAES256CBCHMACSHA256,
-			Material: json.RawMessage(`{"enc_key":"ZW5j","mac_key":"bWFj"}`),
+			Suite: protocol.CryptoAES256CBCHMACSHA256,
+			// Two 32-byte keys, as core makes them.
+			Material: json.RawMessage(`{"enc_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","mac_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="}`),
 		},
 		Artifact: protocol.ArtifactUpload{UploadURL: "/api/factory/builds/b/artifact?expires=1&sig=artifact-link", MaxSize: 1 << 20},
 		Deadline: time.Now().Add(time.Minute),
+	}
+	r, err := withConfig(r)
+	if err != nil {
+		t.Fatalf("the request's minion config: %v", err)
 	}
 	if p := protocol.ValidateBuildRequest(buildSchema, r); p != nil {
 		t.Fatalf("a request core would send does not fit BOB's schema: %v", p)
@@ -81,64 +86,67 @@ func coreRequest(t *testing.T) protocol.BuildRequest {
 	return r
 }
 
-func TestDescribe(t *testing.T) {
+// What the minion reads of a build: core's config, every value by number,
+// the badge (a file) and the build's links left out.
+func TestMinionConfigOfABuild(t *testing.T) {
 	req := coreRequest(t)
-	badge := req.Files["badge-1"]
-	at := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
-	m := describe(req, &badge, "bob bob-local dev", at)
-
-	if m.Format != "logos.bob-dummy.v1" || m.BuildID != req.BuildID || m.Platform != "linux/amd64" ||
-		m.Greeting != "hello from BOB" || m.KillDate != "2027-01-31T00:00:00Z" ||
-		!reflect.DeepEqual(m.Punches, []string{"jab", "hook"}) || !m.BuiltAt.Equal(at) ||
-		!reflect.DeepEqual(m.Ops, []int{1, 2, 3, 4, 12, 13}) {
-		t.Fatalf("minion %+v", m)
-	}
-	if m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.Badge.URL != "" || badge.URL == "" {
-		t.Fatalf("badge %+v: want it recorded without its download URL, the request's copy untouched", m.Badge)
-	}
-	conn := m.Connections[0]
-	if conn.Endpoint.Name != "edge-eu" || conn.Values["method"] != "POST" || conn.Values["path_prefix"] != "/cdn/assets/" {
-		t.Fatalf("connection %+v", conn)
-	}
-
-	if m.Crypto == nil || m.Crypto.Suite != protocol.CryptoAES256CBCHMACSHA256 {
-		t.Fatalf("crypto %+v: want the minion's keys in the artifact", m.Crypto)
-	}
-
-	raw, err := json.Marshal(m)
+	c, err := protocol.ReadMinionConfig(req.MinionConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "badge-link") || strings.Contains(string(raw), "artifact-link") {
-		t.Fatalf("a build's link reached the artifact: %s", raw)
+	num := func(key string) uint64 {
+		i := slices.IndexFunc(buildSchema.Fields, func(f protocol.FieldSpec) bool { return f.Key == key })
+		return uint64(buildSchema.Fields[i].Num)
+	}
+	if v, _ := protocol.ArgString(c.Values, num("greeting")); v != "hello from BOB" {
+		t.Errorf("greeting %q", v)
+	}
+	if v, _ := protocol.ArgInt(c.Values, num("kill_date")); v != time.Date(2027, 1, 31, 0, 0, 0, 0, time.UTC).Unix() {
+		t.Errorf("kill date %d", v)
+	}
+	if v, _ := protocol.ArgStrings(c.Values, num("punches")); !reflect.DeepEqual(v, []string{"jab", "hook"}) {
+		t.Errorf("punches %v", v)
+	}
+	if len(c.Values) != 3 {
+		t.Errorf("values %v: the badge is BOB's alone", c.Values)
+	}
+	if !reflect.DeepEqual(c.Ops, []uint64{1, 2, 3, 4, 12, 13}) || c.Crypto == nil || c.Crypto.Suite != protocol.CryptoAES256CBCHMACSHA256 {
+		t.Errorf("ops %v, crypto %+v", c.Ops, c.Crypto)
+	}
+	http, _ := buildSchema.Channel("http")
+	conn := c.Connections[0]
+	if conn.Channel != uint64(http.Num) || conn.Kind != protocol.KindNumReverseCall || conn.Version != 3 {
+		t.Errorf("connection %+v", conn)
+	}
+	if v, _ := protocol.ArgString(conn.Values, 2); v != "/cdn/assets/" { // path_prefix
+		t.Errorf("path prefix %q", v)
+	}
+	// Nor names: the connection's endpoint has none in it at all (its base
+	// URL, a value, says edge-eu).
+	for _, s := range []string{"badge", "link", "path_prefix", "greeting", "base_url"} {
+		if strings.Contains(string(req.MinionConfig), s) {
+			t.Errorf("the config carries %q", s)
+		}
 	}
 }
 
 // The build's compression goes into the minion as the request says it: the
 // algorithm, or none when the operator turned it off.
-func TestDescribeCompression(t *testing.T) {
+func TestMinionConfigCompression(t *testing.T) {
 	if !slices.Contains(buildSchema.Compression, protocol.CompressionDeflate) {
 		t.Fatalf("the schema declares %v", buildSchema.Compression)
 	}
 	req := coreRequest(t)
-	if m := describe(req, nil, "bob", time.Now()); m.Compression != "" {
-		t.Fatalf("compression %q from a request without it", m.Compression)
+	if c, _ := protocol.ReadMinionConfig(req.MinionConfig); c.Compression != 0 {
+		t.Fatalf("compression %d from a request without it", c.Compression)
 	}
 	req.Compression = protocol.CompressionDeflate
-	m := describe(req, nil, "bob", time.Now())
-	raw, _ := json.Marshal(m)
-	if m.Compression != protocol.CompressionDeflate || !strings.Contains(string(raw), `"compression":"deflate"`) {
-		t.Fatalf("compression %q: %s", m.Compression, raw)
+	req, err := withConfig(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestDescribeWithoutOptionalValues(t *testing.T) {
-	req := coreRequest(t)
-	delete(req.Values, "kill_date")
-	delete(req.Values, "punches")
-	m := describe(req, nil, "bob", time.Now())
-	if m.KillDate != "" || m.Punches != nil || m.Badge != nil {
-		t.Fatalf("minion %+v", m)
+	if c, _ := protocol.ReadMinionConfig(req.MinionConfig); c.Compression != protocol.PackDeflate {
+		t.Fatalf("compression %d", c.Compression)
 	}
 }
 
@@ -169,10 +177,6 @@ func TestLinuxELF(t *testing.T) {
 	r.Target, r.Platform = "linux-elf", "linux/386"
 	if p := protocol.ValidateBuildRequest(buildSchema, r); p != nil {
 		t.Fatalf("linux-elf for linux/386: %v", p)
-	}
-	badge := r.Files["badge-1"]
-	if m := describe(r, &badge, "bob", time.Now()); m.Format != "logos.bob-dummy.v1" || m.Target != "linux-elf" || m.Platform != "linux/386" {
-		t.Fatalf("minion %+v", m)
 	}
 	r.Platform = "any/any"
 	if p := protocol.ValidateBuildRequest(buildSchema, r); p["platform"] == "" {

@@ -63,34 +63,15 @@ func newTCPLink(conn connection) *tcpLink {
 
 // listenAddr is where the minion listens: the endpoint's address and port.
 func (c connection) listenAddr() string {
-	addr := c.param("listen_address")
+	addr := c.param(tcpListenAddress)
 	if addr == "" {
 		addr = "0.0.0.0"
 	}
-	return net.JoinHostPort(addr, strconv.Itoa(c.intParam("listen_port", 0)))
-}
-
-// intParam is an endpoint's integer parameter (JSON numbers come as
-// float64), def when it has none.
-func (c connection) intParam(key string, def int) int {
-	switch n := c.Endpoint.Params[key].(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	case int64:
-		return int(n)
-	}
-	return def
+	return net.JoinHostPort(addr, strconv.Itoa(c.intParam(tcpListenPort, 0)))
 }
 
 // keepalive is the endpoint's TCP keepalive.
-func (c connection) keepalive() time.Duration {
-	if d, err := time.ParseDuration(c.param("keepalive")); err == nil && d > 0 {
-		return d
-	}
-	return 30 * time.Second
-}
+func (c connection) keepalive() time.Duration { return c.duration(tcpKeepalive, 30*time.Second) }
 
 func (l *tcpLink) listen() {
 	for !l.isStopped() {
@@ -143,10 +124,10 @@ func (l *tcpLink) take(c net.Conn) {
 		_ = tc.SetKeepAlivePeriod(l.conn.keepalive())
 	}
 	l.mu.Lock()
-	if l.open >= max(1, l.conn.intParam("max_connections", 1)) {
+	if l.open >= max(1, l.conn.intParam(tcpMaxConnections, 1)) {
 		l.mu.Unlock()
 		report(protocol.FeedbackWarning, "tcp_refused", nil, "a connection from %s came past max_connections (%d): closed",
-			c.RemoteAddr(), max(1, l.conn.intParam("max_connections", 1)))
+			c.RemoteAddr(), max(1, l.conn.intParam(tcpMaxConnections, 1)))
 		_ = c.Close()
 		return
 	}

@@ -93,8 +93,7 @@ func newWSChannel(t *testing.T, keys protocol.AES256CBCHMACSHA256Material) *wsCh
 }
 
 func wsTestConnection(url string) connection {
-	return connection{protocol.BuildConnection{
-		Endpoint: protocol.ChannelEndpointExport{Kind: protocol.KindReversePersistent, Params: map[string]any{"base_url": url, "request_timeout": "5s"}}}}
+	return connection{testConn("http", protocol.KindReversePersistent, protocol.Args{httpBaseURL: url, httpRequestTimeout: 5000})}
 }
 
 // Over the WebSocket each message gets the reply naming it, and what core
@@ -150,8 +149,8 @@ func TestWSLink(t *testing.T) {
 }
 
 func TestWSURL(t *testing.T) {
-	c := connection{protocol.BuildConnection{Endpoint: protocol.ChannelEndpointExport{Params: map[string]any{"base_url": "https://edge.example.com"}},
-		Values: map[string]any{"path_prefix": "/cdn/"}}}
+	c := connection{testConn("http", protocol.KindReversePersistent, protocol.Args{httpBaseURL: "https://edge.example.com"})}
+	c.Values = protocol.Args{paramPathPrefix: "/cdn/"}
 	if got := c.wsURL(); got != "wss://edge.example.com/cdn/" {
 		t.Fatalf("%s", got)
 	}

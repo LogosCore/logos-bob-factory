@@ -24,7 +24,7 @@ func TestCheckInsReuseTheConnection(t *testing.T) {
 	}
 	srv.Start()
 	defer srv.Close()
-	c := connection{protocol.BuildConnection{Endpoint: protocol.ChannelEndpointExport{Params: map[string]any{"base_url": srv.URL}}}}
+	c := connection{testConn("http", protocol.KindReverseCall, protocol.Args{httpBaseURL: srv.URL})}
 	for range 20 {
 		if _, status, _, err := c.send([]byte("check-in")); err != nil || status != http.StatusNoContent {
 			t.Fatalf("send: %d %v", status, err)

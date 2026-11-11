@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"debug/elf"
 	"debug/pe"
-	"encoding/json"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
 
@@ -25,7 +23,7 @@ func TestBuildDummyMinion(t *testing.T) {
 	req.Values["badge"] = badge.ID
 
 	needGo(t)
-	out := factorytest.Run(t, buildSchema, &bob{builtBy: "bob bob-test test", minionSrc: testMinionSrc}, st, req)
+	out := factorytest.Run(t, buildSchema, &bob{minionSrc: testMinionSrc}, st, req)
 	res := out.Result
 	if res.Status != protocol.BuildSucceeded || res.Artifact.Filename != "bob-5b0c4f6e.bin" ||
 		res.Artifact.MediaType != "application/x-executable" {
@@ -37,17 +35,12 @@ func TestBuildDummyMinion(t *testing.T) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		return // cannot run it here
 	}
-	artifact := run(t, out.Artifact)
-	var m dummyMinion
-	if err := json.Unmarshal(artifact, &m); err != nil {
-		t.Fatalf("the binary printed %s: %v", artifact, err)
+	// The binary carries core's config as it came.
+	if printed := run(t, out.Artifact); !bytes.Equal(printed, req.MinionConfig) {
+		t.Fatalf("the binary printed %x, core's config is %x", printed, req.MinionConfig)
 	}
-	if m.BuildID != req.BuildID || m.Badge == nil || m.Badge.SHA256 != badge.SHA256 || m.BuiltBy != "bob bob-test test" ||
-		m.Connections[0].Values["path_prefix"] != "/cdn/assets/" || !slices.Equal(m.Ops, []int{1, 2, 3, 4, 12, 13}) {
-		t.Fatalf("minion %+v", m)
-	}
-	if strings.Contains(string(artifact), badge.URL) || !strings.Contains(res.Log, "dummy minion of build 5b0c4f6e") {
-		t.Fatalf("artifact or log: %s\nlog: %s", artifact, res.Log)
+	if bytes.Contains(out.Artifact, []byte(badge.URL)) || !strings.Contains(res.Log, "dummy minion of build 5b0c4f6e") {
+		t.Fatalf("a link in the artifact, or the log: %s", res.Log)
 	}
 	// The plan core got, and the step the build reported last.
 	if ids := stepIDs(out.Steps); ids != "badge compile upload" {
@@ -68,7 +61,7 @@ func TestBuildWindowsMinion(t *testing.T) {
 	req.Files = nil
 
 	needGo(t)
-	out := factorytest.Run(t, buildSchema, &bob{builtBy: "bob bob-test test", minionSrc: testMinionSrc}, st, req)
+	out := factorytest.Run(t, buildSchema, &bob{minionSrc: testMinionSrc}, st, req)
 	res := out.Result
 	if res.Status != protocol.BuildSucceeded || res.Artifact.Filename != "bob-5b0c4f6e.exe" ||
 		res.Artifact.MediaType != "application/vnd.microsoft.portable-executable" {

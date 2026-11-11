@@ -3,35 +3,38 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"slices"
 	"sync/atomic"
-	"time"
 
 	"github.com/logoscore/logos-golang-factory-core/pkg/factory"
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
-// buildSchema is what BOB builds: dummy minions, Linux binaries that print a
-// JSON description of the minion and do nothing else. It declares one field of
-// each kind a build schema adds (datetime, enum_list, file), HTTP connection
-// parameters, and commands of each kind (required, picked by default, picked
-// by the operator), so the build flow can be worked out end to end before a
-// real factory exists. Version 2: the JSON-only targets dummy and dummy-lite
-// are gone. Version 3: connection parameters by kind. The TCP channel
-// (bind-persistent) came later: a channel added needs no new version.
+// buildSchema is what BOB builds: dummy minions, which print their config
+// when run with describe. It declares one field of each kind a build schema
+// adds (datetime, enum_list, file), HTTP connection parameters, and commands
+// of each kind (required, picked by default, picked by the operator), so the
+// build flow can be worked out end to end before a real factory exists.
+// Version 2: the JSON-only targets dummy and dummy-lite are gone. Version 3:
+// connection parameters by kind. The TCP channel (bind-persistent) came
+// later: a channel added needs no new version. Version 4: the minions read a
+// minion config (MinionConfig), its channels, fields and connection
+// parameters numbered (minion/fields.go), so no instance of version 3 is
+// offered a build that carries one.
 var buildSchema = protocol.BuildSchema{
 	SchemaVersion: protocol.BuildSchemaV3,
-	Version:       3,
+	Version:       4,
+	// Core's minion config, the build's settings numbered: BOB's choice is
+	// to bake it in whole (minion.cfg), and its minions read it by number.
+	MinionConfig: true,
 	Channels: []protocol.BuildChannel{{
-		ModuleName: "http", Versions: []int{3},
+		ModuleName: "http", Num: 1, Versions: []int{3},
 		// Requests first (a build that names no kind polls), and a WebSocket
 		// core pushes tasks over, whose handshake is always a GET.
 		Kinds: []protocol.BuildKind{
 			{Kind: protocol.KindReverseCall, Fields: []protocol.FieldSpec{
 				{
-					Key: "method", Type: protocol.FieldEnum, Label: "Method", Default: "POST", Group: "HTTP", Order: 1,
+					Key: "method", Num: 1, Type: protocol.FieldEnum, Label: "Method", Default: "POST", Group: "HTTP", Order: 1,
 					Description: "The HTTP method the minion sends its messages with.",
 					Options:     []protocol.EnumOption{{Value: "GET"}, {Value: "POST"}, {Value: "PUT"}},
 				},
@@ -47,7 +50,7 @@ var buildSchema = protocol.BuildSchema{
 		// dials the channel and stays (reverse-persistent) or dials it for
 		// each exchange (reverse-call). The ports and the rest are the
 		// channel's own fields: BOB adds none.
-		ModuleName: "tcp", Versions: []int{1},
+		ModuleName: "tcp", Num: 2, Versions: []int{1},
 		Kinds: []protocol.BuildKind{{Kind: protocol.KindBindPersistent}, {Kind: protocol.KindReversePersistent}, {Kind: protocol.KindReverseCall}},
 	}},
 	// Its minions encrypt with AES-256-CBC and HMAC-SHA256; core generates
@@ -66,26 +69,26 @@ var buildSchema = protocol.BuildSchema{
 	Compression: []string{protocol.CompressionDeflate},
 	Fields: []protocol.FieldSpec{
 		{
-			Key: "greeting", Type: protocol.FieldString, Label: "Greeting", Default: "hello from BOB", MaxLength: 200,
+			Key: "greeting", Num: 1, Type: protocol.FieldString, Label: "Greeting", Default: "hello from BOB", MaxLength: 200,
 			Order: 1, Description: "What the dummy minion says.",
 		},
 		{
-			Key: "kill_date", Type: protocol.FieldDatetime, Label: "Kill date", Group: "Limits", Order: 2,
+			Key: "kill_date", Num: 2, Type: protocol.FieldDatetime, Label: "Kill date", Group: "Limits", Order: 2,
 			Description: "When the minion stops for good.",
 		},
 		{
-			Key: "punches", Type: protocol.FieldEnumList, Label: "Punches it takes", Order: 3,
+			Key: "punches", Num: 3, Type: protocol.FieldEnumList, Label: "Punches it takes", Order: 3,
 			Options: []protocol.EnumOption{{Value: "jab"}, {Value: "cross"}, {Value: "hook"}, {Value: "uppercut"}},
 		},
 		{
-			Key: "badge", Type: protocol.FieldFile, Label: "Badge", Order: 4, Accept: []string{"image/*"}, MaxSize: 256 << 10,
-			Description: "An image the minion would wear. BOB checks it and records its SHA-256.",
+			Key: "badge", Num: 4, Type: protocol.FieldFile, Label: "Badge", Order: 4, Accept: []string{"image/*"}, MaxSize: 256 << 10,
+			Description: "An image the minion would wear. BOB checks it as it builds; a file's bytes never go in a minion config.",
 		},
 	},
 	Targets: []protocol.BuildTarget{
 		{
 			ID: "linux-elf", Label: "Linux binary", Format: "elf", Platforms: []string{"linux/amd64", "linux/386"},
-			Description: "A static Linux binary that prints the dummy minion's JSON description, baked in when it is compiled.",
+			Description: "A static Linux binary, the dummy minion: run with describe, it prints the config baked in when it was compiled.",
 			// Linux has no named pipes: its tunnels open the rest.
 			Opens: []string{protocol.OpenTCP, protocol.OpenUDP, protocol.OpenUnix, protocol.OpenSource, protocol.OpenTLS, protocol.OpenProcess,
 				protocol.OpenAccept, protocol.OpenICMP},
@@ -298,45 +301,14 @@ var buildSchema = protocol.BuildSchema{
 // pathPrefix is BOB's path prefix parameter, described for its kind.
 func pathPrefix(help string) protocol.FieldSpec {
 	return protocol.FieldSpec{
-		Key: "path_prefix", Type: protocol.FieldString, Format: protocol.FormatPath, Label: "Path prefix", Default: "/",
+		Key: "path_prefix", Num: 2, Type: protocol.FieldString, Format: protocol.FormatPath, Label: "Path prefix", Default: "/",
 		Group: "HTTP", Order: 2, Description: help,
 		Pattern: `^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`, MaxLength: 256,
 	}
 }
 
-// dummyMinion is BOB's artifact.
-type dummyMinion struct {
-	Format   string `json:"format"`
-	BuildID  string `json:"build_id"`
-	Target   string `json:"target"`
-	Platform string `json:"platform"`
-	// Ops are the numbers of the build's commands (buildSchema's Op):
-	// what its tasks name them by.
-	Ops         []int                      `json:"ops"`
-	Greeting    string                     `json:"greeting"`
-	KillDate    string                     `json:"kill_date,omitempty"`
-	Punches     []string                   `json:"punches,omitempty"`
-	Badge       *protocol.BuildFile        `json:"badge,omitempty"`
-	Connections []protocol.BuildConnection `json:"connections"`
-	// Failover is the build's failover policy, defaults filled in.
-	Failover protocol.BuildFailover `json:"failover"`
-	// MaxTasks is how many tasks the minion runs at once as it starts: the
-	// request's, or protocol.DefaultMaxTasks from a core that sends none.
-	MaxTasks uint64 `json:"max_tasks"`
-	// Compression is the algorithm the minion packs with ("deflate"); ""
-	// when the build has compression off.
-	Compression string                `json:"compression,omitempty"`
-	Crypto      *protocol.BuildCrypto `json:"crypto,omitempty"`
-	// SessionID is the persisted session the minion claims, when the build
-	// has one.
-	SessionID string    `json:"session_id,omitempty"`
-	BuiltBy   string    `json:"built_by"`
-	BuiltAt   time.Time `json:"built_at"`
-}
-
 // bob builds dummy minions, the way its management says (management.go).
 type bob struct {
-	builtBy string // "bob <instance> <version>"
 	// minionSrc is the minion module's directory, compiled for each target
 	// (compiledTargets).
 	minionSrc string
@@ -376,27 +348,24 @@ func (b *bob) Steps(req protocol.BuildRequest) []protocol.BuildStep {
 
 func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, error) {
 	s := b.current()
-	var badge *protocol.BuildFile
 	if f, ok := job.File("badge"); ok {
 		job.Step(stepBadge.ID, "checking the badge")
 		if _, err := job.ReadFile(ctx, f); err != nil {
 			return factory.Result{}, factory.Fail("badge_unreadable", err.Error())
 		}
-		badge = &f
 	}
-	job.Step(stepCompile.ID, "go build for "+job.Request.Platform)
+	req := job.Request
+	job.Step(stepCompile.ID, "go build for "+req.Platform)
 	if s.fail {
 		return factory.Result{}, factory.Fail("knocked_out", "BOB is set to fail every build (fail_builds)")
 	}
-	m := describe(job.Request, badge, b.builtBy, time.Now().UTC())
-	body, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return factory.Result{}, err
-	}
-	job.Logf("dummy minion of build %s for %s with %d connection(s)", m.BuildID, m.Platform, len(m.Connections))
+	// Core's minion config, checked with the request: baked in as it came,
+	// the minion reads it by numbers alone.
+	job.Logf("dummy minion of build %s for %s with %d connection(s), a %d-byte config", req.BuildID, req.Platform,
+		len(req.Connections), len(req.MinionConfig))
 
 	out := &lineLog{logf: job.Logf}
-	bin, err := compile(ctx, b.minionSrc, m.Target, m.Platform, body, out)
+	bin, err := compile(ctx, b.minionSrc, req.Target, req.Platform, req.MinionConfig, out)
 	out.Flush()
 	switch {
 	case errors.Is(err, errNoToolchain):
@@ -406,16 +375,16 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	case err != nil:
 		return factory.Result{}, err
 	}
-	job.Logf("compiled a %d-byte binary for %s", len(bin), m.Platform)
+	job.Logf("compiled a %d-byte binary for %s", len(bin), req.Platform)
 
 	job.Step(stepUpload.ID, "")
-	a := artifactKinds[m.Target]
-	name := "bob-" + m.BuildID[:8] + a.ext
+	a := artifactKinds[req.Target]
+	name := "bob-" + req.BuildID[:8] + a.ext
 	if err := job.UploadArtifact(ctx, name, a.mediaType, bytes.NewReader(bin)); err != nil {
 		return factory.Result{}, err
 	}
 	return factory.Result{
-		Warnings: []string{"a dummy minion: it prints its description and does nothing else"},
+		Warnings: []string{"a dummy minion, made to try the build flow end to end"},
 	}, nil
 }
 
@@ -423,74 +392,4 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 var artifactKinds = map[string]struct{ ext, mediaType string }{
 	"linux-elf":   {".bin", "application/x-executable"},
 	"windows-exe": {".exe", "application/vnd.microsoft.portable-executable"},
-}
-
-// describe is the dummy minion a request asks for. A badge is recorded
-// without its download URL, which only lives as long as the build.
-func describe(req protocol.BuildRequest, badge *protocol.BuildFile, builtBy string, now time.Time) dummyMinion {
-	if badge != nil {
-		b := *badge
-		b.URL = ""
-		badge = &b
-	}
-	text := func(key string) string {
-		s, _ := req.Values[key].(string)
-		return s
-	}
-	var punches []string
-	if list, ok := req.Values["punches"].([]any); ok {
-		for _, p := range list {
-			if s, ok := p.(string); ok {
-				punches = append(punches, s)
-			}
-		}
-	}
-	return dummyMinion{
-		Format:      "logos.bob-dummy.v1",
-		BuildID:     req.BuildID,
-		Target:      req.Target,
-		Platform:    req.Platform,
-		Ops:         opsOf(req.Commands),
-		Greeting:    text("greeting"),
-		KillDate:    text("kill_date"),
-		Punches:     punches,
-		Badge:       badge,
-		Connections: req.Connections,
-		Failover:    failoverOf(req),
-		MaxTasks:    maxTasksOf(req),
-		Compression: req.Compression,
-		Crypto:      req.Crypto,
-		SessionID:   req.SessionID,
-		BuiltBy:     builtBy,
-		BuiltAt:     now,
-	}
-}
-
-// opsOf are the numbers of the commands named, in the schema's order.
-func opsOf(ids []string) []int {
-	var ops []int
-	for _, c := range buildSchema.Commands {
-		if slices.Contains(ids, c.ID) {
-			ops = append(ops, c.Op)
-		}
-	}
-	return ops
-}
-
-// maxTasksOf is how many tasks the minion runs at once as it starts: the
-// request's, or the default from a core that sends none.
-func maxTasksOf(req protocol.BuildRequest) uint64 {
-	if req.MaxTasks != nil {
-		return *req.MaxTasks
-	}
-	return protocol.DefaultMaxTasks
-}
-
-// failoverOf is the build's failover policy: the request's, or the
-// defaults from a core that sends none.
-func failoverOf(req protocol.BuildRequest) protocol.BuildFailover {
-	if req.Failover != nil {
-		return *req.Failover
-	}
-	return protocol.DefaultBuildFailover()
 }

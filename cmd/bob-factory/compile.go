@@ -34,7 +34,7 @@ var compiledTargets = map[string]map[string][2]string{
 var errNoToolchain = errors.New("no Go toolchain: the go command is not on PATH")
 
 // compile builds the minion module in src for target and platform, with
-// minion baked in as its minion.json, and returns the binary: static (no
+// minion (its config) baked in as its minion.cfg, and returns the binary: static (no
 // cgo), stripped, and the same for the same input. src is copied first, so
 // it is never written to. Its modules come from the module cache, and what
 // is not there through GOPROXY as BOB's environment sets it (a mirror such
@@ -63,7 +63,7 @@ func compile(ctx context.Context, src, target, platform string, minion []byte, l
 	if err := os.CopyFS(dir, os.DirFS(src)); err != nil {
 		return nil, fmt.Errorf("copy the minion sources: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "minion.json"), minion, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "minion.cfg"), minion, 0o600); err != nil {
 		return nil, err
 	}
 	// readonly: go.mod and go.sum are as committed, never fixed up here.

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -152,13 +153,18 @@ func TestReverseForwardLimits(t *testing.T) {
 	if d, due := r.tun.due(); !due || d > r.tun.resend {
 		t.Errorf("the open's resend is not due: %v %v", d, due)
 	}
+	// Reset at once: under load the reset can come before the dial
+	// returns, which is the same thing, seen sooner.
 	second, err := net.Dial("tcp", core.listens[0].Bound)
-	if err != nil {
+	switch {
+	case errors.Is(err, syscall.ECONNRESET):
+	case err != nil:
 		t.Fatal(err)
-	}
-	defer func() { _ = second.Close() }()
-	if !resetSoon(second) {
-		t.Error("a connection past max_streams stays open")
+	default:
+		defer func() { _ = second.Close() }()
+		if !resetSoon(second) {
+			t.Error("a connection past max_streams stays open")
+		}
 	}
 	gaveUp := func() bool {
 		for _, it := range core.other {

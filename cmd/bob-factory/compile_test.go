@@ -26,7 +26,7 @@ func needGo(t *testing.T) {
 	}
 }
 
-// run executes bin with "describe" and returns the description it printed.
+// run executes bin with "describe" and returns the config it printed.
 func run(t *testing.T, bin []byte) []byte {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "minion")
@@ -40,10 +40,11 @@ func run(t *testing.T, bin []byte) []byte {
 	return out
 }
 
-// Each platform gets an ELF for its machine, with the description baked in.
+// Each platform gets an ELF for its machine, with the config baked in as it
+// came.
 func TestCompile(t *testing.T) {
 	needGo(t)
-	minion := []byte(`{"format":"logos.bob-dummy.v1","greeting":"hello"}` + "\n")
+	minion := []byte{0xa1, 0x01, 0x50, 0xde, 0xad, 0xbe, 0xef}
 	for platform, machine := range map[string]elf.Machine{"linux/amd64": elf.EM_X86_64, "linux/386": elf.EM_386} {
 		bin, err := compile(context.Background(), testMinionSrc, "linux-elf", platform, minion, io.Discard)
 		if err != nil {
@@ -65,8 +66,8 @@ func TestCompile(t *testing.T) {
 	if _, err := compile(context.Background(), t.TempDir(), "linux-elf", "linux/amd64", minion, io.Discard); err == nil {
 		t.Fatal("compiled without minion sources")
 	}
-	if b, _ := os.ReadFile(filepath.Join(testMinionSrc, "minion.json")); string(b) != "{}\n" {
-		t.Fatalf("a build wrote to the minion sources: %q", b)
+	if b, err := os.ReadFile(filepath.Join(testMinionSrc, "minion.cfg")); err != nil || len(b) != 0 {
+		t.Fatalf("a build wrote to the minion sources: %q %v", b, err)
 	}
 }
 

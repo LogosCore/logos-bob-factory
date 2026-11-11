@@ -33,15 +33,12 @@ import (
 // dialAddr is where the minion dials the channel: the endpoint's host and
 // port.
 func (c connection) dialAddr() string {
-	return net.JoinHostPort(c.param("host"), strconv.Itoa(c.intParam("port", 0)))
+	return net.JoinHostPort(c.param(tcpHost), strconv.Itoa(c.intParam(tcpPort, 0)))
 }
 
 // connectTimeout is how long a dial of the channel may take.
 func (c connection) connectTimeout() time.Duration {
-	if d, err := time.ParseDuration(c.param("connect_timeout")); err == nil && d > 0 {
-		return d
-	}
-	return 10 * time.Second
+	return c.duration(tcpConnectTimeout, 10*time.Second)
 }
 
 // dialChannel dials the TCP channel as the connection says, with its
