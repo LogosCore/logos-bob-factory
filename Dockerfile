@@ -1,6 +1,11 @@
 # syntax=docker/dockerfile:1.7
 FROM golang:1.25-alpine AS builder
 WORKDIR /src
+# Our own modules come straight from GitHub (git), not through the public Go
+# proxy: a tag builds the moment it is pushed, whatever the proxy has cached.
+# go.sum still checks them.
+ENV GOPRIVATE=github.com/logoscore/*
+RUN apk add --no-cache git
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
@@ -18,9 +23,11 @@ RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /out/bob-fac
 # module the image lacks, which comes through GOPROXY (set it to a mirror,
 # Nexus say, where there is no internet; go.sum checks it either way). The
 # warm-up leaves out replace lines: a local checkout of a module during
-# development is mounted at run time, not baked in.
+# development is mounted at run time, not baked in. It takes our own modules
+# straight from GitHub (GOPRIVATE, git), as the build stage does; a minion's
+# build keeps GOPROXY, whatever it points at.
 FROM golang:1.25-alpine
-RUN adduser -D -u 65532 bob
+RUN apk add --no-cache git && adduser -D -u 65532 bob
 USER bob
 ENV GOCACHE=/home/bob/.cache/go-build \
     GOMODCACHE=/home/bob/go/pkg/mod \
@@ -31,5 +38,5 @@ RUN GOOS=linux GOARCH=amd64 go build -trimpath std && GOOS=linux GOARCH=386 go b
 COPY --from=builder /out/bob-factory /app/bob-factory
 COPY minion/ /app/minion/
 RUN cp -r /app/minion /tmp/warm && cd /tmp/warm && sed -i '/^replace /d' go.mod && \
-    go mod download && cd / && rm -rf /tmp/warm
+    GOPRIVATE=github.com/logoscore/* go mod download && cd / && rm -rf /tmp/warm
 ENTRYPOINT ["/app/bob-factory"]
