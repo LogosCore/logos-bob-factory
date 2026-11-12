@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -31,6 +32,8 @@ var compiledTargets = map[string]map[string][2]string{
 	"linux-elf": {
 		"linux/amd64": {"linux", "amd64"},
 		"linux/386":   {"linux", "386"},
+		"linux/arm64": {"linux", "arm64"},
+		"linux/arm":   {"linux", "arm"}, // the ARM version: GOARM, the build's goarm
 	},
 	"windows-exe": {
 		"windows/amd64": {"windows", "amd64"},
@@ -45,18 +48,28 @@ var errNoToolchain = errors.New("no Go toolchain: the go command is not on PATH"
 // compile builds the minion module in src for target and platform, with
 // minion (its config) baked in as its minion.cfg and exits (the build's own
 // exit codes, by declared code; nil: the declared ones) as its exits.go's
-// constants, and returns the binary: static (no cgo), stripped, and the
+// constants, for 32-bit ARM the ARM version goarm (GOARM: "5", "6" or "7";
+// "" is 7, Go's own default; other platforms ignore it), and returns the binary: static (no cgo), stripped, and the
 // same for the same input. src is copied first, so it is never written to. Its modules come from the module cache, and what
 // is not there through GOPROXY as BOB's environment sets it (a mirror such
 // as Nexus on a network without the internet), checked against the
 // minion's go.sum: what compiles is what go.sum names, wherever it came
 // from. The command and everything the compiler writes to stdout and stderr
 // go to log as they come.
-func compile(ctx context.Context, src, target, platform string, minion []byte, exits map[int]int, log io.Writer) ([]byte, error) {
+func compile(ctx context.Context, src, target, platform string, minion []byte, exits map[int]int, goarm string, log io.Writer) ([]byte, error) {
 	pair, ok := compiledTargets[target][platform]
 	if !ok {
 		return nil, fmt.Errorf("target %s does not compile for %s", target, platform)
 	}
+	goEnv := []string{"GOOS=" + pair[0], "GOARCH=" + pair[1]}
+	if pair[1] == "arm" {
+		goarm = cmp.Or(goarm, "7")
+		if !slices.Contains(goarmVersions, goarm) {
+			return nil, fmt.Errorf("GOARM %q: BOB builds for ARM versions %s", goarm, strings.Join(goarmVersions, ", "))
+		}
+		goEnv = append(goEnv, "GOARM="+goarm)
+	}
+	goEnv = append(goEnv, "CGO_ENABLED=0")
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		return nil, errNoToolchain
@@ -85,12 +98,9 @@ func compile(ctx context.Context, src, target, platform string, minion []byte, e
 	args := []string{"build", "-v", "-trimpath", "-mod=readonly", "-ldflags=-s -w -buildid=", "-o", filepath.Join(".bin", "minion")}
 	cmd := exec.CommandContext(ctx, goBin, append(args, ".")...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GOOS="+pair[0], "GOARCH="+pair[1], "CGO_ENABLED=0",
-		"GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local",
-	)
+	cmd.Env = append(append(os.Environ(), goEnv...), "GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local")
 	// The build log's own line: a write it refuses fails the compile below.
-	_, _ = fmt.Fprintf(log, "$ GOOS=%s GOARCH=%s CGO_ENABLED=0 go %s\n", pair[0], pair[1], strings.Join(cmd.Args[1:], " "))
+	_, _ = fmt.Fprintf(log, "$ %s go %s\n", strings.Join(goEnv, " "), strings.Join(cmd.Args[1:], " "))
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
@@ -104,6 +114,18 @@ func compile(ctx context.Context, src, target, platform string, minion []byte, e
 // exitCodes are the build's own exit codes, by the code BOB declares
 // (minion/exits.go): those core drew for it; nil when it drew none, and the
 // minion exits with the declared ones.
+// goarmVersions are the ARM versions BOB builds 32-bit ARM minions for,
+// its goarm field's options.
+var goarmVersions = []string{"7", "6", "5"}
+
+// goarmOf is a build's ARM version (its goarm value, which core sends
+// with its default for a linux/arm build and never for another); "" when
+// it has none.
+func goarmOf(req protocol.BuildRequest) string {
+	s, _ := req.Values["goarm"].(string)
+	return s
+}
+
 func exitCodes(req protocol.BuildRequest) map[int]int {
 	if len(req.ErrorCodes) == 0 {
 		return nil

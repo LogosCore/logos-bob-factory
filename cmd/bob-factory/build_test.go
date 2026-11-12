@@ -50,7 +50,7 @@ func coreRequest(t *testing.T) protocol.BuildRequest {
 	r := protocol.BuildRequest{
 		BuildID: "5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f", Target: "linux-elf", Platform: "linux/amd64",
 		SchemaVersion: buildSchema.Version,
-		Values: protocol.ResolveFieldValues(buildSchema.TargetFields(target), map[string]any{
+		Values: protocol.ResolveFieldValues(buildSchema.PlatformFields(target, "linux/amd64"), map[string]any{
 			"kill_date": "2027-01-31T00:00:00Z", "punches": []any{"jab", "hook"}, "badge": "badge-1",
 		}),
 		// Core sends the target's default and required commands when the
@@ -171,15 +171,48 @@ func TestWindowsEXE(t *testing.T) {
 	}
 }
 
-// linux-elf builds for its two platforms, and refuses any other.
+// linux-elf builds for its four platforms, and refuses any other.
 func TestLinuxELF(t *testing.T) {
 	r := coreRequest(t)
-	r.Target, r.Platform = "linux-elf", "linux/386"
-	if p := protocol.ValidateBuildRequest(buildSchema, r); p != nil {
-		t.Fatalf("linux-elf for linux/386: %v", p)
+	r.Target = "linux-elf"
+	for _, platform := range []string{"linux/386", "linux/arm64"} {
+		r.Platform = platform
+		if p := protocol.ValidateBuildRequest(buildSchema, r); p != nil {
+			t.Fatalf("linux-elf for %s: %v", platform, p)
+		}
 	}
 	r.Platform = "any/any"
 	if p := protocol.ValidateBuildRequest(buildSchema, r); p["platform"] == "" {
 		t.Fatalf("linux-elf for any/any: %v", p)
+	}
+}
+
+// goarm is linux/arm's alone: core fills in its default there, and a value
+// for another platform is refused.
+func TestGOARM(t *testing.T) {
+	target, _ := buildSchema.Target("linux-elf")
+	r := coreRequest(t)
+	r.Platform = "linux/arm"
+	r.Values = protocol.ResolveFieldValues(buildSchema.PlatformFields(target, r.Platform), r.Values)
+	if p := protocol.ValidateBuildRequest(buildSchema, r); p != nil {
+		t.Fatalf("linux-elf for linux/arm: %v", p)
+	}
+	if got := goarmOf(r); got != "7" {
+		t.Fatalf("goarm %q, want the default 7", got)
+	}
+	r.Values["goarm"] = "6"
+	if got := goarmOf(r); got != "6" {
+		t.Fatalf("goarm %q", got)
+	}
+	r.Platform = "linux/amd64"
+	if p := protocol.ValidateBuildRequest(buildSchema, r); p["values.goarm"] != "only for linux/arm" {
+		t.Fatalf("goarm on linux/amd64: %v", p)
+	}
+	if r.Platform = "linux/arm"; protocol.ValidateBuildRequest(buildSchema, r) != nil {
+		t.Fatal("goarm 6 refused")
+	}
+	r.Values["goarm"] = "8"
+	if p := protocol.ValidateBuildRequest(buildSchema, r); p["values.goarm"] == "" {
+		t.Fatal("goarm 8 taken")
 	}
 }

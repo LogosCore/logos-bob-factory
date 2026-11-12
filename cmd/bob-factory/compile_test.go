@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"debug/buildinfo"
 	"debug/elf"
 	"debug/pe"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -46,7 +49,7 @@ func TestCompile(t *testing.T) {
 	needGo(t)
 	minion := []byte{0xa1, 0x01, 0x50, 0xde, 0xad, 0xbe, 0xef}
 	for platform, machine := range map[string]elf.Machine{"linux/amd64": elf.EM_X86_64, "linux/386": elf.EM_386} {
-		bin, err := compile(context.Background(), testMinionSrc, "linux-elf", platform, minion, nil, io.Discard)
+		bin, err := compile(context.Background(), testMinionSrc, "linux-elf", platform, minion, nil, "", io.Discard)
 		if err != nil {
 			t.Fatalf("%s: %v", platform, err)
 		}
@@ -60,10 +63,10 @@ func TestCompile(t *testing.T) {
 			}
 		}
 	}
-	if _, err := compile(context.Background(), testMinionSrc, "linux-elf", "windows/amd64", minion, nil, io.Discard); err == nil {
+	if _, err := compile(context.Background(), testMinionSrc, "linux-elf", "windows/amd64", minion, nil, "", io.Discard); err == nil {
 		t.Fatal("compiled for a platform the target does not have")
 	}
-	if _, err := compile(context.Background(), t.TempDir(), "linux-elf", "linux/amd64", minion, nil, io.Discard); err == nil {
+	if _, err := compile(context.Background(), t.TempDir(), "linux-elf", "linux/amd64", minion, nil, "", io.Discard); err == nil {
 		t.Fatal("compiled without minion sources")
 	}
 	if b, err := os.ReadFile(filepath.Join(testMinionSrc, "minion.cfg")); err != nil || len(b) != 0 {
@@ -80,7 +83,7 @@ func TestCompileWindows(t *testing.T) {
 	for platform, machine := range map[string]uint16{
 		"windows/amd64": pe.IMAGE_FILE_MACHINE_AMD64, "windows/386": pe.IMAGE_FILE_MACHINE_I386, "windows/arm64": pe.IMAGE_FILE_MACHINE_ARM64,
 	} {
-		bin, err := compile(context.Background(), testMinionSrc, "windows-exe", platform, minion, nil, io.Discard)
+		bin, err := compile(context.Background(), testMinionSrc, "windows-exe", platform, minion, nil, "", io.Discard)
 		if err != nil {
 			t.Fatalf("%s: %v", platform, err)
 		}
@@ -102,8 +105,48 @@ func TestCompileWindows(t *testing.T) {
 			t.Fatalf("%s: the description is not baked in", platform)
 		}
 	}
-	if _, err := compile(context.Background(), testMinionSrc, "windows-exe", "linux/amd64", minion, nil, io.Discard); err == nil {
+	if _, err := compile(context.Background(), testMinionSrc, "windows-exe", "linux/amd64", minion, nil, "", io.Discard); err == nil {
 		t.Fatal("windows-exe compiled for linux/amd64")
+	}
+}
+
+// ARM: a 64-bit build, and a 32-bit one for the build's ARM version
+// (GOARM, 7 when it has none), which the binary's build info names.
+func TestCompileARM(t *testing.T) {
+	needGo(t)
+	minion := []byte{0xa1, 0x01, 0x50, 0xde, 0xad, 0xbe, 0xef}
+	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/arm64", minion, nil, "", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, err := elf.NewFile(bytes.NewReader(bin)); err != nil || f.Machine != elf.EM_AARCH64 {
+		t.Fatalf("linux/arm64: elf %v, %v", f, err)
+	}
+	for goarm, want := range map[string]string{"5": "5", "6": "6", "": "7"} {
+		var lines []string
+		l := &lineLog{logf: func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }}
+		bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/arm", minion, nil, goarm, l)
+		if err != nil {
+			t.Fatalf("GOARM %q: %v", goarm, err)
+		}
+		l.Flush()
+		if f, err := elf.NewFile(bytes.NewReader(bin)); err != nil || f.Machine != elf.EM_ARM {
+			t.Fatalf("linux/arm: elf %v, %v", f, err)
+		}
+		info, err := buildinfo.Read(bytes.NewReader(bin))
+		if err != nil {
+			t.Fatal(err)
+		}
+		i := slices.IndexFunc(info.Settings, func(s debug.BuildSetting) bool { return s.Key == "GOARM" })
+		if i < 0 || info.Settings[i].Value != want {
+			t.Fatalf("GOARM %q: build settings %v", goarm, info.Settings)
+		}
+		if !strings.HasPrefix(lines[0], "$ GOOS=linux GOARCH=arm GOARM="+want+" CGO_ENABLED=0 go build ") {
+			t.Fatalf("log %q", lines[0])
+		}
+	}
+	if _, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/arm", minion, nil, "8", io.Discard); err == nil {
+		t.Fatal("GOARM 8 compiled")
 	}
 }
 
@@ -111,7 +154,7 @@ func TestCompileLogs(t *testing.T) {
 	needGo(t)
 	var lines []string
 	l := &lineLog{logf: func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }}
-	if _, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/386", []byte("{}"), nil, l); err != nil {
+	if _, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/386", []byte("{}"), nil, "", l); err != nil {
 		t.Fatal(err)
 	}
 	l.Flush()
@@ -128,7 +171,7 @@ func TestCompileLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines = nil
-	if _, err := compile(context.Background(), src, "linux-elf", "linux/amd64", []byte("{}"), nil, l); err == nil {
+	if _, err := compile(context.Background(), src, "linux-elf", "linux/amd64", []byte("{}"), nil, "", l); err == nil {
 		t.Fatal("a broken minion compiled")
 	}
 	l.Flush()

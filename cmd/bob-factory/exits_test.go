@@ -67,7 +67,7 @@ func TestMinionExitsWithItsCode(t *testing.T) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Skip("runs a linux/amd64 minion")
 	}
-	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/amd64", []byte("not a minion config"), nil, io.Discard)
+	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/amd64", []byte("not a minion config"), nil, "", io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestMinionExitsWithItsBuildsCode(t *testing.T) {
 		t.Skip("runs a linux/amd64 minion")
 	}
 	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/amd64", []byte("not a minion config"),
-		map[int]int{3: 201, 4: 87, 5: 14}, io.Discard)
+		map[int]int{3: 201, 4: 87, 5: 14}, "", io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

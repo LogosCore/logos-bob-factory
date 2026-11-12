@@ -20,6 +20,7 @@ const (
 	fieldKillDate uint64 = 2
 	fieldPunches  uint64 = 3
 	fieldBadge    uint64 = 4 // a file: never in a config, numbered all the same
+	fieldGoarm    uint64 = 5 // linux/arm's ARM version: the compiler's, never read
 )
 
 // BOB's connection parameters for the HTTP channel's kinds.

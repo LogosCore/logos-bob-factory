@@ -15,8 +15,8 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 
 | | |
 |---|---|
-| Version | 5, of build schema version 3. Its minions read core's minion config (`minion_config`) by numbers alone, so its channels, fields and connection parameters are numbered (`minion/fields.go`); each build's minion exits with codes of its own (version 5) |
-| Targets | `linux-elf`: format `elf`, platforms `linux/amd64` and `linux/386`; the artifact is a [binary](#the-linux-elf-binary). `windows-exe`: format `exe`, platforms `windows/amd64`, `windows/386` and `windows/arm64`; the artifact is the same minion as a [Windows program](#the-windows-exe-program) |
+| Version | 6, of build schema version 3. Its minions read core's minion config (`minion_config`) by numbers alone, so its channels, fields and connection parameters are numbered (`minion/fields.go`); each build's minion exits with codes of its own (version 5); Linux on ARM (version 6) |
+| Targets | `linux-elf`: format `elf`, platforms `linux/amd64`, `linux/386`, `linux/arm64` and `linux/arm`, with its own field `goarm` for `linux/arm` alone ([ARM](#arm)); the artifact is a [binary](#the-linux-elf-binary). `windows-exe`: format `exe`, platforms `windows/amd64`, `windows/386` and `windows/arm64`; the artifact is the same minion as a [Windows program](#the-windows-exe-program) |
 | Fields | `greeting` (string), `kill_date` (datetime), `punches` (enum_list: jab, cross, hook, uppercut), `badge` (file, an image up to 256 KiB, checked and recorded by SHA-256) |
 | Max tasks | Declared: a build says how many tasks its minion runs at once (default 5), and core changes it live from the session. |
 | Compression | Declared: `deflate`. A build packs its messages unless the operator turns it off: the minion inflates what core sends packed, and packs each item it sends that is 256 bytes or more and shrinks an eighth (`minion/packing.go`; docs: wire format, Compression). |
@@ -106,6 +106,25 @@ BOB. Run outside the image, BOB uses the `go` on its `PATH` and the sources in
 `MINION_SRC`. Without a toolchain a `linux-elf` build fails with
 `no_toolchain`, and one that does not compile with `compile_failed` (the
 compiler's output is in the build log).
+
+### ARM
+
+`linux-elf` builds for `linux/arm64` and for 32-bit ARM, `linux/arm`. A
+`linux/arm` build says which ARM it runs on with `goarm` (num 5), a field of
+that platform alone ([Fields for some platforms](https://logoscore.github.io/logos-docs/contracts/minion-build/#fields-for-some-platforms)):
+the build form shows it once `linux/arm` is picked, and core takes it for no
+other platform. BOB compiles with it as `GOARM`:
+
+| `goarm` | For |
+|---|---|
+| `7` (default) | ARMv7 and newer in 32-bit mode: most boards and phones since 2011 |
+| `6` | ARMv6: the first Raspberry Pis and the Pi Zero |
+| `5` | ARMv5, with no floating-point unit: floating point in software, slower |
+
+The build log's command line names it (`GOOS=linux GOARCH=arm GOARM=6
+CGO_ENABLED=0 go build ...`), and so does the binary's build info
+(`go version -m`). The image's build cache holds no ARM standard library: a
+first build for each compiles it, kept for the next.
 
 ## The windows-exe program
 

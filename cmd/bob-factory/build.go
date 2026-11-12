@@ -22,9 +22,12 @@ import (
 // parameters numbered (minion/fields.go), so no instance of version 3 is
 // offered a build that carries one. Version 5: each build's own exit codes
 // (ErrorCodesPerBuild), which an instance of version 4 would not build in.
+// Version 6: Linux on ARM (linux/arm64, and linux/arm with its goarm field,
+// for that platform alone), which an instance of version 5 does not
+// compile.
 var buildSchema = protocol.BuildSchema{
 	SchemaVersion: protocol.BuildSchemaV3,
-	Version:       5,
+	Version:       6,
 	// Core's minion config, the build's settings numbered: BOB's choice is
 	// to bake it in whole (minion.cfg), and its minions read it by number.
 	MinionConfig: true,
@@ -88,8 +91,21 @@ var buildSchema = protocol.BuildSchema{
 	},
 	Targets: []protocol.BuildTarget{
 		{
-			ID: "linux-elf", Label: "Linux binary", Format: "elf", Platforms: []string{"linux/amd64", "linux/386"},
+			ID: "linux-elf", Label: "Linux binary", Format: "elf",
+			Platforms:   []string{"linux/amd64", "linux/386", "linux/arm64", "linux/arm"},
 			Description: "A static Linux binary, the dummy minion: run with describe, it prints the config baked in when it was compiled.",
+			// 32-bit ARM comes in versions: the build says which (GOARM).
+			Fields: []protocol.FieldSpec{{
+				Key: "goarm", Num: 5, Type: protocol.FieldEnum, Label: "ARM version", Default: "7", Group: "Platform", Order: 5,
+				Platforms: []string{"linux/arm"},
+				Description: "The oldest ARM the minion runs on (GOARM). 7 for most boards and phones since 2011; " +
+					"6 for the first Raspberry Pis and the Pi Zero; 5 for older ARM, with no floating-point unit.",
+				Options: []protocol.EnumOption{
+					{Value: "7", Label: "ARMv7"},
+					{Value: "6", Label: "ARMv6"},
+					{Value: "5", Label: "ARMv5", Description: "Floating point in software: slower."},
+				},
+			}},
 			// Linux has no named pipes: its tunnels open the rest.
 			Opens: []string{protocol.OpenTCP, protocol.OpenUDP, protocol.OpenUnix, protocol.OpenSource, protocol.OpenTLS, protocol.OpenProcess,
 				protocol.OpenAccept, protocol.OpenICMP},
@@ -386,7 +402,7 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 		job.Logf("exit codes of its own: %s", formatExitCodes(exits))
 	}
 	out := &lineLog{logf: job.Logf}
-	bin, err := compile(ctx, b.minionSrc, req.Target, req.Platform, req.MinionConfig, exits, out)
+	bin, err := compile(ctx, b.minionSrc, req.Target, req.Platform, req.MinionConfig, exits, goarmOf(req), out)
 	out.Flush()
 	switch {
 	case errors.Is(err, errNoToolchain):
