@@ -61,9 +61,14 @@ library, coder/websocket) come from the module cache, which the image warms
 when it is built, so a build needs no network; a module the cache lacks
 comes through `GOPROXY`, checked against the minion's `go.sum` either way:
 what compiles is what `go.sum` names. The plan is **Check the badge** (when the build has one), **Compile the
-binary** and **Upload the artifact**. The compile step runs the command, and
-everything the compiler prints to stdout and stderr goes to the build log as
-it comes (`go build -v`, so it names what it compiles), on success too. The
+binary** and **Upload the artifact**. Each step writes the build log, which
+core shows live, by step (factory-core's live build log): the badge's name,
+size and check; the build, its exit codes, the command and everything the
+compiler prints to stdout and stderr, line by line as it comes (`go build
+-v`, so it names what it compiles, on success too), and the binary's size;
+the artifact's name, size, media type and SHA-256 as it uploads. While it
+compiles, the step's message counts the packages compiled so far ("go build
+for linux/amd64: 12 packages compiled", those the build cache lacked). The
 artifact is
 `bob-<first 8 of the build id>.bin`, `application/x-executable`, about 1 MiB.
 

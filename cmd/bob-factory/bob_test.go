@@ -5,6 +5,7 @@ import (
 	"debug/elf"
 	"debug/pe"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -53,6 +54,31 @@ func TestBuildDummyMinion(t *testing.T) {
 	if n := len(out.Progress); n == 0 || out.Progress[n-1].Step != "upload" {
 		t.Fatalf("progress %+v", out.Progress)
 	}
+	// The live log: every line under the step BOB was on.
+	for step, want := range map[string][]string{
+		"badge":   {"badge badge.png: 9 bytes, image/png", "badge checked"},
+		"compile": {"dummy minion of build 5b0c4f6e", "exit codes of its own: 3→201", "$ GOOS=linux GOARCH=amd64", "compiled a "},
+		"upload":  {"uploading bob-5b0c4f6e.bin: ", "uploaded bob-5b0c4f6e.bin"},
+	} {
+		for _, w := range want {
+			if !logged(out.Log, step, w) {
+				t.Errorf("no %q in step %s; the log:\n%s", w, step, logLines(out.Log))
+			}
+		}
+	}
+}
+
+// logged reports whether a line of the live log in step has text.
+func logged(lines []protocol.BuildLogLine, step, text string) bool {
+	return slices.ContainsFunc(lines, func(l protocol.BuildLogLine) bool { return l.Step == step && strings.Contains(l.Text, text) })
+}
+
+func logLines(lines []protocol.BuildLogLine) string {
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l.Step + ": " + l.Text + "\n")
+	}
+	return b.String()
 }
 
 // A windows-exe build is the same minion compiled for Windows: an .exe.
@@ -112,9 +138,12 @@ func TestBuildRefusesAWrongBadge(t *testing.T) {
 	req.Files = map[string]protocol.BuildFile{badge.ID: badge}
 	req.Values["badge"] = badge.ID
 
-	res, artifact := factorytest.Build(t, buildSchema, &bob{}, st, req)
-	if res.Status != protocol.BuildFailed || res.Error.Code != "badge_unreadable" || artifact != nil {
+	out := factorytest.Run(t, buildSchema, &bob{}, st, req)
+	if res := out.Result; res.Status != protocol.BuildFailed || res.Error.Code != "badge_unreadable" || out.Artifact != nil {
 		t.Fatalf("result %+v (error %+v)", res, res.Error)
+	}
+	if !logged(out.Log, "badge", "the badge does not read") {
+		t.Fatalf("the log:\n%s", logLines(out.Log))
 	}
 }
 
@@ -131,8 +160,11 @@ func noBadgeRequest(t *testing.T) protocol.BuildRequest {
 func TestBuildFailsWhenTold(t *testing.T) {
 	b := &bob{}
 	b.settings.Store(&settings{fail: true})
-	res, artifact := factorytest.Build(t, buildSchema, b, factorytest.NewStore(t), noBadgeRequest(t))
-	if res.Status != protocol.BuildFailed || res.Error.Code != "knocked_out" || artifact != nil {
+	out := factorytest.Run(t, buildSchema, b, factorytest.NewStore(t), noBadgeRequest(t))
+	if res := out.Result; res.Status != protocol.BuildFailed || res.Error.Code != "knocked_out" || out.Artifact != nil {
 		t.Fatalf("result %+v (error %+v)", res, res.Error)
+	}
+	if !logged(out.Log, "compile", "fail_builds is on") {
+		t.Fatalf("the log:\n%s", logLines(out.Log))
 	}
 }

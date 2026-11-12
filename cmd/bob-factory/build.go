@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"strings"
 	"sync/atomic"
 
 	"github.com/logoscore/logos-golang-factory-core/pkg/factory"
@@ -383,13 +387,17 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	s := b.current()
 	if f, ok := job.File("badge"); ok {
 		job.Step(stepBadge.ID, "checking the badge")
+		job.Logf("badge %s: %d bytes, %s", f.Name, f.Size, cmp.Or(f.MediaType, "no media type"))
 		if _, err := job.ReadFile(ctx, f); err != nil {
+			job.Logf("the badge does not read: %v", err)
 			return factory.Result{}, factory.Fail("badge_unreadable", err.Error())
 		}
+		job.Logf("badge checked: its size and SHA-256 match")
 	}
 	req := job.Request
 	job.Step(stepCompile.ID, "go build for "+req.Platform)
 	if s.fail {
+		job.Logf("fail_builds is on: BOB fails every build")
 		return factory.Result{}, factory.Fail("knocked_out", "BOB is set to fail every build (fail_builds)")
 	}
 	// Core's minion config, checked with the request: baked in as it came,
@@ -401,7 +409,7 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	if len(exits) > 0 {
 		job.Logf("exit codes of its own: %s", formatExitCodes(exits))
 	}
-	out := &lineLog{logf: job.Logf}
+	out := &lineLog{logf: job.Logf, line: compileProgress(job, req.Platform)}
 	bin, err := compile(ctx, b.minionSrc, req.Target, req.Platform, req.MinionConfig, exits, goarmOf(req), out)
 	out.Flush()
 	switch {
@@ -414,15 +422,44 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	}
 	job.Logf("compiled a %d-byte binary for %s", len(bin), req.Platform)
 
-	job.Step(stepUpload.ID, "")
 	a := artifactKinds[req.Target]
 	name := "bob-" + req.BuildID[:8] + a.ext
+	job.Step(stepUpload.ID, "uploading "+name)
+	sum := sha256.Sum256(bin)
+	job.Logf("uploading %s: %d bytes, %s, SHA-256 %x", name, len(bin), a.mediaType, sum)
 	if err := job.UploadArtifact(ctx, name, a.mediaType, bytes.NewReader(bin)); err != nil {
+		job.Logf("the upload failed: %v", err)
 		return factory.Result{}, err
 	}
+	job.Logf("uploaded %s", name)
 	return factory.Result{
 		Warnings: []string{"a dummy minion, made to try the build flow end to end"},
 	}, nil
+}
+
+// compileProgress counts the packages go build -v names as it compiles them
+// and says so on the compile step ("go build for linux/amd64: 12 packages
+// compiled", only those not in the build cache):
+// the step's message changes as the build goes, with its log.
+func compileProgress(job *factory.Job, platform string) func(line string) {
+	packages := 0
+	return func(line string) {
+		if isPackageLine(line) {
+			packages++
+			unit := "packages"
+			if packages == 1 {
+				unit = "package"
+			}
+			job.Step(stepCompile.ID, fmt.Sprintf("go build for %s: %d %s compiled", platform, packages, unit))
+		}
+	}
+}
+
+// isPackageLine reports whether a line of go build -v's output names a
+// package it compiled: an import path alone, not the command line BOB logs
+// ("$ ..."), a compiler error ("./x.go:3:1: ...") or a heading ("# pkg").
+func isPackageLine(line string) bool {
+	return line != "" && !strings.ContainsAny(line, " \t:") && !strings.HasPrefix(line, "$") && !strings.HasPrefix(line, "#")
 }
 
 // artifactKinds are what each target's artifact is named and typed as.

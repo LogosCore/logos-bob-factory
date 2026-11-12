@@ -179,3 +179,31 @@ func TestCompileLogs(t *testing.T) {
 		t.Fatalf("log %q", lines)
 	}
 }
+
+// The compile step's message counts the packages go build -v names; the
+// command line, errors and headings are not packages.
+func TestCompileProgress(t *testing.T) {
+	for line, want := range map[string]bool{
+		"github.com/coder/websocket/internal/util": true,
+		"internal/goarch":                          true,
+		"minion":                                   true,
+		"$ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -v": false,
+		"./broken.go:2:16: undefined: undefined":              false,
+		"# minion":                                            false,
+		"":                                                    false,
+	} {
+		if got := isPackageLine(line); got != want {
+			t.Errorf("%q: %v, want %v", line, got, want)
+		}
+	}
+	var logged, seen []string
+	l := &lineLog{
+		logf: func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+		line: func(s string) { seen = append(seen, s) },
+	}
+	_, _ = l.Write([]byte("a\r\nb\nc"))
+	l.Flush()
+	if strings.Join(logged, "|") != "a|b|c" || strings.Join(seen, "|") != "a|b|c" {
+		t.Fatalf("logged %q, seen %q", logged, seen)
+	}
+}

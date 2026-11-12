@@ -200,9 +200,11 @@ func bakeExitCodes(path string, exits map[int]int) error {
 }
 
 // lineLog writes whole lines to a build log as they come: what a process
-// prints, split at newlines, each line one Logf.
+// prints, split at newlines, each line one Logf, which factory-core sends to
+// core at once, with the step it is in. line, when set, sees each line too.
 type lineLog struct {
 	logf func(format string, args ...any)
+	line func(string)
 	buf  []byte
 }
 
@@ -213,7 +215,7 @@ func (l *lineLog) Write(p []byte) (int, error) {
 		if i < 0 {
 			return len(p), nil
 		}
-		l.logf("%s", l.buf[:i])
+		l.emit(string(l.buf[:i]))
 		l.buf = l.buf[i+1:]
 	}
 }
@@ -221,7 +223,15 @@ func (l *lineLog) Write(p []byte) (int, error) {
 // Flush logs what is left after the last newline.
 func (l *lineLog) Flush() {
 	if len(l.buf) > 0 {
-		l.logf("%s", l.buf)
+		l.emit(string(l.buf))
 		l.buf = nil
+	}
+}
+
+func (l *lineLog) emit(line string) {
+	line = strings.TrimSuffix(line, "\r")
+	l.logf("%s", line)
+	if l.line != nil {
+		l.line(line)
 	}
 }
