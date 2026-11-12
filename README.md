@@ -15,17 +15,17 @@ Built on [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang
 
 | | |
 |---|---|
-| Version | 2 (version 1 also had the JSON-only targets `dummy` and `dummy-lite`) |
+| Version | 4, of build schema version 3. Its minions read core's minion config (`minion_config`) by numbers alone, so its channels, fields and connection parameters are numbered (`minion/fields.go`) |
 | Targets | `linux-elf`: format `elf`, platforms `linux/amd64` and `linux/386`; the artifact is a [binary](#the-linux-elf-binary). `windows-exe`: format `exe`, platforms `windows/amd64`, `windows/386` and `windows/arm64`; the artifact is the same minion as a [Windows program](#the-windows-exe-program) |
 | Fields | `greeting` (string), `kill_date` (datetime), `punches` (enum_list: jab, cross, hook, uppercut), `badge` (file, an image up to 256 KiB, checked and recorded by SHA-256) |
 | Max tasks | Declared: a build says how many tasks its minion runs at once (default 5), and core changes it live from the session. |
 | Compression | Declared: `deflate`. A build packs its messages unless the operator turns it off: the minion inflates what core sends packed, and packs each item it sends that is 256 bytes or more and shrinks an eighth (`minion/packing.go`; docs: wire format, Compression). |
 | Feedback | The minion tells its operators what it would only log: check-ins that failed in a row, its WebSocket closing, a connection past its listener's limit, a persisted session not given back, a command that crashed (the task fails, the minion goes on). The `feedback` command (op 14) sends a warning or an error of your words. |
-| Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch` and `volumes` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`, `feedback`, `socks`. Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. `volumes` (action `list_volumes`, result `volumes`) lists the host's file systems: on Linux those mounted where the minion sees them (`/proc/self/mountinfo`, less the kernel's own and the snaps), with their space (`statfs`), label (`/dev/disk/by-label`) and kind (removable by `/sys/class/block`); core's file browser runs it at a machine's roots. |
+| Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch` and `volumes` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`, `feedback`, and the tunnels and delegates below. Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. `volumes` (action `list_volumes`, result `volumes`) lists the host's file systems: on Linux those mounted where the minion sees them (`/proc/self/mountinfo`, less the kernel's own and the snaps), with their space (`statfs`), label (`/dev/disk/by-label`) and kind (removable by `/sys/class/block`); core's file browser runs it at a machine's roots. |
 | Reverse delegate | `reverse_delegate` (op 19, action `reverse_delegate`, operator-picked: `bind` (0.0.0.0), `listen` (required), `kind` (`reverse-persistent` or `reverse-call`), `max_connections` (16)): while it runs, the minion listens as the TCP channel's reverse kinds do, and carries the minions that dial it: each connection a reverse-persistent one (its first frame naming the kind served and its address), or each a reverse call (a sync, core's reply written back, no reply for a refusal) (`minion/delegate_reverse.go`). The minions it carries are built with a tcp connection to its host's address and that port. |
 | Delegate | `delegate` (op 18, action `delegate`, operator-picked; core starts one itself when a target that names the session needs it): while it runs, the minion serves the TCP channel's `bind-persistent` kind for its operation's minions. Core sends it a target's opens, it dials the target's `host` and `port` (the `listen_port` when none) within `connect_timeout` and the open's deadline (no `proxy`), and carries the frames both ways in delegate items, cut in pieces where a message has no room, until either side closes (`minion/delegate.go`). It holds no place in the max tasks; core stops it after `stop_idle` (1h) with nothing through it. |
-| Tunnels | `tunnel` (op 15, action `tunnel`: `timeout`, 10s, `max_streams`, 256; opens `tcp` and `udp`) and `reverse_tunnel` (op 17, action `reverse_tunnel`: `bind`, `listen`, `udp`, `timeout`, `max_streams`) run until stopped and hold no place in its max tasks. Core adds its own params (`front`, `port`, `host`, `to`, `cap`) and puts the front in front: a SOCKS proxy, an HTTP proxy or a port forward on one of its operational ports, each connection a tool makes through it a stream the minion connects from its host (a name resolved there), its bytes carried in the session's messages with offsets and a window each way (`minion/tunnel.go`). An open it does not take as it is (a key this version does not know) it answers unsupported, never a plain connect (`protocol.ReadTunnel`). The minion checks in at once while it has tunnel items, and as core's `poll` says otherwise; it sends again from core's ack what goes unacked 5s, probes a window shut that long with one byte, and keeps core's data that comes ahead of where it is. A UDP association (SOCKS5 UDP ASSOCIATE) is a UDP socket of its own (`minion/tunnel_udp.go`): core's datagrams go out of it to the destinations they name (a name resolved there, cached a minute), what comes back goes to core with its source; no acks, a queue of 256 KiB, each datagram's number taken once. |
-| Channels | `http` connection schema version 2, with connection parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`) |
+| Tunnels | `tunnel` (op 15, action `tunnel`: `timeout`, 10s, `max_streams`, 256; opens `tcp`, `udp`, `unix`, `pipe` (Windows), `source`, `tls`, `process`, `accept` and `icmp`) and `reverse_tunnel` (op 17, action `reverse_tunnel`: `bind`, `listen`, `udp`, `timeout`, `max_streams`; opens `tcp` and `udp`) run until stopped and hold no place in its max tasks. Core adds its own params (`front`, `port`, `host`, `to`, `stop_idle`, `cap` and the rest: `protocol.TunnelCoreParams`) and puts the front in front: a SOCKS or HTTP proxy, a port forward, a terminal or the VPN, on one of its operational ports, each connection a tool makes through it a stream the minion connects from its host (a name resolved there), its bytes carried in the session's messages with offsets and a window each way (`minion/tunnel.go`). A process (the terminal's) runs in a PTY, a ConPTY on Windows, or on pipes, and its exit goes to core in a `tunnel_ctl` (`minion/proc.go`, `minion/tunnel_ctl.go`). An open it does not take as it is (a key this version does not know) it answers unsupported, never a plain connect (`protocol.ReadTunnel`). The minion checks in at once while it has tunnel items, and as core's `poll` says otherwise; it sends again from core's ack what goes unacked past the link's measured round trip (5s at least, a minute at most: `minion/rtt.go`), probes a window shut that long with one byte, and keeps core's data that comes ahead of where it is. A UDP association (SOCKS5 UDP ASSOCIATE) is a UDP socket of its own (`minion/tunnel_udp.go`): core's datagrams go out of it to the destinations they name (a name resolved there, cached a minute), what comes back goes to core with its source; no acks, a queue of 256 KiB, each datagram's number taken once. |
+| Channels | `http` (numbered 1), connection schema version 3: `reverse-call` with the parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`), and `reverse-persistent` (a WebSocket) with `path_prefix`. `tcp` (2), version 1: `bind-persistent` (the minion listens and the channel dials it), `reverse-persistent` and `reverse-call`, with the channel's own fields |
 | Crypto | `aes-256-cbc-hmac-sha256` (AES-256-CBC with HMAC-SHA256); the keys core generates go into the artifact |
 | Error codes | What the minion's exit codes mean (`error_codes`; docs: minion-build, Minion error codes): 1 could not start (for a reason without a code of its own), 2 crashed (Go's own: a panic no task recovered, or a fatal error of the runtime), 3 its config does not read, 4 built without core's keys, 5 no connection it can use. Core shows them on BOB's page and on each build's Overview. `minion/exits.go` holds them; the minion exits with one when it cannot start, and with 0 when an `exit` task ends it. |
 
@@ -38,7 +38,7 @@ contract says, says **hello** under the temporary id with the new keys (its
 pid, OS and arch, hostname, user, executable, root or user, addresses, and
 its check-in schedule, so core can tell when it is late),
 which opens a session in core, then checks in under the session id with a
-`get_tasks` for one task every check-in interval of the connection, spread by
+`get_tasks` for the room its max tasks leave, every check-in interval of the connection, spread by
 its jitter (`checkin_interval`, `checkin_jitter`; the channel's 60s and 20%
 when the endpoint has none). It logs each step to the console and runs until
 stopped. A failed check-in (the channel out of reach, its 404, core
@@ -69,43 +69,37 @@ artifact is
 
 ```console
 $ ./bob-5b0c4f6e.bin
-minion 00:15:11.276315 build 160a41b2-e202-4841-9766-5dedfb861947, crypto aes-256-cbc-hmac-sha256
-minion 00:15:11.276347 channel http "localhost-8090" (POST http://localhost:8090/), check-in every 1s ± 20%
+minion 00:15:11.276315 build 5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f
+minion 00:15:11.276347 connection 1, http (POST http://localhost:8090/) of 1, check-in every 1s ± 20%
 minion 00:15:11.338861 generated an RSA-2048 key pair in 62ms; public key sha256 39c61b8d6944f84a
 minion 00:15:11.338884 correlation id 8cd63702…
-minion 00:15:11.338931 message 2910971f… under 160a41b2-e202-4841-9766-5dedfb861947: 363 bytes of CBOR, a 418-byte sealed frame, 435 bytes packed for the channel
-minion 00:15:11.343012 channel answered 200 with 435 bytes in 4ms
-minion 00:15:11.343047 opened core's reply: 356 bytes of CBOR, 1 item(s)
+minion 00:15:11.338931 message 2910971f… under 5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f: 342 bytes of CBOR, a 402-byte sealed frame, 419 bytes packed for the channel
+minion 00:15:11.343012 channel answered 200 with 403 bytes in 4ms
+minion 00:15:11.343047 opened core's reply: 322 bytes of CBOR, 1 item(s)
 minion 00:15:11.343921 stage_response: correlation id matches
 minion 00:15:11.343925 temporary id bb1779b3-9fcc-4639-8aa4-5d52c1f3b4e6
 minion 00:15:11.343927 new keys decrypted with our private key: enc_key sha256 a621cf52…, mac_key sha256 d81c124c…
 minion 00:15:11.343929 staged
-minion 00:15:11.344102 hello: pid 2953236, linux/amd64, host "homez", user "user", integrity user, addrs [192.168.0.124 …]
-minion 00:15:11.344150 message 368b46b2… under bb1779b3-9fcc-4639-8aa4-5d52c1f3b4e6: 620 bytes of CBOR, a 674-byte sealed frame, 691 bytes packed for the channel
-minion 00:15:11.345990 channel answered 200 with 147 bytes in 2ms
-minion 00:15:11.346034 opened core's reply: 70 bytes of CBOR, 1 item(s)
+minion 00:15:11.344102 hello: pid 2953236, linux/amd64, host "homez", user "user", integrity 6, addrs [192.168.0.124 …]
+minion 00:15:11.344150 message 368b46b2… under bb1779b3-9fcc-4639-8aa4-5d52c1f3b4e6: 269 bytes of CBOR, a 322-byte sealed frame, 339 bytes packed for the channel
+minion 00:15:11.345990 channel answered 200 with 115 bytes in 2ms
+minion 00:15:11.346034 opened core's reply: 44 bytes of CBOR, 1 item(s)
 minion 00:15:11.346057 session id 8fba1ac4-b8e7-46ca-b96e-bdddc9e52906
 minion 00:15:11.346060 next check-in in 851ms
-minion 00:15:12.198214 message c4dcd5dd… under 8fba1ac4-b8e7-46ca-b96e-bdddc9e52906: 37 bytes of CBOR, a 98-byte sealed frame, 115 bytes packed for the channel
+minion 00:15:12.198214 message c4dcd5dd… under 8fba1ac4-b8e7-46ca-b96e-bdddc9e52906: 28 bytes of CBOR, a 82-byte sealed frame, 99 bytes packed for the channel
 minion 00:15:12.199823 channel answered 200 with 17 bytes in 2ms
-minion 00:15:12.199841 check-in 1: get_tasks max 1, 0 item(s) back (tasks are not built yet)
+minion 00:15:12.199841 check-in 1: get_tasks max 5, 1 item(s) sent, 0 back
 minion 00:15:12.199842 next check-in in 1.033s
 …
 
-$ ./bob-5b0c4f6e.bin describe
-{
-  "format": "logos.bob-dummy.v1",
-  "build_id": "5b0c4f6e-8a1d-4c2b-9e7f-3d2a1b0c9e8f",
-  "target": "linux-elf",
-  "platform": "linux/amd64",
-  …
-}
+$ ./bob-5b0c4f6e.bin describe > minion.cfg   # core's minion config, numbered CBOR, as built in
 ```
 
 So BOB needs the **Go toolchain and the minion's sources at run time**. Its
 image is built on `golang:1.25-alpine`, keeps the sources in `/app/minion`,
 runs as an unprivileged user, and warms its build cache with the standard
-library for both platforms, so a compile takes about a second. To work on the
+library for `linux/amd64`, `linux/386` and `windows/amd64`, so a compile takes
+about a second. To work on the
 minion, mount `./minion` over `/app/minion` (commented out in
 `docker-compose.yml`): the next build compiles the edits without rebuilding
 BOB. Run outside the image, BOB uses the `go` on its `PATH` and the sources in
@@ -171,7 +165,8 @@ and `draining`), BOB declares:
 |---|---|---|
 | `FACTORY_ID` | `bob-local` | Instance id, unique per running process |
 | `LOGOS_CORE_BASE_URL` | `http://localhost:8002` | Core's address (its front, wherever BOB runs): builds fetch their files from it and upload the binary to it. Over HTTPS to a self-signed core, `LOGOS_CORE_CA_FILE`, `LOGOS_CORE_CERT_SHA256` or `LOGOS_CORE_TLS_INSECURE` ([How modules reach core](https://logoscore.github.io/logos-docs/core-infrastructure/#how-modules-reach-core)) |
-| `RABBITMQ_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_VHOST` | `localhost` / `5672` / `guest` / `guest` / `/` | Core's broker |
+| `RABBITMQ_HOST` / `_PORT` / `_USER` / `_VHOST` | `localhost` / `5672` / `logos` / `/` | Core's broker (logos-core's dev stack, from the host) |
+| `RABBITMQ_PASSWORD` | none: required | Its password, logos-core's `RABBITMQ_DEFAULT_PASS` |
 | `LOG_FORMAT` | `json` | `json` or `text`, on stderr |
 | `MINION_SRC` | `/app/minion` | The minion module compiled for `linux-elf` builds; `./minion` when running from the repository |
 | `GOPROXY` | `https://proxy.golang.org,direct` | Where a module the image's cache lacks comes from: a mirror (Nexus, Artifactory, Athens) on a network without the internet |
@@ -180,15 +175,19 @@ and `draining`), BOB declares:
 ## Run
 
 ```bash
-MINION_SRC=./minion go run ./cmd/bob-factory   # against a local broker
+RABBITMQ_PASSWORD=… MINION_SRC=./minion go run ./cmd/bob-factory   # on the host, against logos-core's dev stack
 docker compose up -d --build             # next to logos-core (set RABBITMQ_PASSWORD in .env)
 ```
 
 ## Test
 
 ```bash
-go test ./...
+go test ./...                                   # the factory (the compile tests need go on PATH)
+(cd minion && go vet ./... && go test ./...)    # the minion, a module of its own
+(cd minion && GOOS=windows go vet ./... && GOOS=windows GOARCH=386 go vet ./...)
 ```
 
 `bob_test.go` runs the real builder in process with `factorytest`, through the
-same request checks, job and result as a build core sends.
+same request checks, job and result as a build core sends; `stage_test.go`
+runs a compiled minion against a fake channel and core. `go test ./...` at the
+root does not reach `minion/`: test it in its own directory.

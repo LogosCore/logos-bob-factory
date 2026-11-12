@@ -1,0 +1,14 @@
+# The image builds from go.mod alone: local workspaces, settings and
+# host-built binaries stay out.
+.git
+go.work
+go.work.sum
+.env
+.dev-bin
+docker-compose.override.yml
+bob-factory
+.dev
+# The minion's sources are copied whole: a workspace there stays out too.
+minion/go.work
+minion/go.work.sum
+minion/minion
