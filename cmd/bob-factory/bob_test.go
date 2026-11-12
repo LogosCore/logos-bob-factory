@@ -21,6 +21,9 @@ func TestBuildDummyMinion(t *testing.T) {
 	req.Artifact = protocol.ArtifactUpload{} // filled in by Build
 	req.Files = map[string]protocol.BuildFile{badge.ID: badge}
 	req.Values["badge"] = badge.ID
+	// The exit codes core drew for the build: through factory-core's check of
+	// the request, into the minion.
+	req.ErrorCodes = []protocol.BuildErrorCode{{Code: 3, ExitCode: 201}, {Code: 4, ExitCode: 87}, {Code: 5, ExitCode: 14}}
 
 	needGo(t)
 	out := factorytest.Run(t, buildSchema, &bob{minionSrc: testMinionSrc}, st, req)
@@ -39,7 +42,8 @@ func TestBuildDummyMinion(t *testing.T) {
 	if printed := run(t, out.Artifact); !bytes.Equal(printed, req.MinionConfig) {
 		t.Fatalf("the binary printed %x, core's config is %x", printed, req.MinionConfig)
 	}
-	if bytes.Contains(out.Artifact, []byte(badge.URL)) || !strings.Contains(res.Log, "dummy minion of build 5b0c4f6e") {
+	if bytes.Contains(out.Artifact, []byte(badge.URL)) || !strings.Contains(res.Log, "dummy minion of build 5b0c4f6e") ||
+		!strings.Contains(res.Log, "exit codes of its own: 3→201, 4→87, 5→14") {
 		t.Fatalf("a link in the artifact, or the log: %s", res.Log)
 	}
 	// The plan core got, and the step the build reported last.

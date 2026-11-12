@@ -20,10 +20,11 @@ import (
 // later: a channel added needs no new version. Version 4: the minions read a
 // minion config (MinionConfig), its channels, fields and connection
 // parameters numbered (minion/fields.go), so no instance of version 3 is
-// offered a build that carries one.
+// offered a build that carries one. Version 5: each build's own exit codes
+// (ErrorCodesPerBuild), which an instance of version 4 would not build in.
 var buildSchema = protocol.BuildSchema{
 	SchemaVersion: protocol.BuildSchemaV3,
-	Version:       4,
+	Version:       5,
 	// Core's minion config, the build's settings numbered: BOB's choice is
 	// to bake it in whole (minion.cfg), and its minions read it by number.
 	MinionConfig: true,
@@ -299,10 +300,13 @@ var buildSchema = protocol.BuildSchema{
 	// What the minion's exit codes mean (minion/exits.go, which
 	// exits_test.go checks against these): it exits with one when it cannot
 	// start. Once running it goes on until stopped, and exit ends it with 0.
+	// Each build's minion exits with codes of its own, drawn by core, but
+	// for 1 and 2: Go's, which the runtime and libraries exit with too.
+	ErrorCodesPerBuild: true,
 	ErrorCodes: []protocol.ErrorCode{
-		{Code: 1, Label: "Could not start", Description: "For a reason without a code of its own: the minion's log says which."},
+		{Code: 1, Label: "Could not start", Description: "For a reason without a code of its own: the minion's log says which.", Fixed: true},
 		{Code: 2, Label: "Crashed", Description: "Go's own exit code: a panic no task recovered, or a fatal error of the Go runtime " +
-			"(out of memory, say). A bug in the minion: its output says where."},
+			"(out of memory, say). A bug in the minion: its output says where.", Fixed: true},
 		{Code: 3, Label: "Its config does not read", Description: "The settings built into it do not read as a minion config: " +
 			"the binary is damaged. Build it again."},
 		{Code: 4, Label: "Built without core's keys", Description: "Its config has no payload keys, and BOB's minions speak core's crypto. Build it again."},
@@ -377,8 +381,12 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	job.Logf("dummy minion of build %s for %s with %d connection(s), a %d-byte config", req.BuildID, req.Platform,
 		len(req.Connections), len(req.MinionConfig))
 
+	exits := exitCodes(req)
+	if len(exits) > 0 {
+		job.Logf("exit codes of its own: %s", formatExitCodes(exits))
+	}
 	out := &lineLog{logf: job.Logf}
-	bin, err := compile(ctx, b.minionSrc, req.Target, req.Platform, req.MinionConfig, out)
+	bin, err := compile(ctx, b.minionSrc, req.Target, req.Platform, req.MinionConfig, exits, out)
 	out.Flush()
 	switch {
 	case errors.Is(err, errNoToolchain):

@@ -5,11 +5,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+
+	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
 // defaultMinionSrc is where BOB's image keeps the minion's sources
@@ -34,15 +43,16 @@ var compiledTargets = map[string]map[string][2]string{
 var errNoToolchain = errors.New("no Go toolchain: the go command is not on PATH")
 
 // compile builds the minion module in src for target and platform, with
-// minion (its config) baked in as its minion.cfg, and returns the binary: static (no
-// cgo), stripped, and the same for the same input. src is copied first, so
-// it is never written to. Its modules come from the module cache, and what
+// minion (its config) baked in as its minion.cfg and exits (the build's own
+// exit codes, by declared code; nil: the declared ones) as its exits.go's
+// constants, and returns the binary: static (no cgo), stripped, and the
+// same for the same input. src is copied first, so it is never written to. Its modules come from the module cache, and what
 // is not there through GOPROXY as BOB's environment sets it (a mirror such
 // as Nexus on a network without the internet), checked against the
 // minion's go.sum: what compiles is what go.sum names, wherever it came
 // from. The command and everything the compiler writes to stdout and stderr
 // go to log as they come.
-func compile(ctx context.Context, src, target, platform string, minion []byte, log io.Writer) ([]byte, error) {
+func compile(ctx context.Context, src, target, platform string, minion []byte, exits map[int]int, log io.Writer) ([]byte, error) {
 	pair, ok := compiledTargets[target][platform]
 	if !ok {
 		return nil, fmt.Errorf("target %s does not compile for %s", target, platform)
@@ -66,6 +76,11 @@ func compile(ctx context.Context, src, target, platform string, minion []byte, l
 	if err := os.WriteFile(filepath.Join(dir, "minion.cfg"), minion, 0o600); err != nil {
 		return nil, err
 	}
+	if len(exits) > 0 {
+		if err := bakeExitCodes(filepath.Join(dir, "exits.go"), exits); err != nil {
+			return nil, fmt.Errorf("the build's exit codes: %w", err)
+		}
+	}
 	// readonly: go.mod and go.sum are as committed, never fixed up here.
 	args := []string{"build", "-v", "-trimpath", "-mod=readonly", "-ldflags=-s -w -buildid=", "-o", filepath.Join(".bin", "minion")}
 	cmd := exec.CommandContext(ctx, goBin, append(args, ".")...)
@@ -84,6 +99,82 @@ func compile(ctx context.Context, src, target, platform string, minion []byte, l
 		return nil, fmt.Errorf("go build: %w", err)
 	}
 	return os.ReadFile(filepath.Join(dir, ".bin", "minion"))
+}
+
+// exitCodes are the build's own exit codes, by the code BOB declares
+// (minion/exits.go): those core drew for it; nil when it drew none, and the
+// minion exits with the declared ones.
+func exitCodes(req protocol.BuildRequest) map[int]int {
+	if len(req.ErrorCodes) == 0 {
+		return nil
+	}
+	exits := make(map[int]int, len(req.ErrorCodes))
+	for _, e := range req.ErrorCodes {
+		exits[e.Code] = e.ExitCode
+	}
+	return exits
+}
+
+// formatExitCodes says a build's exit codes for its log: "3→87, 4→201".
+func formatExitCodes(exits map[int]int) string {
+	parts := make([]string, 0, len(exits))
+	for _, code := range slices.Sorted(maps.Keys(exits)) {
+		parts = append(parts, fmt.Sprintf("%d→%d", code, exits[code]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// bakeExitCodes rewrites the minion's exit codes in path, a build's copy of
+// its exits.go: each exit* constant whose value is a code in exits takes
+// that code's exit code. The values are swapped as they stood, so codes that
+// trade places do not chain. Every code in exits must be a constant's, or
+// the minion would exit with a code core never drew.
+func bakeExitCodes(path string, exits map[int]int) error {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+	if err != nil {
+		return err
+	}
+	baked := make(map[int]bool, len(exits))
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if !strings.HasPrefix(name.Name, "exit") || i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.INT {
+					return fmt.Errorf("%s: not a number", name.Name)
+				}
+				code, err := strconv.Atoi(lit.Value)
+				if err != nil {
+					return fmt.Errorf("%s: %w", name.Name, err)
+				}
+				if exit, ok := exits[code]; ok {
+					lit.Value = strconv.Itoa(exit)
+					baked[code] = true
+				}
+			}
+		}
+	}
+	for code := range exits {
+		if !baked[code] {
+			return fmt.Errorf("no exit constant is %d", code)
+		}
+	}
+	var buf bytes.Buffer
+	if err := format.Node(&buf, fset, f); err != nil {
+		return err
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o600)
 }
 
 // lineLog writes whole lines to a build log as they come: what a process

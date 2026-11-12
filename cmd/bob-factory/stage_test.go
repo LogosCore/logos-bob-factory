@@ -238,7 +238,7 @@ func startMinion(t *testing.T, core *fakeCore, mutate func(req *protocol.BuildRe
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/amd64", req.MinionConfig, io.Discard)
+	bin, err := compile(context.Background(), testMinionSrc, "linux-elf", "linux/amd64", req.MinionConfig, nil, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
