@@ -249,8 +249,9 @@ var buildSchema = protocol.BuildSchema{
 			// Windows' IcmpSendEcho).
 			Opens: []string{protocol.OpenTCP, protocol.OpenUDP, protocol.OpenUnix, protocol.OpenPipe, protocol.OpenSource, protocol.OpenTLS,
 				protocol.OpenProcess, protocol.OpenAccept, protocol.OpenICMP},
-			// Core adds the front, the port, a forward's destination, when it
-			// stops the tunnel idle (stop_idle, 1h) and the bandwidth cap
+			// Core adds the front, the port, a forward's or a desktop's
+			// destination (and a desktop's login), when it stops the tunnel
+			// idle (stop_idle, 1h) and the bandwidth cap
 			// (protocol.TunnelCoreParams): no num, never sent. Its own are
 			// seldom changed (Advanced); a terminal connects to nothing, so
 			// the timeout is the other fronts' alone.
@@ -258,7 +259,7 @@ var buildSchema = protocol.BuildSchema{
 				{Key: "timeout", Num: 2, Type: protocol.FieldDuration, Label: "Connect timeout", Default: "10s", Order: 10, Advanced: true,
 					Description: "How long the minion tries to connect to a destination.",
 					When: &protocol.FieldCondition{Key: protocol.ParamFront,
-						Values: []string{protocol.FrontSOCKS, protocol.FrontHTTP, protocol.FrontForward, protocol.FrontVPN}}},
+						Values: append([]string{protocol.FrontSOCKS, protocol.FrontHTTP, protocol.FrontForward, protocol.FrontVPN}, protocol.DesktopFronts()...)}},
 				{Key: "max_streams", Num: 3, Type: protocol.FieldInt, Label: "Connections at once", Default: 256, Min: 1, Max: 4096, Order: 11,
 					Advanced: true, Description: "How many of the tools' connections the tunnel carries at once."},
 			},
