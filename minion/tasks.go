@@ -781,6 +781,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.runDelegate(ctx, t)
 	case opReverseDelegate:
 		r.runReverseDelegate(ctx, t, ti.Args)
+	case opScreenshot:
+		r.screenshot(ctx, t, ti.Args)
 	case opExit:
 		r.exit(t)
 	default:

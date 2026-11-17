@@ -229,6 +229,24 @@ var buildSchema = protocol.BuildSchema{
 			Result:      protocol.ResultVolumes,
 		},
 		{
+			ID: "screenshot", Op: 20, Label: "Take a screenshot",
+			Description: "Takes a picture of the host's screen, every screen in one picture or one of them, and sends it to core, which keeps it with a thumbnail. Windows: the desktop of the session the minion runs in (a service, in session 0, has none); Linux: an X display's (Wayland gives none).",
+			Result: protocol.ResultScreenshot,
+			Params: []protocol.FieldSpec{
+				{Key: "screen", Num: 1, Type: protocol.FieldInt, Label: "Screen", Default: 0, Min: 0, Max: 16, Order: 1,
+					Description: "0: every screen in one picture; 1: the main screen; 2 and on: the others, in the host's order."},
+				{Key: "format", Num: 2, Type: protocol.FieldEnum, Label: "Format", Default: "png", Order: 2,
+					Options: []protocol.EnumOption{
+						{Value: "png", Label: "PNG", Description: "Every pixel as it is."},
+						{Value: "jpeg", Label: "JPEG", Description: "Smaller, for a slow connection."},
+					}},
+				{Key: "quality", Num: 3, Type: protocol.FieldInt, Label: "JPEG quality", Default: 85, Min: 1, Max: 100, Order: 3,
+					When: &protocol.FieldCondition{Key: "format", Values: []string{"jpeg"}}},
+				{Key: "x_display", Num: 4, Type: protocol.FieldString, Label: "X display", MaxLength: 255, Order: 10, Advanced: true,
+					Description: "Linux: the X display to take, :1 say; empty for the minion's DISPLAY, else :0. Windows has no use for it."},
+			},
+		},
+		{
 			ID: "feedback", Op: 14, Label: "Send feedback",
 			Description: "Sends a warning or an error of your words as the minion's own feedback, to try the mechanic: it shows in the session's Feedback.",
 			Params: []protocol.FieldSpec{

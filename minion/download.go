@@ -23,11 +23,14 @@ import (
 // whole's SHA-256. The task ends, with the file_download data, once core
 // has every byte; core's refusal (too large, say) or a stop ends it failed.
 
-// transfer is a file being sent.
+// transfer is a file being sent: one of the host's, read as it goes, or a
+// screenshot's picture, held in memory (screenshot.go).
 type transfer struct {
-	id    []byte
+	id []byte
+	// path is the file's path on the host, or a name alone for a file on
+	// no file system: what the first chunk names.
 	path  string
-	file  *os.File
+	file  io.ReaderAt
 	total uint64
 	// acked is how far core has the file: the next chunk starts there.
 	acked uint64
@@ -89,26 +92,9 @@ func (r *runner) sendFile(ctx context.Context, t *task, args protocol.Args, stre
 		r.end(t, false, nil, abs+" is not a file")
 		return
 	}
-	id := make([]byte, 16)
-	_, _ = rand.Read(id)
-	x := &transfer{id: id, path: abs, file: f, total: uint64(info.Size()), sum: sha256.New(), end: make(chan struct{}), stream: stream}
-	r.mu.Lock()
-	t.xfer = x
-	r.mu.Unlock()
-	log.Printf("task %s: sending %s (%d bytes) as transfer %s", hex.EncodeToString(t.id)[:8], abs, x.total, hex.EncodeToString(id)[:8])
-	r.nudge()
-
-	select {
-	case <-x.end:
-	case <-ctx.Done():
-		r.mu.Lock()
-		x.finish("stopped")
-		r.mu.Unlock()
-	}
-	r.mu.Lock()
-	failed := x.err
-	r.mu.Unlock()
-	if failed != "" {
+	x := newTransfer(abs, f, uint64(info.Size()), stream)
+	id := x.id
+	if failed := r.sendTransfer(ctx, t, x); failed != "" {
 		r.end(t, false, nil, failed)
 		return
 	}
@@ -125,6 +111,34 @@ func (r *runner) sendFile(ctx context.Context, t *task, args protocol.Args, stre
 		r.write(t, nil, protocol.FileDownload{Xfer: id, Path: abs, Size: x.total, SHA256: x.sum.Sum(nil)})
 	}
 	r.end(t, true, nil, "")
+}
+
+// newTransfer is a transfer of total bytes read from body, its first chunk
+// naming it path, under an id of its own.
+func newTransfer(path string, body io.ReaderAt, total uint64, stream bool) *transfer {
+	id := make([]byte, 16)
+	_, _ = rand.Read(id)
+	return &transfer{id: id, path: path, file: body, total: total, sum: sha256.New(), end: make(chan struct{}), stream: stream}
+}
+
+// sendTransfer sends x for t, and waits until core has all of it, it fails,
+// or the task is stopped: why it did not go, "" when core has it.
+func (r *runner) sendTransfer(ctx context.Context, t *task, x *transfer) string {
+	r.mu.Lock()
+	t.xfer = x
+	r.mu.Unlock()
+	log.Printf("task %s: sending %s (%d bytes) as transfer %s", hex.EncodeToString(t.id)[:8], x.path, x.total, hex.EncodeToString(x.id)[:8])
+	r.nudge()
+	select {
+	case <-x.end:
+	case <-ctx.Done():
+		r.mu.Lock()
+		x.finish("stopped")
+		r.mu.Unlock()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return x.err
 }
 
 // finish ends the transfer: err empty when core has the file. Under r.mu.
