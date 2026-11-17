@@ -6,8 +6,8 @@ github.com/logoscore/logos-golang-factory-core v0.5.2 h1:+hqzM6znQkoXyMGiFLdLwgy
 github.com/logoscore/logos-golang-factory-core v0.5.2/go.mod h1:rzgstkcFsziq3P1s/y4pBNrC9JwIbGN2N/ZTNPVezR4=
 github.com/logoscore/logos-golang-module-core v0.3.4 h1:DCuQTQobAnSEromyZvZlzUrcgLpK8gnsRvMQVw0aUxk=
 github.com/logoscore/logos-golang-module-core v0.3.4/go.mod h1:3BlnB3mkKMSAE85M6iClmu+e80HjAgz2Vrn2K6ok0oU=
-github.com/logoscore/logos-golang-protocol v0.56.0 h1:AmaD1tZvW4cS7T8LDC+X1e9xR6Dz/MXBTiqtAl/Q0bo=
-github.com/logoscore/logos-golang-protocol v0.56.0/go.mod h1:u5+5QwLHML635VWwWPK7IwpNbM5Md98cE5wxTf03bgc=
+github.com/logoscore/logos-golang-protocol v0.57.0 h1:IwanxtNI9SjoFbcC06ozCsIK//xQml7GWXIZTXQIoCg=
+github.com/logoscore/logos-golang-protocol v0.57.0/go.mod h1:u5+5QwLHML635VWwWPK7IwpNbM5Md98cE5wxTf03bgc=
 github.com/rabbitmq/amqp091-go v1.10.0 h1:STpn5XsHlHGcecLmMFCtg7mqq0RnD+zFr4uzukfVhBw=
 github.com/rabbitmq/amqp091-go v1.10.0/go.mod h1:Hy4jKW5kQART1u+JkDTF9YYOQUHXqMuhrgxOEeS7G4o=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=

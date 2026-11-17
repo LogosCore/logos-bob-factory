@@ -172,7 +172,7 @@ func run() error {
 			claim = nil
 			log.Printf("another process holds the persisted session: this one goes on in a session of its own")
 		}
-		wait := sched.next()
+		wait := sched.retry()
 		log.Printf("%v; starting over in %s", err, wait.Round(time.Millisecond))
 		time.Sleep(wait)
 	}
@@ -240,7 +240,7 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	tasks.hello = func() protocol.HelloItem {
 		h := describeHost()
 		h.Conn = uint64(tr.place()) //nolint:gosec // a small place
-		h.Sleep = &protocol.Sleep{Interval: uint64(max(1, sched.interval.Milliseconds())), Jitter: uint64(sched.jitter)}
+		h.Sleep = &protocol.Sleep{Interval: uint64(sched.interval.Milliseconds()), Jitter: uint64(sched.jitter)}
 		// Its limit of tasks outgoing adds: it calls this under the
 		// runner's lock.
 		return h
@@ -442,7 +442,7 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 					return err
 				}
 				log.Printf("moving back: %v; trying again at the next check-in", err)
-				back.at = time.Now().Add(sched.next())
+				back.at = time.Now().Add(sched.retry())
 			} else {
 				back = nil
 			}
@@ -652,6 +652,13 @@ func (s schedule) next() time.Duration {
 	return time.Duration(max(0, float64(s.interval)+(mrand.Float64()*2-1)*spread))
 }
 
+// retry is the wait before trying again after a failure: the check-in
+// schedule's, but at least a second, so an interval of 0 (no wait between
+// check-ins) cannot spin on a host that keeps failing.
+func (s schedule) retry() time.Duration {
+	return max(s.next(), time.Second)
+}
+
 // stage sends the minion's first message, a stage, under the build id with
 // the build's keys, and returns the temporary id and the new keys.
 func stage(ex exchanger, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Material) ([16]byte, protocol.AES256CBCHMACSHA256Material, error) {
@@ -721,7 +728,7 @@ func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Mater
 	// The connection it says hello through, by its place in the build's.
 	h.Conn = uint64(conn) //nolint:gosec // a small place
 	// The schedule it checks in by, for core to tell when it is late.
-	h.Sleep = &protocol.Sleep{Interval: uint64(max(1, sched.interval.Milliseconds())), Jitter: uint64(sched.jitter)}
+	h.Sleep = &protocol.Sleep{Interval: uint64(sched.interval.Milliseconds()), Jitter: uint64(sched.jitter)}
 	// How many tasks it runs at once: the build's, which core may change.
 	h.MaxTasks = &maxTasks
 	log.Printf("hello: pid %d, %s/%s, host %q, user %q, integrity %d, addrs %v", h.PID, h.OS, h.Arch, h.Host, h.User, h.Integrity, h.Addrs)

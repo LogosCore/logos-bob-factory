@@ -963,7 +963,7 @@ func (r *runner) shell(ctx context.Context, t *task, args protocol.Args) {
 // sleep changes the check-in schedule, and tells core.
 func (r *runner) sleep(t *task, args protocol.Args) {
 	interval, ok := protocol.ArgDuration(args, sleepInterval)
-	if !ok || interval <= 0 {
+	if !ok {
 		r.end(t, false, nil, "an interval is required")
 		return
 	}
