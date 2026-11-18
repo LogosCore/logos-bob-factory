@@ -40,11 +40,32 @@ type transport struct {
 // persistentLink is a connection kept open, which core pushes over.
 type persistentLink interface {
 	exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error)
+	// exchangeOn is exchange, with what came with the reply. A side message
+	// (side.go) goes only over the gen-th socket, open now: it opens none,
+	// waits for no dial, and fails at once (errSocketGone) without it.
+	exchangeOn(side bool, gen uint64, id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (reply, error)
+	// state is the socket open now: its number (each new one counts one
+	// more), and whether one is open.
+	state() (gen uint64, open bool)
 	// pushed is what core pushes over it, queued for the loop.
 	pushed() *pushQueue
 	lostCh() chan struct{}
 	close()
 }
+
+// reply is core's reply to a message of the minion's, with what the loop
+// needs of it: how many of core's pushes came before it over the same
+// link (pushQueue.count: taken first, in the order core sent them), and
+// the socket it came over (its gen).
+type reply struct {
+	msg    protocol.CoreMessage
+	pushed uint64
+	gen    uint64
+}
+
+// errSocketGone: the socket a side message was for is gone, or another
+// took its place.
+var errSocketGone = errors.New("the socket it was for is gone")
 
 // usable reports whether this minion can use c: an http connection of a
 // reverse kind, or a tcp one: one it listens on (bind-persistent), or one
@@ -147,6 +168,16 @@ func (t *transport) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Mater
 		return t.link.exchange(id, keys, items...)
 	}
 	return exchange(t.conn(), id, keys, items...)
+}
+
+// exchangeOn is exchange, with what came with the reply over a connection
+// kept open (through a request, the message alone).
+func (t *transport) exchangeOn(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (reply, error) {
+	if t.link != nil {
+		return t.link.exchangeOn(false, 0, id, keys, items...)
+	}
+	m, err := exchange(t.conn(), id, keys, items...)
+	return reply{msg: m}, err
 }
 
 // pushes and lost are the kept-open connection's, when one is in use; a

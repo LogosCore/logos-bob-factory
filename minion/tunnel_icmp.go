@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"time"
 
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
@@ -26,7 +27,7 @@ type pinger interface {
 // openICMP opens a stream of pings and answers core; refuse says why the
 // host gives none (ts.mu held).
 func (ts *tunnels) openICMP(t *tunnel, id uint64, refuse func(result int, msg string)) {
-	st := &tstream{t: t, id: id, done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1)}
+	st := &tstream{stats: streamStats{opened: time.Now()}, t: t, id: id, done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1)}
 	p, err := newPinger(func(from net.IP, m protocol.ICMPMessage) { ts.answered(st, from, m) })
 	if err != nil {
 		refuse(protocol.TunnelDenied, clip(err.Error(), protocol.MaxTunnelMsg))

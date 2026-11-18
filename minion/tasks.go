@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
@@ -349,6 +350,20 @@ parts:
 	return items
 }
 
+// streamItems are a side message's items (side.go): the delegates' and the
+// tunnels', as outgoing takes them, in a message's room.
+func (r *runner) streamItems() []any {
+	r.mu.Lock()
+	room := r.perMessageLocked()
+	r.mu.Unlock()
+	dlg, used := r.dlg.items(room, tunnelMaxItems)
+	tun, _ := r.tun.items(max(room-used, 0), tunnelMaxItems-len(dlg))
+	return append(dlg, tun...)
+}
+
+// streamsPending: the tunnels or the delegates have something to send.
+func (r *runner) streamsPending() bool { return r.tun.pending() || r.dlg.pending() }
+
 // roomLocked is how many more tasks the limit leaves room for: the limit
 // less the tasks whose end has not gone yet, but tunnels (a SOCKS proxy, a
 // port forward), which hold no place in it as long as they run: core counts
@@ -405,8 +420,61 @@ func (r *runner) failed(items []any) {
 // take reads core's items: tasks to run (each once), cancels, and how far
 // core has a file being sent, or why it does not take it (an err naming one
 // of the sent items, a chunk).
-func (r *runner) take(answer protocol.CoreMessage, sent []any) {
+func (r *runner) take(answer protocol.CoreMessage, sent []any) { r.takeItems(answer, sent, false) }
+
+// takePush takes what core pushed but its tunnel and delegate items, which
+// the connection's reader took as the push came (takeStreams).
+func (r *runner) takePush(push protocol.CoreMessage) { r.takeItems(push, nil, true) }
+
+// streamItem: a tunnel's item or a delegate's, which may come in any order
+// (offsets, windows, numbers) and go to a stream the minion has already:
+// core opens none before the task's ack.
+func streamItem(typ int) bool {
+	switch typ {
+	case protocol.ItemTunnel, protocol.ItemTunnelReply, protocol.ItemTunnelData, protocol.ItemTunnelAck, protocol.ItemTunnelClose,
+		protocol.ItemTunnelDatagram, protocol.ItemTunnelCtl, protocol.ItemDelegate:
+		return true
+	}
+	return false
+}
+
+// takeStreams takes the tunnel and delegate items of what core pushed, as
+// it comes (the connection's reader, pushQueue.put).
+func (r *runner) takeStreams(push protocol.CoreMessage) {
+	for i, raw := range push.Items {
+		if streamItem(protocol.ItemType(raw)) {
+			r.takeStream(raw, i)
+		}
+	}
+}
+
+// takeStream takes a tunnel's item or a delegate's, item i of core's
+// message.
+func (r *runner) takeStream(raw cbor.RawMessage, i int) {
+	if protocol.ItemType(raw) == protocol.ItemDelegate {
+		// What a delegate task carries: an open to dial, a frame for a
+		// connection it dialed, a close (delegate.go).
+		if err := r.dlg.take(raw); err != nil {
+			r.queueErr(protocol.ErrItemBadMessage, "delegate: "+err.Error(), i)
+		}
+		return
+	}
+	// A tunnel's stream: opened (by core, or core's answer to one the
+	// minion opened), its bytes, how far core has the host's, its controls
+	// (a terminal's size, a signal), its end (tunnel.go).
+	if err := r.tun.take(raw); err != nil {
+		r.queueErr(protocol.ErrItemBadMessage, protocol.ItemName(protocol.ItemType(raw))+": "+err.Error(), i)
+	}
+}
+
+func (r *runner) takeItems(answer protocol.CoreMessage, sent []any, pushed bool) {
 	for i, raw := range answer.Items {
+		if streamItem(protocol.ItemType(raw)) {
+			if !pushed {
+				r.takeStream(raw, i)
+			}
+			continue
+		}
 		switch protocol.ItemType(raw) {
 		case protocol.ItemAck:
 			var a protocol.AckItem
@@ -454,21 +522,6 @@ func (r *runner) take(answer protocol.CoreMessage, sent []any) {
 				r.mu.Lock()
 				r.poll, r.polled = time.Duration(p.Within)*time.Millisecond, true
 				r.mu.Unlock()
-			}
-		case protocol.ItemTunnel, protocol.ItemTunnelReply, protocol.ItemTunnelData, protocol.ItemTunnelAck, protocol.ItemTunnelClose,
-			protocol.ItemTunnelDatagram, protocol.ItemTunnelCtl:
-			// A tunnel's stream: opened (by core, or core's answer to one
-			// the minion opened), its bytes, how far core has the host's,
-			// its controls (a terminal's size, a signal), its end
-			// (tunnel.go).
-			if err := r.tun.take(raw); err != nil {
-				r.queueErr(protocol.ErrItemBadMessage, protocol.ItemName(protocol.ItemType(raw))+": "+err.Error(), i)
-			}
-		case protocol.ItemDelegate:
-			// What a delegate task carries: an open to dial, a frame for a
-			// connection it dialed, a close (delegate.go).
-			if err := r.dlg.take(raw); err != nil {
-				r.queueErr(protocol.ErrItemBadMessage, "delegate: "+err.Error(), i)
 			}
 		case protocol.ItemMaxTasks:
 			// How many tasks to run at once, from now: said back in the next

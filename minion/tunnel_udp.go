@@ -108,7 +108,7 @@ func (ts *tunnels) fromSource(t *tunnel, src *net.UDPAddr, data []byte) {
 			return
 		}
 		t.last++
-		st = &tstream{t: t, id: t.last, source: &net.UDPAddr{IP: src.IP, Port: src.Port, Zone: src.Zone}, sourceKey: key,
+		st = &tstream{stats: streamStats{opened: time.Now()}, t: t, id: t.last, source: &net.UDPAddr{IP: src.IP, Port: src.Port, Zone: src.Zone}, sourceKey: key,
 			done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1),
 			opening: &protocol.TunnelItem{T: protocol.ItemTunnel, Task: t.task, Stream: t.last, Host: host, Port: port, UDP: true}}
 		t.streams[st.id] = st
@@ -166,7 +166,7 @@ func (ts *tunnels) openUDP(t *tunnel, id uint64, refuse func(result int, msg str
 	}
 	r := protocol.TunnelReplyItem{T: protocol.ItemTunnelReply, Task: t.task, Stream: id, Result: protocol.TunnelOpen,
 		Bound: clip(pc.LocalAddr().String(), protocol.MaxTunnelBound)}
-	st := &tstream{t: t, id: id, pc: pc, reply: &r, done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1)}
+	st := &tstream{stats: streamStats{opened: time.Now()}, t: t, id: id, pc: pc, reply: &r, done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1)}
 	t.streams[id] = st
 	t.replies = append(t.replies, r)
 	go ts.readUDP(st)

@@ -47,16 +47,18 @@ type tcpLink struct {
 	open    int
 	arrived chan struct{}
 	keys    map[[16]byte]protocol.AES256CBCHMACSHA256Material
-	waiting map[string]chan protocol.CoreMessage
+	waiting map[string]chan reply
 	pushes  *pushQueue
 	lost    chan struct{}
+	// gen counts the connections that came in: the one in use's (state).
+	gen uint64
 }
 
 // newTCPLink starts listening as the connection says, and keeps listening
 // until closed: a listen that fails (the port taken) is tried again.
 func newTCPLink(conn connection) *tcpLink {
 	l := &tcpLink{conn: conn, arrived: make(chan struct{}, 1), keys: map[[16]byte]protocol.AES256CBCHMACSHA256Material{},
-		waiting: map[string]chan protocol.CoreMessage{}, pushes: newPushQueue(), lost: make(chan struct{}, 1)}
+		waiting: map[string]chan reply{}, pushes: newPushQueue(), lost: make(chan struct{}, 1)}
 	go l.listen()
 	return l
 }
@@ -134,6 +136,8 @@ func (l *tcpLink) take(c net.Conn) {
 	l.open++
 	old := l.cur
 	l.cur = c
+	l.gen++
+	gen := l.gen
 	l.mu.Unlock()
 	if old != nil {
 		_ = old.Close()
@@ -143,7 +147,7 @@ func (l *tcpLink) take(c net.Conn) {
 	case l.arrived <- struct{}{}:
 	default:
 	}
-	go l.read(c)
+	go l.read(c, gen)
 }
 
 // wait is the connection in use, waiting for one to come in when none is.
@@ -159,9 +163,9 @@ func (l *tcpLink) wait() net.Conn {
 	}
 }
 
-// read takes what comes over c until it closes: replies to their waiters,
-// what core starts to pushes (never waiting on the loop).
-func (l *tcpLink) read(c net.Conn) {
+// read takes what comes over c, the gen-th, until it closes: replies to
+// their waiters, what core starts to pushes (never waiting on the loop).
+func (l *tcpLink) read(c net.Conn, gen uint64) {
 	defer l.dropped(c)
 	r := bufio.NewReaderSize(c, 64<<10)
 	for {
@@ -195,7 +199,7 @@ func (l *tcpLink) read(c net.Conn) {
 			delete(l.waiting, string(msg.Re))
 			l.mu.Unlock()
 			if ch != nil {
-				ch <- msg
+				ch <- reply{msg: msg, pushed: l.pushes.count(), gen: gen}
 			}
 			continue
 		}
@@ -237,16 +241,35 @@ func (l *tcpLink) drop(c net.Conn) {
 // the connection in use (waiting for the channel's dial when none is in),
 // and returns core's reply to it.
 func (l *tcpLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
-	var answer protocol.CoreMessage
+	r, err := l.exchangeOn(false, 0, id, keys, items...)
+	return r.msg, err
+}
+
+// exchangeOn is exchange, with what came with the reply; a side message
+// goes only over the gen-th connection, in use now, and waits for no dial.
+func (l *tcpLink) exchangeOn(side bool, gen uint64, id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (reply, error) {
+	var answer reply
 	msgID, frame, plainLen, err := seal(id, keys, items)
 	if err != nil {
 		return answer, err
 	}
-	c := l.wait()
-	reply := make(chan protocol.CoreMessage, 1)
+	var c net.Conn
+	if side {
+		l.mu.Lock()
+		if l.gen == gen {
+			c = l.cur
+		}
+		l.mu.Unlock()
+		if c == nil {
+			return answer, errSocketGone
+		}
+	} else {
+		c = l.wait()
+	}
+	replyCh := make(chan reply, 1)
 	l.mu.Lock()
 	l.keys[id] = keys
-	l.waiting[string(msgID)] = reply
+	l.waiting[string(msgID)] = replyCh
 	l.mu.Unlock()
 	log.Printf("message %x under %s over the connection: %d bytes of CBOR, %d sealed", msgID, formatUUID(id[:]), plainLen, len(frame))
 	_ = c.SetWriteDeadline(time.Now().Add(l.conn.timeout()))
@@ -258,15 +281,15 @@ func (l *tcpLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Materia
 	timer := time.NewTimer(l.conn.timeout())
 	defer timer.Stop()
 	select {
-	case msg, ok := <-reply:
+	case r, ok := <-replyCh:
 		if !ok {
 			return answer, errors.New("the connection closed before the reply")
 		}
-		if !bytes.Equal(msg.Re, msgID) {
-			return answer, fmt.Errorf("the reply answers %x, not our message", msg.Re)
+		if !bytes.Equal(r.msg.Re, msgID) {
+			return answer, fmt.Errorf("the reply answers %x, not our message", r.msg.Re)
 		}
-		log.Printf("core's reply over the connection: %d item(s)", len(msg.Items))
-		return msg, nil
+		log.Printf("core's reply over the connection: %d item(s)", len(r.msg.Items))
+		return r, nil
 	case <-timer.C:
 		// A connection that does not answer in time is taken for dead.
 		l.forget(msgID)
@@ -297,7 +320,14 @@ func (l *tcpLink) close() {
 	}
 }
 
-func (l *tcpLink) pushed() *pushQueue    { return l.pushes }
+func (l *tcpLink) pushed() *pushQueue { return l.pushes }
+
+// state is the connection in use: its gen, and whether one is in.
+func (l *tcpLink) state() (uint64, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.gen, l.cur != nil
+}
 func (l *tcpLink) lostCh() chan struct{} { return l.lost }
 
 // readTCPFrame reads one frame: the id it is sent under and the sealed

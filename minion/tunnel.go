@@ -146,6 +146,8 @@ type tunnel struct {
 	bySource map[string]*tstream
 	// extra is what its streams' windows grew past tunnelWindow, together.
 	extra int
+	// totals add up the streams it had, for its last line.
+	totals tunnelTotals
 }
 
 // tstream is one stream: the minion's connection to its destination.
@@ -230,6 +232,9 @@ type tstream struct {
 	// ends it and when its bytes went (zero: none).
 	rttEnd uint64
 	rttAt  time.Time
+
+	// stats is what it did, for the log (tunnel_stats.go).
+	stats streamStats
 }
 
 func signal(ch chan struct{}) {
@@ -283,13 +288,14 @@ func (ts *tunnels) open(ctx context.Context, task []byte, cmd uint64, args proto
 		reverse: cmd == opReverseTunnel}
 }
 
-// close ends the task's tunnel and its streams: how many it had.
-func (ts *tunnels) close(task []byte) int {
+// close ends the task's tunnel and its streams: how many it had open, and
+// what all of its streams did.
+func (ts *tunnels) close(task []byte) (int, tunnelTotals) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	t := ts.byTask[string(task)]
 	if t == nil {
-		return 0
+		return 0, tunnelTotals{}
 	}
 	delete(ts.byTask, string(task))
 	if t.ln != nil {
@@ -302,7 +308,7 @@ func (ts *tunnels) close(task []byte) int {
 	for _, st := range t.streams {
 		ts.drop(st, false)
 	}
-	return n
+	return n, t.totals
 }
 
 // closeAll ends every tunnel: the session is over.
@@ -323,8 +329,8 @@ func (ts *tunnels) closeAll() {
 // it, and close with it. It ends ok.
 func (r *runner) runTunnel(ctx context.Context, t *task) {
 	<-ctx.Done()
-	n := r.tun.close(t.id)
-	log.Printf("task %x: the tunnel closes, with %d stream(s)", t.id[:4], n)
+	n, totals := r.tun.close(t.id)
+	log.Printf("task %x: the tunnel closes, with %d stream(s)%s", t.id[:4], n, totals.text())
 	r.end(t, true, nil, "")
 }
 
@@ -364,9 +370,9 @@ func (r *runner) reverse(ctx context.Context, t *task, args protocol.Args) {
 			_ = ln.Close()
 		}
 	}
-	n := r.tun.close(t.id)
+	n, totals := r.tun.close(t.id)
 	if ctx.Err() != nil {
-		log.Printf("task %x: the reverse forward closes, with %d stream(s)", t.id[:4], n)
+		log.Printf("task %x: the reverse forward closes, with %d stream(s)%s", t.id[:4], n, totals.text())
 		r.end(t, true, nil, "")
 		return
 	}
@@ -437,7 +443,7 @@ func (ts *tunnels) opened(t *tunnel, c net.Conn) {
 		return
 	}
 	t.last++
-	st := &tstream{t: t, id: t.last, accepted: c, done: make(chan struct{}), inSignal: make(chan struct{}, 1),
+	st := &tstream{stats: streamStats{opened: time.Now()}, t: t, id: t.last, accepted: c, done: make(chan struct{}), inSignal: make(chan struct{}, 1),
 		outSignal: make(chan struct{}, 1), ackedEnd: tunnelWindow,
 		opening: &protocol.TunnelItem{T: protocol.ItemTunnel, Task: t.task, Stream: t.last, Host: host, Port: port}}
 	t.streams[st.id] = st
@@ -654,7 +660,7 @@ func (ts *tunnels) openStream(it protocol.TunnelItem, why error) {
 		ts.openICMP(t, it.Stream, refuse)
 		return
 	}
-	st := &tstream{t: t, id: it.Stream, done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1),
+	st := &tstream{stats: streamStats{opened: time.Now()}, t: t, id: it.Stream, done: make(chan struct{}), inSignal: make(chan struct{}, 1), outSignal: make(chan struct{}, 1),
 		limit: protocol.TunnelRoom(it.Room), ackedEnd: tunnelWindow}
 	t.streams[it.Stream] = st
 	switch it.Kind {
@@ -801,6 +807,7 @@ func (ts *tunnels) readHost(st *tstream) {
 			return
 		}
 		st.out = append(st.out, buf[:k]...)
+		st.stats.read = max(st.stats.read, len(st.out))
 		switch {
 		case errors.Is(err, io.EOF):
 			st.eofOut = true
@@ -870,6 +877,7 @@ func (ts *tunnels) writeHost(st *tstream) {
 			return
 		}
 		st.in = st.in[len(piece):]
+		st.stats.down += uint64(len(piece))
 		if len(st.in) == 0 {
 			st.in = nil
 		}
@@ -925,6 +933,15 @@ func (ts *tunnels) drop(st *tstream, reset bool) {
 		return
 	}
 	st.gone = true
+	st.t.totals.add(st.stats)
+	if now := time.Now(); st.stats.notable(now) {
+		var rtt time.Duration
+		if ts.rtt.have {
+			rtt = ts.rtt.srtt
+		}
+		log.Printf("task %x stream %d: %s", st.t.task[:min(4, len(st.t.task))], st.id, st.stats.text(now, rtt))
+	}
+	forgetPacking(st.t.task, st.id)
 	close(st.done)
 	delete(st.t.streams, st.id)
 	st.shrink()
@@ -983,6 +1000,7 @@ func (ts *tunnels) takeData(d protocol.TunnelDataItem) {
 			d.Data = bytes.Clone(d.Data)
 			st.ahead = append(st.ahead, d)
 			st.aheadBytes += len(d.Data)
+			st.stats.ahead = max(st.stats.ahead, st.aheadBytes)
 		}
 		return
 	}
@@ -1052,6 +1070,9 @@ func (ts *tunnels) takeAck(a protocol.TunnelAckItem) {
 	if a.Next > st.base {
 		st.sentAt = time.Now()
 	}
+	if acked := min(a.Next, end); acked > st.base {
+		st.stats.up += acked - st.base
+	}
 	if a.Next == end+1 {
 		st.out, st.base, st.upDone = nil, end, true
 	} else {
@@ -1060,6 +1081,7 @@ func (ts *tunnels) takeAck(a protocol.TunnelAckItem) {
 	}
 	st.sent = max(st.sent, a.Next)
 	st.limit = max(st.limit, a.Next+room)
+	st.stats.window = max(st.stats.window, int(st.limit-min(st.limit, st.base))) //nolint:gosec // within tunnelHeld
 	signal(st.outSignal)
 	if st.upDone {
 		ts.doneIfOver(st)
@@ -1170,8 +1192,17 @@ func (ts *tunnels) items(room, most int) ([]any, int) {
 				if !put(*d, len(d.Data)+tunnelItemSize) {
 					break rounds
 				}
+				switch {
+				case len(d.Data) == 1 && !d.EOF && d.Off >= st.limit:
+					// A probe of a window shut.
+					st.stats.probes++
+				case d.Off < st.sent && len(d.Data) > 0:
+					st.stats.resends++
+					st.stats.resent += uint64(len(d.Data))
+				}
 				st.measure(d.End(), d.Off < st.sent, now)
 				st.sent, st.sentAt = d.End(), now
+				st.stats.flight = max(st.stats.flight, int(st.sent-min(st.sent, st.base))) //nolint:gosec // within tunnelHeld
 				moved = true
 			}
 		}

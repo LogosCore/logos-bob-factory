@@ -225,6 +225,10 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	// core's sealed session_closed, or the backstop, starts over (docs:
 	// "When an exchange fails").
 	tasks := newRunner(d, &sched)
+	// What core pushes for a tunnel or a delegate is taken as it comes, in
+	// the connection's reader (pushqueue.go); the loop takes the rest.
+	setStreamTaker(tasks.takeStreams)
+	defer setStreamTaker(nil)
 	// Its tunnels' connections go with the session, and its delegate
 	// tasks'.
 	defer tasks.tun.closeAll()
@@ -261,6 +265,31 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	// fo moves the minion between its connections on its own, as the
 	// build's failover policy says (failover.go).
 	fo := newFailover(d.Failover, tr.conns)
+	// takeThese takes what core pushed (its stream items were taken as it
+	// came): an error once core said it closed the session.
+	takeThese := func(pushes []protocol.CoreMessage) error {
+		for _, push := range pushes {
+			if e, ok := coreErrItem(push); ok && e.Code == protocol.ErrItemSessionClosed {
+				return errors.New("core closed the session")
+			}
+			tasks.takePush(push)
+		}
+		return nil
+	}
+	// takePushes takes everything core pushed over the connection in use
+	// (tasks within the allowance, cancels, the rest of tunnel data and
+	// acks): their acks and answers go with the next message.
+	takePushes := func() error { return takeThese(tr.pushes().take()) }
+	// takePushesBefore takes what core pushed before a reply that counted n
+	// (reply.pushed): a reply's items go after them, as core sent them (a
+	// task pushed, then its cancel in a reply).
+	takePushesBefore := func(n uint64) error { return takeThese(tr.pushes().takeBefore(n)) }
+	// side sends the tunnels' and delegates' items while the loop's message
+	// waits for its reply, over a connection kept open (side.go); sideEnd
+	// is why one of its replies ended the session.
+	side := newSideLane(tasks, sessionID, newKeys)
+	defer side.close()
+	var sideEnd error
 	// answered takes core's answer to items: false when the session ends
 	// (err says why).
 	answered := func(n int, items []any, answer protocol.CoreMessage) error {
@@ -290,6 +319,11 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	// changing nothing, when the new connection does not answer: what the
 	// check-in carried goes again through the one in use.
 	move := func(n, place int, why string) error {
+		// The side messages over the connection in use get their replies
+		// first.
+		if err := side.drain(takePushesBefore); err != nil && sideEnd == nil {
+			sideEnd = err
+		}
 		from := tr.place()
 		rest := tasks.outgoing()
 		update := protocol.ConnUpdateItem{T: protocol.ItemConnUpdate, Conn: uint64(place), Reason: why} //nolint:gosec // a small place
@@ -301,6 +335,7 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		}
 		logSwitch(from, place, why)
 		log.Printf("now on %s", tr.describe())
+		side.linked(tr)
 		return answered(n, items, answer)
 	}
 	// switchTo carries out a connect: the session's own errors end it.
@@ -384,22 +419,48 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			awaiting.req.place, listenWait, tr.place()))
 		awaiting = nil
 	}
-	// takePushes takes everything core pushed over the connection in use
-	// (tasks within the allowance, cancels, tunnel data and acks): their
-	// acks and answers go with the next message. An error once core said
-	// it closed the session.
-	takePushes := func() error {
-		for _, push := range tr.pushes().take() {
-			if e, ok := coreErrItem(push); ok && e.Code == protocol.ErrItemSessionClosed {
-				return errors.New("core closed the session")
-			}
-			tasks.take(push, nil)
+	// exchangeMain sends the loop's message and waits for its reply;
+	// meanwhile, over a connection kept open, side messages go (side.go).
+	exchangeMain := func(items []any) (reply, error) {
+		if !tr.persistent() {
+			return tr.exchangeOn(sessionID, newKeys, items...)
 		}
-		return nil
+		type result struct {
+			r   reply
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			r, err := tr.exchangeOn(sessionID, newKeys, items...)
+			done <- result{r, err}
+		}()
+		side.poke(tr)
+		for {
+			select {
+			case res := <-done:
+				side.stop()
+				return res.r, res.err
+			case res := <-side.done:
+				if err := side.took(res, takePushesBefore); err != nil && sideEnd == nil {
+					sideEnd = err
+				}
+				side.poke(tr)
+			case <-side.due:
+				side.send(tr)
+			case <-tasks.wake:
+				// Woken for a stream's bytes or ack: a side message; for
+				// anything else, the loop's next message, once this one is
+				// answered (pending).
+				side.poke(tr)
+			}
+		}
 	}
 	for n := 1; ; n++ {
 		if ended != nil {
 			return ended
+		}
+		if sideEnd != nil {
+			return sideEnd
 		}
 		// What the next message keeps within, and how it asks for tasks:
 		// the connection in use's.
@@ -524,6 +585,17 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 						break waiting
 					}
 					dialDue = time.After(min(time.Until(awaiting.until), 5*time.Second))
+				case res := <-side.done:
+					// A side message's reply, after the loop's message's.
+					if err := side.took(res, takePushesBefore); err != nil {
+						timer.Stop()
+						return err
+					}
+					if tasks.pending() {
+						timer.Stop()
+						break waiting
+					}
+					rearm()
 				case <-tasks.wake:
 					// Woken for what a message took already, or for what
 					// waits a moment (a held ack): no message for it.
@@ -583,7 +655,8 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			return err
 		}
 		items := tasks.outgoing()
-		answer, err := tr.exchange(sessionID, newKeys, items...)
+		r, err := exchangeMain(items)
+		answer := r.msg
 		if err != nil {
 			tasks.failed(items)
 			streak.failed(err)
@@ -638,6 +711,12 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		retrying = false
 		streak.worked()
 		fo.ok(tr.place())
+		// Core answered over the socket in use: side messages may go over
+		// it. What core pushed before the reply goes first.
+		side.linked(tr)
+		if err := takePushesBefore(r.pushed); err != nil {
+			return err
+		}
 		if err := answered(n, items, answer); err != nil {
 			return err
 		}
@@ -646,6 +725,11 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 				len(answer.Items))
 		} else {
 			log.Printf("check-in %d: no room for tasks, %d item(s) sent, %d back", n, len(items), len(answer.Items))
+		}
+		// Side messages whose replies did not come (the socket closed) go
+		// again now, over the one core answered.
+		if len(side.retry) > 0 {
+			side.send(tr)
 		}
 	}
 }
@@ -889,7 +973,12 @@ func seal(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items []any) (
 		if err != nil {
 			return nil, nil, 0, err
 		}
-		// Packed where the build packs and it pays (packing.go).
+		// Packed where the build packs and it pays (packing.go): a stream's
+		// data, unless it did not shrink of late.
+		if d, ok := it.(protocol.TunnelDataItem); ok {
+			msg.Items = append(msg.Items, packData(d, raw))
+			continue
+		}
 		msg.Items = append(msg.Items, packItem(raw))
 	}
 	plain, err := protocol.MarshalCBOR(msg)

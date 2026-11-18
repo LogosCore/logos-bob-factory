@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/flate"
+	"crypto/rand"
 	"strings"
 	"testing"
 
@@ -103,5 +104,47 @@ func TestReadCoreTakesPackedItems(t *testing.T) {
 	}
 	if p, ok := r.pollEvery(); !ok || p.Milliseconds() != 7 {
 		t.Fatalf("the packed poll was not taken: %v %v", p, ok)
+	}
+}
+
+// A stream's data that does not shrink (bytes encrypted already) goes
+// unpacked for a while: after packMisses items in a row, the next packSkip
+// bytes of that stream; then packing is tried again. Another stream's data
+// is packed meanwhile.
+func TestPackSkipsStreamDataThatDoesNotShrink(t *testing.T) {
+	withPacking(t, true)
+	task := bytes.Repeat([]byte{6}, 16)
+	t.Cleanup(func() {
+		forgetPacking(task, 1)
+		forgetPacking(task, 2)
+	})
+	noise := make([]byte, 4096)
+	_, _ = rand.Read(noise)
+	text := bytes.Repeat([]byte("GET /index.html HTTP/1.1\r\n"), 100)
+	data := func(stream uint64, b []byte) protocol.TunnelDataItem {
+		return protocol.TunnelDataItem{T: protocol.ItemTunnelData, Task: task, Stream: stream, Data: b}
+	}
+	packed := func(it protocol.TunnelDataItem) bool {
+		return protocol.ItemType(sealedItems(t, it)[0]) == protocol.ItemPacked
+	}
+	if !packed(data(1, text)) {
+		t.Fatal("text is not packed")
+	}
+	for range packMisses {
+		if packed(data(1, noise)) {
+			t.Fatal("noise is packed")
+		}
+	}
+	if packed(data(1, text)) {
+		t.Fatal("after its misses the stream's data is still packed")
+	}
+	if !packed(data(2, text)) {
+		t.Fatal("another stream's text is not packed")
+	}
+	calls := 1
+	for ; calls < 2*packSkip/len(text) && !packed(data(1, text)); calls++ {
+	}
+	if sent := calls * len(text); sent < packSkip || sent > packSkip+2*len(text) {
+		t.Errorf("packed again after %d bytes, not %d", sent, packSkip)
 	}
 }

@@ -124,14 +124,16 @@ type tcpDialLink struct {
 	// session's end).
 	closing net.Conn
 	keys    map[[16]byte]protocol.AES256CBCHMACSHA256Material
-	waiting map[string]chan protocol.CoreMessage
+	waiting map[string]chan reply
 	pushes  *pushQueue
 	lost    chan struct{}
+	// gen counts the connections dialed: the one open now's (state).
+	gen uint64
 }
 
 func newTCPDialLink(conn connection) *tcpDialLink {
 	return &tcpDialLink{conn: conn, keys: map[[16]byte]protocol.AES256CBCHMACSHA256Material{},
-		waiting: map[string]chan protocol.CoreMessage{}, pushes: newPushQueue(), lost: make(chan struct{}, 1)}
+		waiting: map[string]chan reply{}, pushes: newPushQueue(), lost: make(chan struct{}, 1)}
 }
 
 // open dials the channel when no connection is open.
@@ -146,14 +148,15 @@ func (l *tcpDialLink) open() (net.Conn, error) {
 		return nil, err
 	}
 	l.c = c
+	l.gen++
 	log.Printf("connected to the channel at %s", l.conn.dialAddr())
-	go l.read(c)
+	go l.read(c, l.gen)
 	return c, nil
 }
 
-// read takes what comes over c until it closes: replies to their waiters,
-// what core starts to pushes (never waiting on the loop).
-func (l *tcpDialLink) read(c net.Conn) {
+// read takes what comes over c, the gen-th, until it closes: replies to
+// their waiters, what core starts to pushes (never waiting on the loop).
+func (l *tcpDialLink) read(c net.Conn, gen uint64) {
 	defer l.drop(c)
 	r := bufio.NewReaderSize(c, 64<<10)
 	for {
@@ -191,7 +194,7 @@ func (l *tcpDialLink) read(c net.Conn) {
 			delete(l.waiting, string(msg.Re))
 			l.mu.Unlock()
 			if ch != nil {
-				ch <- msg
+				ch <- reply{msg: msg, pushed: l.pushes.count(), gen: gen}
 			}
 			continue
 		}
@@ -224,19 +227,35 @@ func (l *tcpDialLink) drop(c net.Conn) {
 // exchange sends one message with items under id, sealed with keys, and
 // returns core's reply to it.
 func (l *tcpDialLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
-	var answer protocol.CoreMessage
+	r, err := l.exchangeOn(false, 0, id, keys, items...)
+	return r.msg, err
+}
+
+// exchangeOn is exchange, with what came with the reply; a side message
+// goes only over the gen-th connection, open now, and dials none.
+func (l *tcpDialLink) exchangeOn(side bool, gen uint64, id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (reply, error) {
+	var answer reply
 	msgID, frame, plainLen, err := seal(id, keys, items)
 	if err != nil {
 		return answer, err
 	}
-	c, err := l.open()
-	if err != nil {
+	var c net.Conn
+	if side {
+		l.mu.Lock()
+		if l.gen == gen {
+			c = l.c
+		}
+		l.mu.Unlock()
+		if c == nil {
+			return answer, errSocketGone
+		}
+	} else if c, err = l.open(); err != nil {
 		return answer, err
 	}
-	reply := make(chan protocol.CoreMessage, 1)
+	replyCh := make(chan reply, 1)
 	l.mu.Lock()
 	l.keys[id] = keys
-	l.waiting[string(msgID)] = reply
+	l.waiting[string(msgID)] = replyCh
 	l.mu.Unlock()
 	log.Printf("message %x under %s over the channel's connection: %d bytes of CBOR, %d sealed", msgID, formatUUID(id[:]), plainLen, len(frame))
 	_ = c.SetWriteDeadline(time.Now().Add(l.conn.timeout()))
@@ -248,15 +267,15 @@ func (l *tcpDialLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 	timer := time.NewTimer(l.conn.timeout())
 	defer timer.Stop()
 	select {
-	case msg, ok := <-reply:
+	case r, ok := <-replyCh:
 		if !ok {
 			return answer, errors.New("the connection closed before the reply")
 		}
-		if !bytes.Equal(msg.Re, msgID) {
-			return answer, fmt.Errorf("the reply answers %x, not our message", msg.Re)
+		if !bytes.Equal(r.msg.Re, msgID) {
+			return answer, fmt.Errorf("the reply answers %x, not our message", r.msg.Re)
 		}
-		log.Printf("core's reply over the channel's connection: %d item(s)", len(msg.Items))
-		return msg, nil
+		log.Printf("core's reply over the channel's connection: %d item(s)", len(r.msg.Items))
+		return r, nil
 	case <-timer.C:
 		// A connection that does not answer in time is taken for dead.
 		l.forget(msgID)
@@ -271,7 +290,14 @@ func (l *tcpDialLink) forget(msgID []byte) {
 	l.mu.Unlock()
 }
 
-func (l *tcpDialLink) pushed() *pushQueue    { return l.pushes }
+func (l *tcpDialLink) pushed() *pushQueue { return l.pushes }
+
+// state is the connection open now: its gen, and whether one is.
+func (l *tcpDialLink) state() (uint64, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.gen, l.c != nil
+}
 func (l *tcpDialLink) lostCh() chan struct{} { return l.lost }
 
 // close closes the connection, if one is open.

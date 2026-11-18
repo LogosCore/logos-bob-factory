@@ -41,7 +41,9 @@ type wsLink struct {
 	// session's.
 	keys map[[16]byte]protocol.AES256CBCHMACSHA256Material
 	// waiting are the minion's messages waiting for their replies, by id.
-	waiting map[string]chan protocol.CoreMessage
+	waiting map[string]chan reply
+	// gen counts the WebSockets opened: the one open now's (state).
+	gen uint64
 	// pushes are the messages core starts, until the loop takes them.
 	pushes *pushQueue
 	// lost says the WebSocket closed: the session connects again, backing
@@ -51,7 +53,7 @@ type wsLink struct {
 
 func newWSLink(conn connection) *wsLink {
 	return &wsLink{conn: conn, keys: map[[16]byte]protocol.AES256CBCHMACSHA256Material{},
-		waiting: map[string]chan protocol.CoreMessage{}, pushes: newPushQueue(), lost: make(chan struct{}, 1)}
+		waiting: map[string]chan reply{}, pushes: newPushQueue(), lost: make(chan struct{}, 1)}
 }
 
 // wsURL is the connection's URL as a WebSocket's.
@@ -98,8 +100,9 @@ func (l *wsLink) open() (*websocket.Conn, error) {
 	}
 	ws.SetReadLimit(protocol.MaxMinionMessageSize + 1024)
 	l.ws = ws
+	l.gen++
 	log.Printf("WebSocket open to %s", l.conn.wsURL())
-	go l.read(ws)
+	go l.read(ws, l.gen)
 	go l.ping(ws)
 	return ws, nil
 }
@@ -131,9 +134,9 @@ func (l *wsLink) ping(ws *websocket.Conn) {
 	}
 }
 
-// read takes what comes over ws until it closes: replies to their waiters,
-// what core starts to pushes (never waiting on the loop).
-func (l *wsLink) read(ws *websocket.Conn) {
+// read takes what comes over ws, the gen-th, until it closes: replies to
+// their waiters, what core starts to pushes (never waiting on the loop).
+func (l *wsLink) read(ws *websocket.Conn, gen uint64) {
 	defer l.drop(ws)
 	for {
 		typ, data, err := ws.Read(context.Background())
@@ -177,7 +180,7 @@ func (l *wsLink) read(ws *websocket.Conn) {
 			delete(l.waiting, string(msg.Re))
 			l.mu.Unlock()
 			if ch != nil {
-				ch <- msg
+				ch <- reply{msg: msg, pushed: l.pushes.count(), gen: gen}
 			}
 			continue
 		}
@@ -210,7 +213,14 @@ func (l *wsLink) drop(ws *websocket.Conn) {
 // exchange sends one message with items under id, sealed with keys, and
 // returns core's reply to it, as exchange does through a request.
 func (l *wsLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (protocol.CoreMessage, error) {
-	var answer protocol.CoreMessage
+	r, err := l.exchangeOn(false, 0, id, keys, items...)
+	return r.msg, err
+}
+
+// exchangeOn is exchange, with what came with the reply; a side message
+// goes only over the gen-th WebSocket, open now, and opens none.
+func (l *wsLink) exchangeOn(side bool, gen uint64, id [16]byte, keys protocol.AES256CBCHMACSHA256Material, items ...any) (reply, error) {
+	var answer reply
 	msgID, frame, plainLen, err := seal(id, keys, items)
 	if err != nil {
 		return answer, err
@@ -219,14 +229,23 @@ func (l *wsLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material
 	if err != nil {
 		return answer, err
 	}
-	ws, err := l.open()
-	if err != nil {
+	var ws *websocket.Conn
+	if side {
+		l.mu.Lock()
+		if l.gen == gen {
+			ws = l.ws
+		}
+		l.mu.Unlock()
+		if ws == nil {
+			return answer, errSocketGone
+		}
+	} else if ws, err = l.open(); err != nil {
 		return answer, err
 	}
-	reply := make(chan protocol.CoreMessage, 1)
+	replyCh := make(chan reply, 1)
 	l.mu.Lock()
 	l.keys[id] = keys
-	l.waiting[string(msgID)] = reply
+	l.waiting[string(msgID)] = replyCh
 	l.mu.Unlock()
 	log.Printf("message %x under %s over the WebSocket: %d bytes of CBOR, %d packed", msgID, formatUUID(id[:]), plainLen, len(body))
 	ctx, cancel := context.WithTimeout(context.Background(), l.conn.timeout())
@@ -237,15 +256,15 @@ func (l *wsLink) exchange(id [16]byte, keys protocol.AES256CBCHMACSHA256Material
 		return answer, fmt.Errorf("write: %w", err)
 	}
 	select {
-	case msg, ok := <-reply:
+	case r, ok := <-replyCh:
 		if !ok {
 			return answer, errors.New("the WebSocket closed before the reply")
 		}
-		if !bytes.Equal(msg.Re, msgID) {
-			return answer, fmt.Errorf("the reply answers %x, not our message", msg.Re)
+		if !bytes.Equal(r.msg.Re, msgID) {
+			return answer, fmt.Errorf("the reply answers %x, not our message", r.msg.Re)
 		}
-		log.Printf("core's reply over the WebSocket: %d item(s)", len(msg.Items))
-		return msg, nil
+		log.Printf("core's reply over the WebSocket: %d item(s)", len(r.msg.Items))
+		return r, nil
 	case <-ctx.Done():
 		// A WebSocket that does not answer in time is taken for dead.
 		l.forget(msgID)
@@ -262,6 +281,13 @@ func (l *wsLink) forget(msgID []byte) {
 
 func (l *wsLink) pushed() *pushQueue    { return l.pushes }
 func (l *wsLink) lostCh() chan struct{} { return l.lost }
+
+// state is the WebSocket open now: its gen, and whether one is.
+func (l *wsLink) state() (uint64, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.gen, l.ws != nil
+}
 
 // close closes the WebSocket, if one is open.
 func (l *wsLink) close() {

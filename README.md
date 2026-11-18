@@ -25,7 +25,7 @@ this README says what BOB and its minion do.
 | Targets | `linux-elf`: format `elf`, platforms `linux/amd64`, `linux/386`, `linux/arm64` and `linux/arm`, with its own field `goarm` for `linux/arm` alone ([ARM](#arm)); the artifact is a [binary](#the-linux-elf-binary). `windows-exe`: format `exe`, platforms `windows/amd64`, `windows/386` and `windows/arm64`; the artifact is the same minion as a [Windows program](#the-windows-exe-program) |
 | Fields | `greeting` (string, num 1: what the `hello` command answers), `kill_date` (datetime, 2), `punches` (enum_list: jab, cross, hook, uppercut; 3), `badge` (file, 4: an image up to 256 KiB, which BOB fetches and checks by its size and SHA-256 before it compiles; it never goes into the minion). `goarm` (5) is `linux/arm`'s alone ([ARM](#arm)) |
 | Max tasks | Declared: a build says how many tasks its minion runs at once (default 5), and core changes it live from the session. |
-| Compression | Declared: `deflate`. A build packs its messages unless the operator turns it off: the minion inflates what core sends packed, and packs each item it sends that is 256 bytes or more and shrinks an eighth (`minion/packing.go`; docs: wire format, Compression). |
+| Compression | Declared: `deflate`. A build packs its messages unless the operator turns it off: the minion inflates what core sends packed, and packs each item it sends that is 256 bytes or more and shrinks an eighth (`minion/packing.go`; docs: wire format, Compression). A tunnel stream's data that did not shrink three items in a row (bytes encrypted already: TLS, SSH, RDP) goes unpacked for its next MiB, then packing is tried again, as core does. |
 | Persisted sessions | Declared ([The linux-elf binary](#the-linux-elf-binary)). |
 | Failover | Declared ([Failover](#failover)). |
 | Feedback | The minion tells its operators what it would only log ([Feedback](https://logoscore.github.io/logos-docs/contracts/minion-messages/sessions/#feedback)): check-ins that failed two or more in a row (`checkin_failed`, said once one works again, with the first error), its WebSocket closing when it did not close it (`ws_closed`), a connection to its TCP listener past `max_connections` (`tcp_refused`), a persisted session core did not give back (`session_not_claimed`), and a command that crashed (`task_panic`, an error: the task fails, the minion goes on). It sends them first in its next message, at once, folds one like a queued one into its count, and keeps at most 100 unsent (past that the oldest go, and a `feedback_dropped` warning says how many). The `feedback` command (op 14) sends a warning or an error of your words. |
@@ -130,7 +130,16 @@ terminal, which connects to nothing.
   the host keeps up, to 4 MiB a stream (32 MiB of growth over all of a
   tunnel's streams), and it reads up to 4 MiB of a host ahead of core's
   ack. It checks in at once while it has tunnel items, and as core's `poll`
-  says otherwise.
+  says otherwise. Over a connection kept open a stream's items wait on no
+  round trip: what core pushes for it reaches its host as it comes, and
+  what the host answers goes in a side message while the session's own
+  message waits for its reply ([Connections](#connections)).
+- **What a stream did** (`minion/tunnel_stats.go`): its bytes each way,
+  what it sent again and its probes, and the most it had in flight, of
+  window, read ahead of core's ack and kept ahead of a gap. A stream that
+  sent again or probed, ran a minute or more, or moved a MiB says it in the
+  log when it goes, and a tunnel's last line ("the tunnel closes") adds up
+  all of its streams. Nothing of it goes to core.
 - **Processes** (the terminal front: `minion/proc.go`,
   `minion/tunnel_ctl.go`): its program in a PTY, a ConPTY on Windows, or on
   pipes where it has no terminal to give; its exit goes to core in a
@@ -383,6 +392,21 @@ session, keys and schedule stay the same across moves.
   opens again after 1 s, doubling up to the endpoint's
   `ws_reconnect_backoff` (60 s by default). The channel closes it when its
   own socket to core closes, which is what makes a schedule unnecessary.
+- **Side messages** (`minion/side.go`), over a connection kept open (a
+  WebSocket, the TCP channel's `reverse-persistent` and `bind-persistent`):
+  the session's messages go one at a time, each waiting for its reply, but
+  meanwhile the tunnels' and delegates' items go in side messages of their
+  own, as many waiting as there is to send (the streams' windows bound the
+  bytes on their way), each within a message's room, gathering what comes
+  over 5 ms (a stream's ack and its host's answer in one). They go
+  only over a socket whose first message core answered (it ties the socket
+  to the session); one whose reply never comes (the socket closed) goes
+  again over the next socket, as it was, under a new id; and a move to
+  another connection waits for their replies first. What core pushes for a
+  tunnel or a delegate is taken as it comes, in the connection's reader;
+  the rest of a push is taken by the session, those that came before a
+  reply before it (a task pushed, then its cancel in a reply). Through
+  requests (`reverse-call`) one message goes at a time.
 - **The TCP channel** (`minion/tcp.go`, `minion/tcp_reverse.go`): frames
   are `[length: 4 bytes, big-endian][id: 16 bytes][sealed]`.
   `bind-persistent` makes the minion listen (`listen_port`,
@@ -434,14 +458,14 @@ else. Its runner and workings are its own: minions share only the protocol.
 |---|---|
 | `main.go` | The config read (`//go:embed minion.cfg`, `protocol.ReadMinionConfig`), staging, the `hello`, the session loop, switching, starting over, the backstop |
 | `fields.go`, `ops.go`, `exits.go` | The numbers it reads its config, its tasks and its exit codes by, checked against the schema by the factory's tests |
-| `conns.go`, `ws.go`, `tcp.go`, `tcp_reverse.go`, `failover.go`, `pushqueue.go` | Its connections: HTTP requests and a WebSocket, the TCP channel's three kinds, failover, what core pushes |
+| `conns.go`, `ws.go`, `tcp.go`, `tcp_reverse.go`, `failover.go`, `pushqueue.go`, `side.go` | Its connections: HTTP requests and a WebSocket, the TCP channel's three kinds, failover, what core pushes, side messages |
 | `tasks.go` | The runner: core's items dispatched, `get_tasks` within its limit, acks, result parts, cancels, `reack`, `max_tasks` |
 | `packing.go`, `feedback.go` | Compression; feedback |
 | `machine*.go`, `host_*.go`, `integrity.go`, `smbios.go` | The `hello`: the machine id, the host, the integrity level |
 | `download.go`, `upload.go` | File transfers both ways |
 | `walk.go`, `volumes*.go`, `rm.go`, `shell*.go`, `paths*.go`, `mode_*.go`, `owners_*.go` | Its commands' work on the host: paths as the host writes them, hidden files, owners |
 | `screenshot*.go`, `x11.go` | Screenshots: GDI on Windows, the X protocol elsewhere |
-| `tunnel*.go`, `proc*.go`, `pipe_*.go`, `icmp_*.go`, `rtt.go` | Tunnels, terminals, named pipes, pings, and resend timing that follows the link |
+| `tunnel*.go`, `proc*.go`, `pipe_*.go`, `icmp_*.go`, `rtt.go` | Tunnels, terminals, named pipes, pings, resend timing that follows the link, and what each stream did (`tunnel_stats.go`) |
 | `delegate.go`, `delegate_reverse.go` | Delegation |
 
 ## Icon
