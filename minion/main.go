@@ -487,8 +487,17 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 				log.Printf("connection open: no check-in until there is something to send")
 			}
 			timer := time.NewTimer(wait)
+			fireAt := time.Now().Add(wait)
 			if !scheduled {
 				timer.Stop()
+			}
+			// What waits may come due sooner than the wait began with (a
+			// held ack, a stream's resend): the timer goes off then.
+			rearm := func() {
+				if p, ok := tasks.pollEvery(); ok && (!scheduled || time.Now().Add(p).Before(fireAt)) {
+					timer.Reset(p)
+					fireAt, scheduled = time.Now().Add(p), true
+				}
 			}
 			// A switch waiting for core's dial wakes the loop when it comes,
 			// or when its time is up.
@@ -516,6 +525,12 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 					}
 					dialDue = time.After(min(time.Until(awaiting.until), 5*time.Second))
 				case <-tasks.wake:
+					// Woken for what a message took already, or for what
+					// waits a moment (a held ack): no message for it.
+					if !tasks.pending() {
+						rearm()
+						continue
+					}
 					timer.Stop()
 					break waiting
 				case <-due:
@@ -544,11 +559,14 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 						timer.Stop()
 						return err
 					}
-					// A task is acknowledged on receipt: its ack goes now.
+					// A task's ack goes in the next message: at once, or a
+					// plain command's once it ends or ackHold passes, with
+					// its output and end (tasks.go).
 					if tasks.pending() {
 						timer.Stop()
 						break waiting
 					}
+					rearm()
 				}
 			}
 		}

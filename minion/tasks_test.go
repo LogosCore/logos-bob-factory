@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,26 +107,169 @@ func TestShellTimeout(t *testing.T) {
 	}
 }
 
-// A task id seen before is acked again but not run again; a cancel for a
-// task the minion does not have gets unknown_task.
+// A task id seen before is acked again but not run again: once for all the
+// copies that came before the next message, again for one after it; a
+// cancel for a task the minion does not have gets unknown_task.
 func TestTaskOnceAndUnknownCancel(t *testing.T) {
 	r := newTestRunner()
 	id := make([]byte, 16)
 	hello := protocol.TaskItem{T: protocol.ItemTask, Task: id, Cmd: opHello}
 	r.start(hello)
 	waitEnd(t, r, 2*time.Second)
-	r.start(hello)
+	for range 5 {
+		r.start(hello)
+	}
 	r.mu.Lock()
 	tasks, acks := len(r.tasks), len(r.acks)
 	r.mu.Unlock()
-	if tasks != 1 || acks != 2 {
+	if tasks != 1 || acks != 1 {
 		t.Fatalf("tasks %d acks %d", tasks, acks)
+	}
+	if acked, _, _ := resultOf(r.outgoing()); acked != 1 {
+		t.Fatalf("the message acks %d", acked)
+	}
+	r.start(hello)
+	r.mu.Lock()
+	tasks, acks = len(r.tasks), len(r.acks)
+	r.mu.Unlock()
+	if tasks != 1 || acks != 1 {
+		t.Fatalf("a copy after the ack went: tasks %d acks %d", tasks, acks)
 	}
 	other := make([]byte, 16)
 	other[0] = 9
 	r.stop(other, 3)
 	if len(r.errs) != 1 || r.errs[0].Code != protocol.ErrItemUnknownTask || *r.errs[0].Item != 3 || !bytes.Equal(r.errs[0].Task, other) {
 		t.Fatalf("errs %+v", r.errs)
+	}
+}
+
+// resultOf is what a message's items say: how many task ids its acks name,
+// the output, and whether a task's end came.
+func resultOf(items []any) (acks int, out string, done bool) {
+	for _, it := range items {
+		switch v := it.(type) {
+		case protocol.AckItem:
+			acks += len(v.Tasks)
+		case protocol.ResultItem:
+			out += string(v.Out)
+			done = done || v.Done
+		}
+	}
+	return acks, out, done
+}
+
+// A quick command's ack waits for its end: its ack, output and end go in
+// one message.
+func TestQuickCommandInOneMessage(t *testing.T) {
+	r := newTestRunner()
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: bytes.Repeat([]byte{7}, 16), Cmd: opShell, Args: protocol.Args{shellCommand: "echo hi"}})
+	waitEnd(t, r, 5*time.Second)
+	if !r.pending() {
+		t.Fatal("the ended task is not pending")
+	}
+	acks, out, done := resultOf(r.outgoing())
+	if acks != 1 || strings.TrimSpace(out) != "hi" || !done {
+		t.Fatalf("acks %d out %q done %v", acks, out, done)
+	}
+}
+
+// A command that runs on: its ack and the output it wrote wait ackHold,
+// then go together; what it writes once its ack went goes as it comes.
+func TestAckHold(t *testing.T) {
+	r := newTestRunner()
+	release := make(chan struct{})
+	r.exec = func(ctx context.Context, tk *task, _ protocol.TaskItem) {
+		r.write(tk, []byte("early\n"), nil)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		r.end(tk, true, nil, "")
+	}
+	began := time.Now()
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: bytes.Repeat([]byte{8}, 16), Cmd: opShell})
+	defer close(release)
+	if r.pending() {
+		t.Fatal("a held ack is pending")
+	}
+	if p, ok := r.pollEvery(); !ok || p <= 0 || p > ackHold {
+		t.Fatalf("the hold's end: %s %v", p, ok)
+	}
+	for !r.pending() {
+		if time.Since(began) > time.Second {
+			t.Fatal("the ack never came due")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if held := time.Since(began); held < ackHold {
+		t.Fatalf("due after %s, before ackHold", held)
+	}
+	acks, out, done := resultOf(r.outgoing())
+	if acks != 1 || out != "early\n" || done {
+		t.Fatalf("acks %d out %q done %v", acks, out, done)
+	}
+	if _, ok := r.pollEvery(); ok {
+		t.Fatal("still held after its ack went")
+	}
+	r.mu.Lock()
+	tk := r.tasks[0]
+	r.mu.Unlock()
+	r.write(tk, []byte("late\n"), nil)
+	if !r.pending() {
+		t.Fatal("output after the ack waits")
+	}
+}
+
+// A cancel ends the hold: the ack goes at once, and the end after it.
+func TestCancelEndsTheHold(t *testing.T) {
+	r := newTestRunner()
+	id := bytes.Repeat([]byte{9}, 16)
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: id, Cmd: opShell, Args: protocol.Args{shellCommand: sleep30()}})
+	if r.pending() {
+		t.Fatal("a held ack is pending")
+	}
+	r.stop(id, 0)
+	if !r.pending() {
+		t.Fatal("the ack waits after a cancel")
+	}
+	waitEnd(t, r, 5*time.Second)
+	if acks, _, done := resultOf(r.outgoing()); acks != 1 || !done {
+		t.Fatalf("acks %d done %v", acks, done)
+	}
+}
+
+// Core opens a tunnel's streams, and a delegate's, once it has the task's
+// ack, and a switch's ack goes before the move: theirs never wait.
+func TestAcksThatNeverWait(t *testing.T) {
+	for _, cmd := range []uint64{opTunnel, opReverseTunnel, opDelegate, opReverseDelegate, opSwitch} {
+		if holdsAck(cmd) {
+			t.Errorf("command %d holds its ack", cmd)
+		}
+	}
+	for _, cmd := range []uint64{opShell, opHello, opLs, opDownload, opUpload, opExit} {
+		if !holdsAck(cmd) {
+			t.Errorf("command %d does not hold its ack", cmd)
+		}
+	}
+	if r := startSocks(t, nil); !r.pending() {
+		t.Fatal("a tunnel task's ack waits")
+	}
+}
+
+// A wake for what a message took already asks for no message: the session
+// keeps waiting.
+func TestWakeWithNothingToSend(t *testing.T) {
+	r := newTestRunner()
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: opHello})
+	waitEnd(t, r, 2*time.Second)
+	r.outgoing()
+	select {
+	case <-r.wake:
+	default:
+		t.Fatal("no wake left from the task")
+	}
+	if r.pending() {
+		t.Fatal("pending after the message took it all")
 	}
 }
 

@@ -345,6 +345,13 @@ KiB at most, and the rest goes in the next check-ins, which come at once.
   and not run again, so a core message sent to it again runs nothing twice
   ([Freshness and
   replay](https://logoscore.github.io/logos-docs/contracts/minion-messages/wire-format/#freshness-and-replay)).
+  Copies that came before its next message get one ack.
+- **Acks.** A task is acked in the minion's next message. A tunnel's, a
+  delegate's and a switch's ack goes at once: core opens their streams, and
+  the move goes, once it has it. Any other's waits until the task ends, 50
+  ms at most (`ackHold` in `minion/tasks.go`), so a quick command's ack,
+  output and end go in one message; a cancel, or a file the task sends or
+  receives, sends it sooner.
 - **`exit`** cancels the tasks running beside it and waits up to 10 s for
   their ends, each sent cancelled before exit's own.
 - **Core's questions.** A `reack` (which of the session's tasks it still
@@ -369,9 +376,10 @@ session, keys and schedule stay the same across moves.
   exchange goes over it, and core pushes tasks and cancels within the
   `get_tasks` allowance. The minion checks in at once after its hello and
   after each reconnect, which links the WebSocket to its session and sets
-  the allowance, then not on a schedule while it stays open: it sends what
-  it has (output, a pushed task's ack in its next message), and pings the
-  channel every 30 s to find a link that died silently. One that closes
+  the allowance, then not on a schedule while it stays open: a message goes
+  only when there is something in it (output, a pushed task's ack:
+  [Tasks](#tasks)), and it pings the channel every 30 s to find a link that
+  died silently. One that closes
   opens again after 1 s, doubling up to the endpoint's
   `ws_reconnect_backoff` (60 s by default). The channel closes it when its
   own socket to core closes, which is what makes a schedule unnecessary.

@@ -65,6 +65,25 @@ type task struct {
 	xfer *transfer
 	// recv is the file an upload receives (upload.go); nil for others.
 	recv *receiving
+	// holdUntil: until then, unless it ends sooner, the task's ack and
+	// output wait (ackHold); zero once its ack went.
+	holdUntil time.Time
+}
+
+// ackHold is how long a plain command's ack waits for the command to end,
+// so that a quick one's ack, output and end go in one message.
+const ackHold = 50 * time.Millisecond
+
+// holdsAck: the command's ack may wait (ackHold). Never a tunnel's or a
+// delegate's, whose streams core opens once it has the ack, nor a
+// switch's, whose ack goes before the move.
+func holdsAck(cmd uint64) bool {
+	return !holdsNoSlot(cmd) && cmd != opSwitch
+}
+
+// heldLocked: t's ack and output wait (ackHold).
+func (t *task) heldLocked(now time.Time) bool {
+	return !t.ended && now.Before(t.holdUntil)
 }
 
 // runner holds the tasks of a session and what the next message says.
@@ -152,7 +171,8 @@ func (r *runner) maxTasksNow() uint64 {
 	return r.maxTasks
 }
 
-// nudge asks for an early check-in: there is output to send.
+// nudge asks for an early check-in: there may be something to send (the
+// session sends a message only when pending says so).
 func (r *runner) nudge() {
 	select {
 	case r.wake <- struct{}{}:
@@ -164,14 +184,26 @@ func (r *runner) nudge() {
 func (r *runner) pending() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.inflight) > 0 || len(r.acks) > 0 || len(r.errs) > 0 || r.sleepUpd != nil || r.helloAsked || r.maxTasksSay {
+	if len(r.inflight) > 0 || len(r.errs) > 0 || r.sleepUpd != nil || r.helloAsked || r.maxTasksSay {
 		return true
+	}
+	// A held task's ack and output wait for its end, or ackHold; a file it
+	// sends or receives does not.
+	now := time.Now()
+	for _, id := range r.acks {
+		i := slices.IndexFunc(r.tasks, func(t *task) bool { return slices.Equal(t.id, id) })
+		if i < 0 || !r.tasks[i].heldLocked(now) {
+			return true
+		}
 	}
 	if feedback.pending() {
 		return true
 	}
 	for _, t := range r.tasks {
-		if len(t.out) > 0 || len(t.chunks) > 0 || len(t.pieces) > 0 || (t.ended && !t.sentEnd) || t.xfer.sending() || t.recv.asking() || t.recv.telling() {
+		if !t.heldLocked(now) && (len(t.out) > 0 || len(t.chunks) > 0 || len(t.pieces) > 0) {
+			return true
+		}
+		if (t.ended && !t.sentEnd) || t.xfer.sending() || t.recv.asking() || t.recv.telling() {
 			return true
 		}
 	}
@@ -201,6 +233,12 @@ func (r *runner) outgoing() []any {
 	r.helloAsked = false
 	if len(r.acks) > 0 {
 		items = append(items, protocol.AckItem{T: protocol.ItemAck, Tasks: r.acks})
+		// Their acks went: what those tasks write from now goes as it comes.
+		for _, t := range r.tasks {
+			if slices.ContainsFunc(r.acks, func(a []byte) bool { return slices.Equal(a, t.id) }) {
+				t.holdUntil = time.Time{}
+			}
+		}
 		r.acks = nil
 	}
 	for _, e := range r.errs {
@@ -512,13 +550,22 @@ func (r *runner) acked(xfer []byte, next uint64, hold bool) {
 
 // pollEvery is how soon to check in when sooner than the schedule: core
 // asked (a poll: a stream the minion holds may go on any moment, its
-// downloader or uploader there; a tunnel's items go), or a tunnel's stream
-// sends again unasked (from its ack, a probe), over a persistent connection
-// too. False: the schedule (over a persistent connection, none: core
-// pushes).
+// downloader or uploader there; a tunnel's items go), a tunnel's stream
+// sends again unasked (from its ack, a probe), or a held ack's hold ends
+// (ackHold), over a persistent connection too. False: the schedule (over a
+// persistent connection, none: core pushes).
 func (r *runner) pollEvery() (time.Duration, bool) {
 	r.mu.Lock()
 	p, ok := r.poll, r.polled
+	// A held ack goes when its hold ends (its task's end comes sooner).
+	now := time.Now()
+	for _, t := range r.tasks {
+		if t.heldLocked(now) {
+			if d := max(t.holdUntil.Sub(now), time.Millisecond); !ok || d < p {
+				p, ok = d, true
+			}
+		}
+	}
 	r.mu.Unlock()
 	if d, due := r.tun.due(); due && (!ok || d < p) {
 		p, ok = d, true
@@ -571,7 +618,7 @@ func (r *runner) start(ti protocol.TaskItem) {
 			delete(r.seen, k)
 		}
 	}
-	r.acks = append(r.acks, ti.Task)
+	r.ackLocked(ti.Task)
 	if _, ran := r.seen[key]; ran {
 		r.mu.Unlock()
 		log.Printf("task %s again: acked, not run again", key[:8])
@@ -580,6 +627,9 @@ func (r *runner) start(ti protocol.TaskItem) {
 	r.seen[key] = time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &task{id: ti.Task, cmd: ti.Cmd, cancel: cancel}
+	if holdsAck(ti.Cmd) {
+		t.holdUntil = time.Now().Add(ackHold)
+	}
 	r.tasks = append(r.tasks, t)
 	if ti.Cmd == opExit {
 		r.exitID = ti.Task
@@ -625,6 +675,8 @@ func (r *runner) stop(id []byte, item int) {
 	defer r.mu.Unlock()
 	for _, t := range r.tasks {
 		if slices.Equal(t.id, id) {
+			// A cancel ends its hold: its ack goes now.
+			t.holdUntil = time.Time{}
 			if !t.ended {
 				log.Printf("task %s: cancelled", hex.EncodeToString(id)[:8])
 				t.cancel()
@@ -636,6 +688,14 @@ func (r *runner) stop(id []byte, item int) {
 	r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask, Msg: "no such task running", Item: &item, Task: id})
 }
 
+// ackLocked adds id to the acks the next message carries, once: a copy
+// core sent again before it had the ack adds none.
+func (r *runner) ackLocked(id []byte) {
+	if !slices.ContainsFunc(r.acks, func(a []byte) bool { return slices.Equal(a, id) }) {
+		r.acks = append(r.acks, id)
+	}
+}
+
 // reack answers core's question about tasks (item, a reack): an ack names
 // those the minion has (running, or ended with an end core has not had),
 // an unknown_task each it does not, which core ends.
@@ -644,7 +704,7 @@ func (r *runner) reack(ids [][]byte, item int) {
 	defer r.mu.Unlock()
 	for _, id := range ids {
 		if slices.ContainsFunc(r.tasks, func(t *task) bool { return slices.Equal(t.id, id) }) {
-			r.acks = append(r.acks, id)
+			r.ackLocked(id)
 			continue
 		}
 		r.errs = append(r.errs, protocol.ErrItem{T: protocol.ItemErr, Code: protocol.ErrItemUnknownTask,
