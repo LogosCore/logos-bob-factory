@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -25,7 +26,20 @@ import (
 // version is reported at registration; set with -ldflags "-X main.version=...".
 var version = "dev"
 
+// devCommands are subcommands only a development build (-tags dev) has
+// (devbuild_dev.go); the image's binary has none.
+var devCommands = map[string]func(args []string) error{}
+
 func main() {
+	if len(os.Args) > 1 {
+		if cmd, ok := devCommands[os.Args[1]]; ok {
+			if err := cmd(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "bob-factory:", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
 	instance := env("FACTORY_ID", "bob-local")
 
 	// Logs go to stderr (LOG_FORMAT) at the managed log_level, and to core's

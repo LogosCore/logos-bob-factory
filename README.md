@@ -489,6 +489,25 @@ platform, commands, values, and a connection through the channel (`base_url`
 artifact, run it where it reaches the channel, and its session appears under
 **Sessions**.
 
+## Build a saved request without core
+
+A development build of BOB (`-tags dev`) has a `build` command that compiles
+the minion of a saved `factory.build` request: the JSON core's UI downloads
+for a build (`<id>.factory-build.json`), the exact bytes the factory
+received. No core, RabbitMQ or running factory is needed, and the request's
+deadline and upload link are not used, so an old file works. It checks the
+request against the build schema, then runs the same compile as a real build
+(config baked in as `minion.cfg`, the build's exit codes in `exits.go`):
+
+```bash
+go run -tags dev ./cmd/bob-factory build [-src ./minion] [-o outdir] x.factory-build.json
+```
+
+The artifact is `bob-<first 8 of the build id>.bin` or `.exe` in `-o`
+(default `.`). The command is in `cmd/bob-factory/devbuild_dev.go` behind the
+`dev` tag; the image builds without it, so its binary has no such command.
+The file holds the minion's keys: keep it as private as the artifact.
+
 ## Developing against an unreleased protocol
 
 While BOB or its minion needs a protocol change not yet tagged, they build
