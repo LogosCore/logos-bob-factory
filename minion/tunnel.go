@@ -211,8 +211,11 @@ type tstream struct {
 	ackDue   bool
 	ackedEnd uint64
 	// window is the room the minion gives core (win: tunnelWindow until it
-	// grew).
+	// grew). growAt and growFrom: the stretch grow watches, since when, from
+	// which of core's bytes (zero: none yet).
 	window   int
+	growAt   time.Time
+	growFrom uint64
 	inSignal chan struct{}
 	// finishing: core said done; the stream goes once the host has it all.
 	finishing bool
@@ -882,7 +885,7 @@ func (ts *tunnels) writeHost(st *tstream) {
 			st.in = nil
 		}
 		wake := st.roomGrew()
-		if len(st.in) == 0 && st.grow() {
+		if len(st.in) == 0 && ts.grow(st, time.Now()) {
 			wake = true
 		}
 		ts.mu.Unlock()

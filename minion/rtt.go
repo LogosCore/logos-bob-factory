@@ -6,8 +6,9 @@ import "time"
 // change 9, the minion's half): the minion sends again what core did not
 // ack once the session's round trip has passed, as TCP does (RFC 6298),
 // never sooner than tunnelResend (ts.resend) nor later than a minute; and
-// a stream's window, the room it gives core, grows while core fills it and
-// the host keeps up, to maxWindow (maxTunnelExtra over a tunnel's streams).
+// a stream's window, the room it gives core, grows while core fills it,
+// round trip after round trip, and the host keeps up, to maxWindow
+// (maxTunnelExtra over a tunnel's streams).
 // No item changes: each side's timing is its own.
 
 // maxResend bounds how long the minion waits for an ack, however slow the
@@ -75,15 +76,42 @@ func (st *tstream) win() int {
 	return st.window
 }
 
-// grow doubles the stream's window once core sent up to what the acks let
-// it and the host took all of it: the window, not the host, holds the
-// stream back. True when it grew (an ack says so).
-func (st *tstream) grow() bool {
+// growShare is the share of its window a stream takes per round trip that
+// says the window holds it back.
+const growShare = 0.75
+
+// grow doubles the stream's window when the window, not the host, held the
+// stream back over the last round trip: core delivered at least growShare
+// of it per round trip (as TCP's receive-window autotuning measures it),
+// and the host took all of it. Up to maxWindow, and the tunnel's
+// maxTunnelExtra; true when it grew (an ack says so). Each look covers a
+// round trip at least, from the one before; none before the session's
+// round trip is known (core's acks of the minion's own bytes measure it).
+// ts.mu held.
+//
+// What core delivers says it, not how near its bytes come to the end the
+// minion's last ack gave: the minion acks every piece core sends, each ack
+// moving that end a full window past core's bytes, so in a steady flow
+// they never near it, however full the window runs.
+func (ts *tunnels) grow(st *tstream, now time.Time) bool {
+	if !ts.rtt.have || ts.rtt.srtt <= 0 {
+		return false
+	}
+	if st.growAt.IsZero() {
+		st.growAt, st.growFrom = now, st.next
+		return false
+	}
+	took := now.Sub(st.growAt)
+	if took < ts.rtt.srtt {
+		return false
+	}
+	delivered := st.next - st.growFrom
+	st.growAt, st.growFrom = now, st.next
 	w := st.win()
 	switch {
 	case w >= maxWindow, len(st.in) > 0, st.eofIn:
 		return false
-	case st.next+uint64(w/8) < st.ackedEnd:
+	case float64(delivered)*float64(ts.rtt.srtt) < growShare*float64(w)*float64(took):
 		return false
 	case st.t.extra+w > maxTunnelExtra:
 		return false
