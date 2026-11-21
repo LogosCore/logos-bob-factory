@@ -34,8 +34,11 @@ type editReq struct {
 	patch protocol.ConnectionPatch
 	// add, when set, is a connection to put after the others
 	// (add_connection) instead of a patch to a place.
-	add  *protocol.HelloConnection
-	done chan editDone
+	add *protocol.HelloConnection
+	// remove, when set, is the place of a connection to take out
+	// (remove_connection).
+	remove int
+	done   chan editDone
 }
 
 // editDone is what an edit came to: what it changed, or why not.
@@ -245,14 +248,16 @@ func (r *runner) editConnection(ctx context.Context, t *task, args protocol.Args
 // connection at its place (whole in its place when it is one), and the next
 // message saying the connections again, whole. A connection this minion
 // cannot use changes nothing.
-func (r *runner) applyEdit(tr *transport, req editReq) {
-	if req.add != nil {
-		r.applyAdd(tr, req)
-		return
+func (r *runner) applyEdit(tr *transport, req editReq) (ok bool) {
+	switch {
+	case req.add != nil:
+		return r.applyAdd(tr, req)
+	case req.remove > 0:
+		return r.applyRemove(tr, req)
 	}
 	if req.place < 1 || req.place > len(tr.conns) {
 		req.done <- editDone{err: fmt.Errorf("the minion has %d connection(s): there is no connection %d", len(tr.conns), req.place)}
-		return
+		return false
 	}
 	was, wasName := tr.conns[req.place-1], tr.names[req.place-1]
 	made := req.patch.Apply(helloConnection(was, wasName))
@@ -262,7 +267,7 @@ func (r *runner) applyEdit(tr *transport, req editReq) {
 	}
 	if err != nil {
 		req.done <- editDone{err: err}
-		return
+		return false
 	}
 	what := editChanges(req.place, was, now, wasName, made.Name)
 	r.mu.Lock()
@@ -270,6 +275,7 @@ func (r *runner) applyEdit(tr *transport, req editReq) {
 	r.mu.Unlock()
 	log.Printf("edit: %s; now on %s", what, tr.describe())
 	req.done <- editDone{what: what}
+	return true
 }
 
 // maxConnections bounds the minion's connections: what an add may grow
@@ -287,14 +293,14 @@ func (t *transport) add(c connection, name string) int {
 // applyAdd makes an add in the session loop: the connection after the
 // others, and the next message saying them again. A connection this minion
 // cannot use, or one past maxConnections, changes nothing.
-func (r *runner) applyAdd(tr *transport, req editReq) {
+func (r *runner) applyAdd(tr *transport, req editReq) bool {
 	c, err := connectionOf(*req.add)
 	if err == nil && len(tr.conns) >= maxConnections {
 		err = fmt.Errorf("no room for another: this minion holds %d connections at most", maxConnections)
 	}
 	if err != nil {
 		req.done <- editDone{err: err}
-		return
+		return false
 	}
 	place := tr.add(c, req.add.Name)
 	what := fmt.Sprintf("connection %d: %s, %s %s", place, cmp.Or(req.add.Name, "unnamed"), req.add.Channel, req.add.Kind)
@@ -303,6 +309,7 @@ func (r *runner) applyAdd(tr *transport, req editReq) {
 	r.mu.Unlock()
 	log.Printf("add: %s", what)
 	req.done <- editDone{what: what, place: place}
+	return true
 }
 
 // addConnection is the add_connection command: it hands the session the
@@ -346,6 +353,88 @@ func (r *runner) addConnection(ctx context.Context, t *task, args protocol.Args)
 		r.switchConnection(ctx, t, protocol.Args{switchConnectionConn: int64(d.place)})
 		return
 	}
+	r.end(t, true, nil, "")
+	r.nudge()
+}
+
+// remove takes out the connection at place, the ones after it moving up
+// a place: the one in use (cur), and a switch's listener's, with them.
+func (t *transport) remove(place int) {
+	i := place - 1
+	t.conns = slices.Delete(t.conns, i, i+1)
+	t.names = slices.Delete(t.names, i, i+1)
+	t.edited = true
+	if t.cur > i {
+		t.cur--
+	}
+	switch {
+	case t.listening == place:
+		t.stopListening()
+	case t.listening > place:
+		t.listening--
+	}
+}
+
+// applyRemove makes a removal in the session loop: never the connection in
+// use or the only one; the next message says the connections again, with
+// the place it took out (removed), for core to move what it keeps.
+func (r *runner) applyRemove(tr *transport, req editReq) bool {
+	place := req.remove
+	var err error
+	switch {
+	case place > len(tr.conns):
+		err = fmt.Errorf("the minion has %d connection(s): there is no connection %d", len(tr.conns), place)
+	case place == tr.place():
+		err = fmt.Errorf("connection %d is in use: switch first", place)
+	case len(tr.conns) == 1:
+		err = fmt.Errorf("connection %d is the minion's only connection", place)
+	}
+	if err != nil {
+		req.done <- editDone{err: err}
+		return false
+	}
+	gone := helloConnection(tr.conns[place-1], tr.names[place-1])
+	tr.remove(place)
+	what := fmt.Sprintf("connection %d: %s, %s %s removed", place, cmp.Or(gone.Name, "unnamed"), gone.Channel, gone.Kind)
+	r.mu.Lock()
+	r.connUpd = &protocol.ConnectionUpdateItem{T: protocol.ItemConnectionUpdate, Connections: tr.ownConnections(), Removed: uint64(place)} //nolint:gosec // a small place
+	r.mu.Unlock()
+	log.Printf("remove: %s; now on %s", what, tr.describe())
+	req.done <- editDone{what: what, place: place}
+	return true
+}
+
+// removeConnection is the remove_connection command: it hands the session
+// the place of a connection to take out, and ends with what it removed.
+func (r *runner) removeConnection(ctx context.Context, t *task, args protocol.Args) {
+	place, ok := protocol.ArgInt(args, removeConnectionConn)
+	if !ok || place < 1 {
+		r.end(t, false, nil, "a connection, from 1, is required")
+		return
+	}
+	req := editReq{remove: int(place), done: make(chan editDone, 1)}
+	var d editDone
+	select {
+	case r.edits <- req:
+		r.nudge()
+		select {
+		case d = <-req.done:
+		case <-ctx.Done():
+			d.err = errors.New("cancelled")
+		case <-time.After(switchWait):
+			d.err = errors.New("the session did not get to it")
+		}
+	case <-ctx.Done():
+		d.err = errors.New("cancelled")
+	case <-time.After(switchWait):
+		d.err = errors.New("another edit is under way")
+	}
+	if d.err != nil {
+		r.end(t, false, nil, d.err.Error())
+		r.nudge()
+		return
+	}
+	r.write(t, []byte(d.what+"\n"), nil)
 	r.end(t, true, nil, "")
 	r.nudge()
 }

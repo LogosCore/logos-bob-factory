@@ -896,6 +896,8 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.editConnection(ctx, t, ti.Args)
 	case opAddConnection:
 		r.addConnection(ctx, t, ti.Args)
+	case opRemoveConnection:
+		r.removeConnection(ctx, t, ti.Args)
 	case opVolumes:
 		r.volumes(t)
 	case opFeedback:

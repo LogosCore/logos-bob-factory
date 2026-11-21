@@ -29,7 +29,7 @@ this README says what BOB and its minion do.
 | Persisted sessions | Declared ([The linux-elf binary](#the-linux-elf-binary)). |
 | Failover | Declared ([Failover](#failover)). |
 | Feedback | The minion tells its operators what it would only log ([Feedback](https://logoscore.github.io/logos-docs/contracts/minion-messages/sessions/#feedback)): check-ins that failed two or more in a row (`checkin_failed`, said once one works again, with the first error), its WebSocket closing when it did not close it (`ws_closed`), a connection to its TCP listener past `max_connections` (`tcp_refused`), a persisted session core did not give back (`session_not_claimed`), and a command that crashed (`task_panic`, an error: the task fails, the minion goes on). It sends them first in its next message, at once, folds one like a queued one into its count, and keeps at most 100 unsent (past that the oldest go, and a `feedback_dropped` warning says how many). The `feedback` command (op 14) sends a warning or an error of your words. |
-| Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch_connection`, `edit_connection`, `add_connection` and `volumes` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`, `screenshot`, `feedback`, `tunnel`, `reverse_tunnel`, `delegate` and `reverse_delegate` ([Commands](#commands)). Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. |
+| Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch_connection`, `edit_connection`, `add_connection`, `remove_connection` and `volumes` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`, `screenshot`, `feedback`, `tunnel`, `reverse_tunnel`, `delegate` and `reverse_delegate` ([Commands](#commands)). Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. |
 | Channels | `http` (numbered 1), connection schema version 3: `reverse-call` with the parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`), and `reverse-persistent` (a WebSocket) with `path_prefix`. `tcp` (2), version 1: `bind-persistent` (the minion listens and the channel dials it), `reverse-persistent` and `reverse-call`, with the channel's own fields |
 | Crypto | `aes-256-cbc-hmac-sha256` (AES-256-CBC with HMAC-SHA256); the keys core generates go into the artifact |
 | Failure codes | Why a build failed: `badge_unreadable` (the badge does not read, or not as it was uploaded), `no_toolchain` and `compile_failed` ([The linux-elf binary](#the-linux-elf-binary)), `knocked_out` (`fail_builds`: [Management](#management)) |
@@ -61,6 +61,7 @@ this README says what BOB and its minion do.
 | 21 | `edit_connection` | `edit_connection` | `conn` 1 (required), `connection` 2 (required, structured) |
 | 22 | `switch_connection` | `switch_connection` | `conn` 1 (required), `for` 2 (0s) |
 | 23 | `add_connection` | `add_connection` | `connection` 1 (required, structured), `switch` 2 (false) |
+| 24 | `remove_connection` | `remove_connection` | `conn` 1 (required) |
 
 Op 16 (a port forward's, before the fronts were core's) is never used
 again. `switch` (op 12) is `switch_connection` as it was named before:
@@ -414,6 +415,15 @@ again with a `connection_update`; the task's output says what it added
 it uses, unless the task's `switch` is set: it then moves there as
 `switch_connection` does, and the task ends with how that went. Like an
 edit, the connection lasts while the process runs.
+
+**Removing** one (`remove_connection`, `minion/edit.go`) takes the
+connection at `conn` out, never the one in use or the only one; the ones
+after it move up a place, and with them what holds a place: the one in
+use, a switch's listener or its wait for core's dial, a move back owed,
+failover's last try. Its `connection_update` says the place it took out
+(`removed`), and the task's output what it removed ("connection 1: front,
+http reverse-call removed"). Like an edit, the removal lasts while the
+process runs.
 
 Each exchange that gets its answer, whichever connection carried it, notes
 its round trip (`minion/roundtrip.go`): from sending the message to core's

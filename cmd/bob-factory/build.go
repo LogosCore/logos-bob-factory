@@ -258,6 +258,15 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 		{
+			ID: "remove_connection", Op: 24, Label: "Remove connection", Default: true,
+			Description: "Takes one of the minion's connections out, the ones after it moving up a place; never the one it uses, nor its only one. The removal lasts until the minion restarts.",
+			Action:      protocol.ActionRemoveConnection,
+			Params: []protocol.FieldSpec{
+				{Key: "conn", Num: 1, Type: protocol.FieldInt, Format: protocol.FormatConnection, Label: "Connection",
+					Required: true, Min: 1, Order: 1, Description: "The connection to take out."},
+			},
+		},
+		{
 			ID: "volumes", Op: 13, Label: "List volumes", Default: true,
 			Description: "Lists the host's drives (Windows) or mounted file systems (Linux), with their kind, label, file system and space; the file browser shows them as its roots.",
 			Action:      protocol.ActionListVolumes,

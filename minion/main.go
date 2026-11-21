@@ -394,9 +394,36 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			awaiting.fail(fmt.Errorf("connection %d was edited: no longer listening by its old settings", req.place))
 			awaiting = nil
 		}
-		tasks.applyEdit(tr, req)
-		// An add may have moved the list (append): failover follows it.
+		if !tasks.applyEdit(tr, req) {
+			return
+		}
+		// An add or a removal may have moved the list: failover follows it.
 		fo.conns = tr.conns
+		if p := req.remove; p > 0 {
+			// The places after a removed one moved up: what holds one
+			// moves with them, and what held it goes.
+			fo.removed(p)
+			if awaiting != nil {
+				switch {
+				case awaiting.req.place == p:
+					awaiting.fail(fmt.Errorf("connection %d was removed", p))
+					awaiting = nil
+				case awaiting.req.place > p:
+					awaiting.req.place--
+				}
+			}
+			if awaiting != nil && awaiting.from > p {
+				awaiting.from--
+			}
+			if back != nil {
+				switch {
+				case back.place == p:
+					back = nil
+				case back.place > p:
+					back.place--
+				}
+			}
+		}
 	}
 	// dialCame moves through core's dial on the listener a switch opened;
 	// one that does not answer leaves it listening, for another dial.

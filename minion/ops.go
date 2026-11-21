@@ -43,6 +43,9 @@ const (
 	// opAddConnection puts a connection core sends after the minion's
 	// (edit.go).
 	opAddConnection = 23
+	// opRemoveConnection takes one of the minion's connections out
+	// (edit.go).
+	opRemoveConnection = 24
 )
 
 // Params, by command.
@@ -87,6 +90,9 @@ const (
 	// moves there once it is added.
 	addConnectionConnection = 1
 	addConnectionSwitch     = 2
+
+	// removeConnectionConn is the place of the connection to take out.
+	removeConnectionConn = 1
 
 	feedbackLevel   = 1
 	feedbackMessage = 2

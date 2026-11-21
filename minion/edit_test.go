@@ -199,3 +199,68 @@ func TestAddConnection(t *testing.T) {
 		t.Fatalf("with switch: %+v out %q", tk, tk.out)
 	}
 }
+
+// A removal takes the connection out, the ones after it moving up (the one
+// in use with them), and the next message says the list with the place it
+// took out; never the one in use, the only one, or a place past them.
+func TestRemoveConnection(t *testing.T) {
+	tr, err := newTransport([]protocol.MinionConnection{
+		buildConn("http", protocol.KindReverseCall, "http://127.0.0.1:1"),
+		buildConn("http", protocol.KindReverseCall, "http://127.0.0.1:2"),
+		buildConn("http", protocol.KindReverseCall, "http://127.0.0.1:3"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.use(2, nil) // on the third
+	r := newRunner(description{Ops: []uint64{opRemoveConnection}}, &schedule{interval: time.Minute})
+	n := byte(0)
+	remove := func(place int64) *task {
+		t.Helper()
+		go func() { r.applyEdit(tr, <-r.edits) }()
+		n++
+		tk := &task{id: bytes.Repeat([]byte{n}, 16), cmd: opRemoveConnection}
+		r.removeConnection(context.Background(), tk, protocol.Args{removeConnectionConn: place})
+		return tk
+	}
+
+	for place, want := range map[int64]string{3: "is in use: switch first", 4: "there is no connection 4"} {
+		if tk := remove(place); tk.ok || !strings.Contains(tk.err, want) || len(tr.conns) != 3 {
+			t.Fatalf("connection %d: %+v", place, tk)
+		}
+	}
+	tk := remove(1)
+	if !tk.ok || string(tk.out) != "connection 1: unnamed, http reverse-call removed\n" || len(tr.conns) != 2 || tr.place() != 2 ||
+		tr.conn().param(httpBaseURL) != "http://127.0.0.1:3" || tr.conns[0].param(httpBaseURL) != "http://127.0.0.1:2" {
+		t.Fatalf("task %+v out %q, %d connections, on %d", tk, tk.out, len(tr.conns), tr.place())
+	}
+	var upd *protocol.ConnectionUpdateItem
+	for _, it := range r.outgoing() {
+		if u, ok := it.(protocol.ConnectionUpdateItem); ok {
+			upd = &u
+		}
+	}
+	if upd == nil || len(upd.Connections) != 2 || upd.Removed != 1 || upd.Validate() != nil {
+		t.Fatalf("the update: %+v", upd)
+	}
+	if tk := remove(1); !tk.ok || len(tr.conns) != 1 || tr.place() != 1 {
+		t.Fatalf("the other: %+v, %d connections, on %d", tk, len(tr.conns), tr.place())
+	}
+	tr.use(0, nil)
+	if tk := remove(1); tk.ok || !strings.Contains(tk.err, "is in use") {
+		t.Fatalf("the only one, in use: %+v", tk)
+	}
+}
+
+// Failover's last connection tried moves with a removal.
+func TestFailoverFollowsARemoval(t *testing.T) {
+	f := &failover{tried: 3}
+	f.removed(1)
+	if f.tried != 2 {
+		t.Fatalf("tried %d after one before it went", f.tried)
+	}
+	f.removed(2)
+	if f.tried != 0 {
+		t.Fatalf("tried %d after it went", f.tried)
+	}
+}

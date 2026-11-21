@@ -176,3 +176,14 @@ func (f *failover) failbackDue(on int, now time.Time) int {
 // failbackMissed is told the first connection did not answer: another
 // failback_after where the minion is.
 func (f *failover) failbackMissed(now time.Time) { f.away = now }
+
+// removed follows a connection taken out at place: the one tried last,
+// after it, moved up a place; it, gone.
+func (f *failover) removed(place int) {
+	switch {
+	case f.tried == place:
+		f.tried = 0
+	case f.tried > place:
+		f.tried--
+	}
+}
