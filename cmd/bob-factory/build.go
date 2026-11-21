@@ -212,7 +212,9 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 		{
-			ID: "switch", Op: 12, Label: "Switch connection", Default: true,
+			// The old id of switch_connection: kept for the builds that have
+			// it, whose minions run op 12; new ones run op 22.
+			ID: "switch", Op: 12, Label: "Switch connection", Legacy: true,
 			Description: "Moves the minion to another of its connections, once that one answers; it stays on the one it has if not.",
 			Action:      protocol.ActionSwitchConnection,
 			Params: []protocol.FieldSpec{
@@ -220,6 +222,28 @@ var buildSchema = protocol.BuildSchema{
 					Required: true, Min: 1, Order: 1, Description: "The connection to move to."},
 				{Key: "for", Num: 2, Type: protocol.FieldDuration, Label: "For", Default: "0s", Order: 2,
 					Description: "How long before it moves back to the connection it has now. Empty or 0s: it stays."},
+			},
+		},
+		{
+			ID: "switch_connection", Op: 22, Label: "Switch connection", Default: true,
+			Description: "Moves the minion to another of its connections, once that one answers; it stays on the one it has if not.",
+			Action:      protocol.ActionSwitchConnection,
+			Params: []protocol.FieldSpec{
+				{Key: "conn", Num: 1, Type: protocol.FieldInt, Format: protocol.FormatConnection, Label: "Connection",
+					Required: true, Min: 1, Order: 1, Description: "The connection to move to."},
+				{Key: "for", Num: 2, Type: protocol.FieldDuration, Label: "For", Default: "0s", Order: 2,
+					Description: "How long before it moves back to the connection it has now. Empty or 0s: it stays."},
+			},
+		},
+		{
+			ID: "edit_connection", Op: 21, Label: "Edit connection", Default: true,
+			Description: "Changes one of the minion's connections in place: its settings, its kind or its channel. The one in use goes on with the new settings from the next exchange; the edit lasts until the minion restarts.",
+			Action:      protocol.ActionEditConnection,
+			Params: []protocol.FieldSpec{
+				{Key: "conn", Num: 1, Type: protocol.FieldInt, Format: protocol.FormatConnection, Label: "Connection",
+					Required: true, Min: 1, Order: 1, Description: "The connection to change."},
+				{Key: "connection", Num: 2, Type: protocol.FieldStructured, Format: protocol.FormatConnection, Label: "New connection",
+					Required: true, Order: 2, Description: "The connection it becomes, whole: its channel, kind, name, params and values."},
 			},
 		},
 		{
@@ -231,7 +255,7 @@ var buildSchema = protocol.BuildSchema{
 		{
 			ID: "screenshot", Op: 20, Label: "Take a screenshot",
 			Description: "Takes a picture of the host's screen, every screen in one picture or one of them, and sends it to core, which keeps it with a thumbnail. Windows: the desktop of the session the minion runs in (a service, in session 0, has none); Linux: an X display's (Wayland gives none).",
-			Result: protocol.ResultScreenshot,
+			Result:      protocol.ResultScreenshot,
 			Params: []protocol.FieldSpec{
 				{Key: "screen", Num: 1, Type: protocol.FieldInt, Label: "Screen", Default: 0, Min: 0, Max: 16, Order: 1,
 					Description: "0: every screen in one picture; 1: the main screen; 2 and on: the others, in the host's order."},

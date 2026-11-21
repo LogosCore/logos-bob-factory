@@ -96,7 +96,7 @@ func TestTransportTry(t *testing.T) {
 
 // A switch asks the session and ends with what came of it.
 func TestSwitchTask(t *testing.T) {
-	r := newRunner(description{Ops: []uint64{opSwitch}}, &schedule{interval: time.Minute})
+	r := newRunner(description{Ops: []uint64{opSwitchConnection}}, &schedule{interval: time.Minute})
 	go func() {
 		req := <-r.switches
 		if req.place != 2 || req.dur != 10*time.Minute {
@@ -105,20 +105,20 @@ func TestSwitchTask(t *testing.T) {
 		}
 		req.done <- nil
 	}()
-	tk := &task{id: bytes.Repeat([]byte{1}, 16), cmd: opSwitch}
-	r.switchConnection(context.Background(), tk, protocol.Args{switchConn: int64(2), switchFor: int64(600_000)})
+	tk := &task{id: bytes.Repeat([]byte{1}, 16), cmd: opSwitchConnection}
+	r.switchConnection(context.Background(), tk, protocol.Args{switchConnectionConn: int64(2), switchConnectionFor: int64(600_000)})
 	if !tk.ended || !tk.ok || string(tk.out) != "switched to connection 2 for 10m0s\n" {
 		t.Fatalf("task %+v out %q", tk, tk.out)
 	}
 
 	go func() { (<-r.switches).done <- errUnexpected }()
-	tk = &task{id: bytes.Repeat([]byte{2}, 16), cmd: opSwitch}
-	r.switchConnection(context.Background(), tk, protocol.Args{switchConn: int64(1)})
+	tk = &task{id: bytes.Repeat([]byte{2}, 16), cmd: opSwitchConnection}
+	r.switchConnection(context.Background(), tk, protocol.Args{switchConnectionConn: int64(1)})
 	if !tk.ended || tk.ok || tk.err != errUnexpected.Error() {
 		t.Fatalf("a refused switch: %+v", tk)
 	}
 
-	tk = &task{id: bytes.Repeat([]byte{3}, 16), cmd: opSwitch}
+	tk = &task{id: bytes.Repeat([]byte{3}, 16), cmd: opSwitchConnection}
 	r.switchConnection(context.Background(), tk, protocol.Args{})
 	if !tk.ended || tk.ok {
 		t.Fatalf("no connection named: %+v", tk)

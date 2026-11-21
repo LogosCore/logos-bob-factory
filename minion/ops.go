@@ -17,9 +17,11 @@ const (
 	opRm             = 9
 	opWalk           = 10
 	opShell          = 11
-	opSwitch         = 12
-	opVolumes        = 13
-	opFeedback       = 14
+	// opSwitchConnection is 22: 12 was its op as switch, which builds made
+	// before the rename keep (a legacy command), never used again.
+	opSwitchConnection = 22
+	opVolumes          = 13
+	opFeedback         = 14
 	// opTunnel: core opens streams through the minion's host (its front,
 	// SOCKS, HTTP or a forward, is core's alone). 16 was a port forward's
 	// before the fronts were core's: never used again.
@@ -35,6 +37,9 @@ const (
 	opReverseDelegate = 19
 	// opScreenshot takes a picture of the host's screen (screenshot.go).
 	opScreenshot = 20
+	// opEditConnection puts a connection core sends at a place in the minion's
+	// (edit.go).
+	opEditConnection = 21
 )
 
 // Params, by command.
@@ -68,8 +73,12 @@ const (
 	shellCommand = 1
 	shellTimeout = 2
 
-	switchConn = 1
-	switchFor  = 2
+	switchConnectionConn = 1
+	switchConnectionFor  = 2
+
+	// editConnectionConnection is the connection, whole, in core's numbered form.
+	editConnectionConn       = 1
+	editConnectionConnection = 2
 
 	feedbackLevel   = 1
 	feedbackMessage = 2

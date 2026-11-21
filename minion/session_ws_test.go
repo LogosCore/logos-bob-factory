@@ -254,7 +254,7 @@ func startWSSession(t *testing.T, c *wsCore, conns ...protocol.MinionConnection)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := description{Build: c.buildID, Keys: c.keys, Connections: conns, Ops: []uint64{opSleep, opExit, opHello, opShell, opSwitch},
+	d := description{Build: c.buildID, Keys: c.keys, Connections: conns, Ops: []uint64{opSleep, opExit, opHello, opShell, opSwitchConnection},
 		Greeting: "hi"}
 	done := make(chan error, 1)
 	go func() { done <- session(tr, schedule{interval: time.Second}, d, c.buildID, c.keys, nil) }()
@@ -290,7 +290,7 @@ func TestSessionSwitchSendsNoEmptyMessage(t *testing.T) {
 	c := newWSCore(t)
 	startWSSession(t, c, sessionWSConn(c.srv.URL, "/one/"), sessionWSConn(c.srv.URL, "/two/"))
 	from := c.count()
-	c.push(protocol.TaskItem{T: protocol.ItemTask, Task: bytes.Repeat([]byte{6}, 16), Cmd: opSwitch, Args: protocol.Args{switchConn: uint64(2)}})
+	c.push(protocol.TaskItem{T: protocol.ItemTask, Task: bytes.Repeat([]byte{6}, 16), Cmd: opSwitchConnection, Args: protocol.Args{switchConnectionConn: uint64(2)}})
 	end := c.waitFor(t, from, 5*time.Second, func(s wsSent) bool { _, _, done := sentResult(s); return done })
 	c.quiet(t, end, 300*time.Millisecond)
 	sent := c.since(from)

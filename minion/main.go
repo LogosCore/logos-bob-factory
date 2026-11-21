@@ -213,7 +213,13 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
-	sessionID, err := hello(ex, tempID, newKeys, claim, sched, tr.place(), d.maxTasks())
+	// Its connections, when an edit changed them (the build's are core's
+	// already) or it claims a session that may hold another list.
+	var conns []protocol.HelloConnection
+	if tr.edited || claim != nil {
+		conns = tr.ownConnections()
+	}
+	sessionID, err := hello(ex, tempID, newKeys, claim, sched, tr.place(), d.maxTasks(), conns)
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
@@ -381,6 +387,15 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			req.done <- err
 		}
 	}
+	// editAt carries out an edit: a switch waiting for core's dial on the
+	// connection it changes is given up (its port was the old settings').
+	editAt := func(req editReq) {
+		if awaiting != nil && awaiting.req.place == req.place {
+			awaiting.fail(fmt.Errorf("connection %d was edited: no longer listening by its old settings", req.place))
+			awaiting = nil
+		}
+		tasks.applyEdit(tr, req)
+	}
 	// dialCame moves through core's dial on the listener a switch opened;
 	// one that does not answer leaves it listening, for another dial.
 	dialCame := func(n int) {
@@ -479,10 +494,14 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 				continue
 			}
 		}
-		// A connect waiting, or a move back that is due, goes first.
+		// A connect or an edit waiting, or a move back that is due, goes
+		// first.
 		select {
 		case req := <-tasks.switches:
 			switchTo(n, req)
+			continue
+		case req := <-tasks.edits:
+			editAt(req)
 			continue
 		default:
 		}
@@ -612,6 +631,10 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 					timer.Stop()
 					switchTo(n, req)
 					break waiting
+				case req := <-tasks.edits:
+					timer.Stop()
+					editAt(req)
+					break waiting
 				case <-tr.lost():
 					timer.Stop()
 					// It worked until now: the backstop counts from here.
@@ -645,8 +668,8 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 		if ended != nil || (back != nil && !time.Now().Before(back.at)) {
 			continue
 		}
-		// A connect that came meanwhile goes first.
-		if len(tasks.switches) > 0 {
+		// A connect or an edit that came meanwhile goes first.
+		if len(tasks.switches) > 0 || len(tasks.edits) > 0 {
 			continue
 		}
 		// What core pushed meanwhile goes with this message: pushes never
@@ -823,7 +846,7 @@ func stage(ex exchanger, buildID [16]byte, keys protocol.AES256CBCHMACSHA256Mate
 // new keys, with its check-in schedule, claiming the persisted session when
 // claim is set, and returns the session id core gave.
 func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Material, claim []byte, sched schedule, conn int,
-	maxTasks uint64) ([16]byte, error) {
+	maxTasks uint64, conns []protocol.HelloConnection) ([16]byte, error) {
 	var sessionID [16]byte
 	h := describeHost()
 	h.SID = claim
@@ -833,6 +856,7 @@ func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Mater
 	h.Sleep = &protocol.Sleep{Interval: uint64(sched.interval.Milliseconds()), Jitter: uint64(sched.jitter)}
 	// How many tasks it runs at once: the build's, which core may change.
 	h.MaxTasks = &maxTasks
+	h.Connections = conns
 	log.Printf("hello: pid %d, %s/%s, host %q, user %q, integrity %d, addrs %v", h.PID, h.OS, h.Arch, h.Host, h.User, h.Integrity, h.Addrs)
 	answer, err := ex(tempID, keys, h)
 	if err != nil {

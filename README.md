@@ -29,7 +29,7 @@ this README says what BOB and its minion do.
 | Persisted sessions | Declared ([The linux-elf binary](#the-linux-elf-binary)). |
 | Failover | Declared ([Failover](#failover)). |
 | Feedback | The minion tells its operators what it would only log ([Feedback](https://logoscore.github.io/logos-docs/contracts/minion-messages/sessions/#feedback)): check-ins that failed two or more in a row (`checkin_failed`, said once one works again, with the first error), its WebSocket closing when it did not close it (`ws_closed`), a connection to its TCP listener past `max_connections` (`tcp_refused`), a persisted session core did not give back (`session_not_claimed`), and a command that crashed (`task_panic`, an error: the task fails, the minion goes on). It sends them first in its next message, at once, folds one like a queued one into its count, and keeps at most 100 unsent (past that the oldest go, and a `feedback_dropped` warning says how many). The `feedback` command (op 14) sends a warning or an error of your words. |
-| Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch` and `volumes` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`, `screenshot`, `feedback`, `tunnel`, `reverse_tunnel`, `delegate` and `reverse_delegate` ([Commands](#commands)). Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. |
+| Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch_connection`, `edit_connection` and `volumes` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`, `screenshot`, `feedback`, `tunnel`, `reverse_tunnel`, `delegate` and `reverse_delegate` ([Commands](#commands)). Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. |
 | Channels | `http` (numbered 1), connection schema version 3: `reverse-call` with the parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`), and `reverse-persistent` (a WebSocket) with `path_prefix`. `tcp` (2), version 1: `bind-persistent` (the minion listens and the channel dials it), `reverse-persistent` and `reverse-call`, with the channel's own fields |
 | Crypto | `aes-256-cbc-hmac-sha256` (AES-256-CBC with HMAC-SHA256); the keys core generates go into the artifact |
 | Failure codes | Why a build failed: `badge_unreadable` (the badge does not read, or not as it was uploaded), `no_toolchain` and `compile_failed` ([The linux-elf binary](#the-linux-elf-binary)), `knocked_out` (`fail_builds`: [Management](#management)) |
@@ -50,7 +50,7 @@ this README says what BOB and its minion do.
 | 9 | `rm` | `delete_path` | `path` 1 (required), `recursive` 2 (false) |
 | 10 | `walk` | `walk_dir`, `dir_walk` | `path` 1 (required), `depth` 2 (5), `max_folders` 3 (10000), `hidden` 4 (true), `one_fs` 5 (true) |
 | 11 | `shell` | | `command` 1 (required), `timeout` 2 (30s) |
-| 12 | `switch` | `switch_connection` | `conn` 1 (required), `for` 2 (0s) |
+| 12 | `switch` | legacy (`switch_connection`'s old id) | `conn` 1 (required), `for` 2 (0s) |
 | 13 | `volumes` | `list_volumes`, `volumes` | |
 | 14 | `feedback` | | `level` 1 (warning), `message` 2 (required) |
 | 15 | `tunnel` | `tunnel` | `timeout` 2 (10s), `max_streams` 3 (256) |
@@ -58,9 +58,14 @@ this README says what BOB and its minion do.
 | 18 | `delegate` | `delegate` | |
 | 19 | `reverse_delegate` | `reverse_delegate` | `bind` 1 (0.0.0.0), `listen` 2 (required), `kind` 3 (`reverse-persistent`), `max_connections` 4 (16) |
 | 20 | `screenshot` | result `screenshot` | `screen` 1 (0), `format` 2 (png), `quality` 3 (85, JPEG's), `x_display` 4 |
+| 21 | `edit_connection` | `edit_connection` | `conn` 1 (required), `connection` 2 (required, structured) |
+| 22 | `switch_connection` | `switch_connection` | `conn` 1 (required), `for` 2 (0s) |
 
 Op 16 (a port forward's, before the fronts were core's) is never used
-again. The tunnels' `timeout` and `max_streams`, `reverse_delegate`'s
+again. `switch` (op 12) is `switch_connection` as it was named before:
+a legacy command, kept for the builds that have it, whose minions run op
+12; new builds get `switch_connection` (op 22), and new minions have no op
+12. The tunnels' `timeout` and `max_streams`, `reverse_delegate`'s
 `max_connections` and `screenshot`'s `x_display` are under the build
 form's More options (`advanced`). How core runs each action and shows each
 result is the docs' [Task Results and
@@ -380,6 +385,27 @@ one at a time: at start the first it can use, in the build's order (an
 comes first), and its hello says which (`conn`, its place from 1). The
 session, keys and schedule stay the same across moves.
 
+**Editing** a connection (`edit_connection`, core's action of the name:
+`minion/edit.go`) applies what core sends, what changed of the connection
+at that place (a patch: its params and values that changed, `null` for one
+gone, its name, failover or `max_message`; the connection whole when its
+channel or kind changes), the others kept in their order. The minion says
+its connections again, whole, with a `connection_update` in the message
+that ends the task, whose output says what changed ("connection 2: kind,
+params 1 changed"). A channel BOB does not speak, or a kind it does not
+use (`bind-call`; `http`'s `bind-persistent`), fails the task, and nothing
+changes. The connection in
+use goes on with the new settings from the next exchange, which carries
+the update: the WebSocket or TCP connection it keeps open closes and the
+next exchange opens one by the new settings; a listener listens where the
+new settings say and waits for core's dial there, and a switch waiting for
+a dial on the edited connection gives up. The minion knows no connection
+names but the ones an edit gives: the others go unnamed, and core keeps
+the names it has. An edit lasts while the process runs: a session it
+starts over in says the edited connections in its hello, and a restarted
+minion has its build's again (it says them when it claims a persisted
+session, which may hold an edited list).
+
 Each exchange that gets its answer, whichever connection carried it, notes
 its round trip (`minion/roundtrip.go`): from sending the message to core's
 reply to it, or the channel's empty answer. A hello says the latest
@@ -429,7 +455,7 @@ check-in's.
   timeout (`request_timeout`, 40 s by default), is dropped: the next
   exchange dials, opens or waits for a dial again.
 
-**Switching** (`switch`): the minion checks in through the new connection
+**Switching** (`switch_connection`): the minion checks in through the new connection
 with a `conn_update` and moves only if that answers (over a WebSocket, that
 check-in also sets the allowance, so pushes start at once); otherwise the
 task fails and it stays where it was. With `for`, it moves back when the
@@ -465,7 +491,7 @@ else. Its runner and workings are its own: minions share only the protocol.
 |---|---|
 | `main.go` | The config read (`//go:embed minion.cfg`, `protocol.ReadMinionConfig`), staging, the `hello`, the session loop, switching, starting over, the backstop |
 | `fields.go`, `ops.go`, `exits.go` | The numbers it reads its config, its tasks and its exit codes by, checked against the schema by the factory's tests |
-| `conns.go`, `ws.go`, `tcp.go`, `tcp_reverse.go`, `failover.go`, `pushqueue.go`, `side.go`, `roundtrip.go` | Its connections: HTTP requests and a WebSocket, the TCP channel's three kinds, failover, what core pushes, side messages, the round trip its hello says |
+| `conns.go`, `ws.go`, `tcp.go`, `tcp_reverse.go`, `failover.go`, `pushqueue.go`, `side.go`, `edit.go`, `roundtrip.go` | Its connections: HTTP requests and a WebSocket, the TCP channel's three kinds, failover, what core pushes, side messages, edits, the round trip its hello says |
 | `tasks.go` | The runner: core's items dispatched, `get_tasks` within its limit, acks, result parts, cancels, `reack`, `max_tasks` |
 | `packing.go`, `feedback.go` | Compression; feedback |
 | `machine*.go`, `host_*.go`, `integrity.go`, `smbios.go` | The `hello`: the machine id, the host, the integrity level |

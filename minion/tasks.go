@@ -79,7 +79,7 @@ const ackHold = 50 * time.Millisecond
 // delegate's, whose streams core opens once it has the ack, nor a
 // switch's, whose ack goes before the move.
 func holdsAck(cmd uint64) bool {
-	return !holdsNoSlot(cmd) && cmd != opSwitch
+	return !holdsNoSlot(cmd) && cmd != opSwitchConnection
 }
 
 // heldLocked: t's ack and output wait (ackHold).
@@ -97,14 +97,19 @@ type runner struct {
 	acks     [][]byte
 	errs     []protocol.ErrItem
 	sleepUpd *protocol.SleepUpdateItem
-	tasks    []*task
+	// connUpd says the minion's connections again, after an edit
+	// (edit.go).
+	connUpd *protocol.ConnectionUpdateItem
+	tasks   []*task
 	// inflight is the last message's items when it failed: sent again first.
 	inflight []any
 	// exitID: the exit task, whose end delivered stops the minion.
 	exitID []byte
 	wake   chan struct{}
-	// switches are connect tasks asking the session to move (conns.go).
+	// switches are connect tasks asking the session to move (conns.go);
+	// edits, edit tasks asking it to change a connection (edit.go).
 	switches chan switchReq
+	edits    chan editReq
 	// limit is the largest message the connection in use carries
 	// (connection.MessageLimit), set by the session loop: what the next
 	// message keeps within.
@@ -151,7 +156,7 @@ func (r *runner) perMessageLocked() int {
 
 func newRunner(d description, sched *schedule) *runner {
 	r := &runner{greeting: d.Greeting, ops: d.Ops, sched: sched, seen: map[string]time.Time{}, wake: make(chan struct{}, 1),
-		switches: make(chan switchReq, 1), maxTasks: d.maxTasks()}
+		switches: make(chan switchReq, 1), edits: make(chan editReq, 1), maxTasks: d.maxTasks()}
 	r.tun = newTunnels(r.nudge)
 	r.dlg = newDelegates(r.nudge)
 	return r
@@ -249,6 +254,11 @@ func (r *runner) outgoing() []any {
 	if r.sleepUpd != nil {
 		items = append(items, *r.sleepUpd)
 		r.sleepUpd = nil
+	}
+	// The connections an edit changed, in the message that ends its task.
+	if r.connUpd != nil {
+		items = append(items, *r.connUpd)
+		r.connUpd = nil
 	}
 	// Feedback first, in the room a message has (most of it, to leave the
 	// tasks theirs), then parts while the message has room: output, then a
@@ -880,8 +890,10 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.shell(ctx, t, ti.Args)
 	case opSleep:
 		r.sleep(t, ti.Args)
-	case opSwitch:
+	case opSwitchConnection:
 		r.switchConnection(ctx, t, ti.Args)
+	case opEditConnection:
+		r.editConnection(ctx, t, ti.Args)
 	case opVolumes:
 		r.volumes(t)
 	case opFeedback:

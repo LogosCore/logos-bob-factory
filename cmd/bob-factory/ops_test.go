@@ -16,7 +16,8 @@ import (
 // each param's num in the schema must be the constant the minion reads it
 // by. The minion is a module of its own, so its constants are read from
 // source: op<Command> for a command, <command><Param> for a param (upload's
-// are uploadArg<Param>), in camel case.
+// are uploadArg<Param>), in camel case. A legacy command is not the
+// minion's any more: minions built before run its op, new ones never get it.
 func TestOpsMatchTheMinion(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "../../minion/ops.go", nil, 0)
@@ -38,6 +39,9 @@ func TestOpsMatchTheMinion(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, c := range buildSchema.Commands {
+		if c.Legacy {
+			continue
+		}
 		name := "op" + camel(c.ID, true)
 		seen[name] = true
 		if v, ok := value(name); !ok || v != int64(c.Op) {

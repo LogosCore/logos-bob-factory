@@ -26,7 +26,12 @@ import (
 // transport is the build's connections and the one in use.
 type transport struct {
 	conns []connection
-	cur   int
+	// names are the connections' names as an edit gave them, by place: ""
+	// for one the minion has no name for (core keeps its own). edited: an
+	// edit changed the connections, which a hello then says (edit.go).
+	names  []string
+	edited bool
+	cur    int
 	// link is the persistent connection in use: a reverse-persistent one's
 	// WebSocket, a bind-persistent one's listener; nil for a reverse-call
 	// one.
@@ -107,6 +112,7 @@ func newTransport(all []protocol.MinionConnection) (*transport, error) {
 	for _, c := range all {
 		t.conns = append(t.conns, connection{c})
 	}
+	t.names = make([]string, len(t.conns))
 	for i, c := range t.conns {
 		if usable(c) {
 			t.use(i, nil)
@@ -317,15 +323,15 @@ type revert struct {
 	after time.Duration
 }
 
-// switchConnection is the switch command: it asks the session to move, and ends
+// switchConnection is the switch_connection command: it asks the session to move, and ends
 // with what came of it.
 func (r *runner) switchConnection(ctx context.Context, t *task, args protocol.Args) {
-	place, ok := protocol.ArgInt(args, switchConn)
+	place, ok := protocol.ArgInt(args, switchConnectionConn)
 	if !ok || place < 1 {
 		r.end(t, false, nil, "a connection, from 1, is required")
 		return
 	}
-	dur, ok := protocol.ArgDuration(args, switchFor)
+	dur, ok := protocol.ArgDuration(args, switchConnectionFor)
 	if !ok || dur < 0 {
 		dur = 0
 	}

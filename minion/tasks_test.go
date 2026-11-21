@@ -241,7 +241,7 @@ func TestCancelEndsTheHold(t *testing.T) {
 // Core opens a tunnel's streams, and a delegate's, once it has the task's
 // ack, and a switch's ack goes before the move: theirs never wait.
 func TestAcksThatNeverWait(t *testing.T) {
-	for _, cmd := range []uint64{opTunnel, opReverseTunnel, opDelegate, opReverseDelegate, opSwitch} {
+	for _, cmd := range []uint64{opTunnel, opReverseTunnel, opDelegate, opReverseDelegate, opSwitchConnection} {
 		if holdsAck(cmd) {
 			t.Errorf("command %d holds its ack", cmd)
 		}

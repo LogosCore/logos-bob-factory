@@ -177,7 +177,7 @@ func startSideSession(t *testing.T, c *wsCore, conns ...protocol.MinionConnectio
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := description{Build: c.buildID, Keys: c.keys, Connections: conns, Ops: []uint64{opSleep, opExit, opHello, opShell, opSwitch, opTunnel},
+	d := description{Build: c.buildID, Keys: c.keys, Connections: conns, Ops: []uint64{opSleep, opExit, opHello, opShell, opSwitchConnection, opTunnel},
 		Greeting: "hi"}
 	done := make(chan error, 1)
 	go func() { done <- session(tr, schedule{interval: time.Second}, d, c.buildID, c.keys, nil) }()
@@ -369,7 +369,7 @@ func TestSideMessagesBeforeAMove(t *testing.T) {
 	openEchoStream(t, c.wsCore)
 	from := c.count()
 	switchTask := bytes.Repeat([]byte{5}, 16)
-	c.push(protocol.TaskItem{T: protocol.ItemTask, Task: switchTask, Cmd: opSwitch, Args: protocol.Args{switchConn: uint64(2)}})
+	c.push(protocol.TaskItem{T: protocol.ItemTask, Task: switchTask, Cmd: opSwitchConnection, Args: protocol.Args{switchConnectionConn: uint64(2)}})
 	// The switch's ack waits for its reply; a stream's answer goes
 	// meanwhile, in a side message.
 	c.waitFor(t, from, 3*time.Second, func(s wsSent) bool { a, _, _ := sentResult(s); return a > 0 })
