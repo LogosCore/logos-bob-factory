@@ -247,6 +247,17 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 		{
+			ID: "add_connection", Op: 23, Label: "Add connection", Default: true,
+			Description: "Gives the minion a connection it did not have, after its others; it stays on the one it uses unless told to switch. The connection lasts until the minion restarts.",
+			Action:      protocol.ActionAddConnection,
+			Params: []protocol.FieldSpec{
+				{Key: "connection", Num: 1, Type: protocol.FieldStructured, Format: protocol.FormatConnection, Label: "Connection",
+					Required: true, Order: 1, Description: "The connection to add, whole: its channel, kind, name, params and values."},
+				{Key: "switch", Num: 2, Type: protocol.FieldBool, Label: "Switch to it", Default: false, Order: 2,
+					Description: "Move to the new connection once it is added."},
+			},
+		},
+		{
 			ID: "volumes", Op: 13, Label: "List volumes", Default: true,
 			Description: "Lists the host's drives (Windows) or mounted file systems (Linux), with their kind, label, file system and space; the file browser shows them as its roots.",
 			Action:      protocol.ActionListVolumes,

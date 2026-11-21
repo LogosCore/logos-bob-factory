@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -31,13 +32,18 @@ import (
 type editReq struct {
 	place int
 	patch protocol.ConnectionPatch
-	done  chan editDone
+	// add, when set, is a connection to put after the others
+	// (add_connection) instead of a patch to a place.
+	add  *protocol.HelloConnection
+	done chan editDone
 }
 
 // editDone is what an edit came to: what it changed, or why not.
 type editDone struct {
 	what string
 	err  error
+	// place is where an add put the connection.
+	place int
 }
 
 // channelNames are the channels BOB's schema numbers (fields.go), by the
@@ -240,6 +246,10 @@ func (r *runner) editConnection(ctx context.Context, t *task, args protocol.Args
 // message saying the connections again, whole. A connection this minion
 // cannot use changes nothing.
 func (r *runner) applyEdit(tr *transport, req editReq) {
+	if req.add != nil {
+		r.applyAdd(tr, req)
+		return
+	}
 	if req.place < 1 || req.place > len(tr.conns) {
 		req.done <- editDone{err: fmt.Errorf("the minion has %d connection(s): there is no connection %d", len(tr.conns), req.place)}
 		return
@@ -260,4 +270,82 @@ func (r *runner) applyEdit(tr *transport, req editReq) {
 	r.mu.Unlock()
 	log.Printf("edit: %s; now on %s", what, tr.describe())
 	req.done <- editDone{what: what}
+}
+
+// maxConnections bounds the minion's connections: what an add may grow
+// them to.
+const maxConnections = 32
+
+// add puts c, named name ("" for none), after the connections: its place.
+func (t *transport) add(c connection, name string) int {
+	t.conns = append(t.conns, c)
+	t.names = append(t.names, name)
+	t.edited = true
+	return len(t.conns)
+}
+
+// applyAdd makes an add in the session loop: the connection after the
+// others, and the next message saying them again. A connection this minion
+// cannot use, or one past maxConnections, changes nothing.
+func (r *runner) applyAdd(tr *transport, req editReq) {
+	c, err := connectionOf(*req.add)
+	if err == nil && len(tr.conns) >= maxConnections {
+		err = fmt.Errorf("no room for another: this minion holds %d connections at most", maxConnections)
+	}
+	if err != nil {
+		req.done <- editDone{err: err}
+		return
+	}
+	place := tr.add(c, req.add.Name)
+	what := fmt.Sprintf("connection %d: %s, %s %s", place, cmp.Or(req.add.Name, "unnamed"), req.add.Channel, req.add.Kind)
+	r.mu.Lock()
+	r.connUpd = &protocol.ConnectionUpdateItem{T: protocol.ItemConnectionUpdate, Connections: tr.ownConnections()}
+	r.mu.Unlock()
+	log.Printf("add: %s", what)
+	req.done <- editDone{what: what, place: place}
+}
+
+// addConnection is the add_connection command: it hands the session the
+// connection core sent, whole, and ends with what it added; with switch,
+// it then moves there as switch_connection does.
+func (r *runner) addConnection(ctx context.Context, t *task, args protocol.Args) {
+	var hc protocol.HelloConnection
+	if ok, err := protocol.ArgStructured(args, addConnectionConnection, &hc); !ok || err != nil {
+		r.end(t, false, nil, fmt.Sprintf("the connection does not read: %v", err))
+		return
+	}
+	if err := hc.Validate(); err != nil {
+		r.end(t, false, nil, err.Error())
+		return
+	}
+	req := editReq{add: &hc, done: make(chan editDone, 1)}
+	var d editDone
+	select {
+	case r.edits <- req:
+		r.nudge()
+		select {
+		case d = <-req.done:
+		case <-ctx.Done():
+			d.err = errors.New("cancelled")
+		case <-time.After(switchWait):
+			d.err = errors.New("the session did not get to it")
+		}
+	case <-ctx.Done():
+		d.err = errors.New("cancelled")
+	case <-time.After(switchWait):
+		d.err = errors.New("another edit is under way")
+	}
+	if d.err != nil {
+		r.end(t, false, nil, d.err.Error())
+		r.nudge()
+		return
+	}
+	r.write(t, []byte(d.what+"\n"), nil)
+	if move, _ := protocol.ArgBool(args, addConnectionSwitch); move {
+		// The move, as a switch: it ends the task with how it went.
+		r.switchConnection(ctx, t, protocol.Args{switchConnectionConn: int64(d.place)})
+		return
+	}
+	r.end(t, true, nil, "")
+	r.nudge()
 }

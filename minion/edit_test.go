@@ -135,3 +135,67 @@ func TestEditConnection(t *testing.T) {
 		t.Fatalf("half a connection: %+v", tk)
 	}
 }
+
+// An add puts the connection after the others, the one in use kept, and
+// the next message says them all; one the minion cannot use is refused;
+// with switch, the task then moves there as a switch does.
+func TestAddConnection(t *testing.T) {
+	tr, err := newTransport([]protocol.MinionConnection{buildConn("http", protocol.KindReverseCall, "http://127.0.0.1:1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(description{Ops: []uint64{opAddConnection}}, &schedule{interval: time.Minute})
+	n := byte(0)
+	add := func(hc protocol.HelloConnection, move bool) *task {
+		t.Helper()
+		go func() { r.applyAdd(tr, <-r.edits) }()
+		n++
+		b, err := protocol.MarshalCBOR(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: opAddConnection,
+			Args: protocol.Args{addConnectionConnection: hc, addConnectionSwitch: move}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ti protocol.TaskItem
+		if err := protocol.UnmarshalCBOR(b, &ti); err != nil {
+			t.Fatal(err)
+		}
+		tk := &task{id: bytes.Repeat([]byte{n}, 16), cmd: opAddConnection}
+		r.addConnection(context.Background(), tk, ti.Args)
+		return tk
+	}
+	ws := protocol.HelloConnection{Channel: "http", Kind: protocol.KindReversePersistent, Name: "ws",
+		Params: map[uint64]any{httpBaseURL: "http://127.0.0.1:9"}}
+
+	tk := add(ws, false)
+	if !tk.ok || string(tk.out) != "connection 2: ws, http reverse-persistent\n" || len(tr.conns) != 2 || tr.place() != 1 ||
+		tr.conns[1].param(httpBaseURL) != "http://127.0.0.1:9" || !tr.edited {
+		t.Fatalf("task %+v out %q, %d connections, on %d", tk, tk.out, len(tr.conns), tr.place())
+	}
+	var upd *protocol.ConnectionUpdateItem
+	for _, it := range r.outgoing() {
+		if u, ok := it.(protocol.ConnectionUpdateItem); ok {
+			upd = &u
+		}
+	}
+	if upd == nil || len(upd.Connections) != 2 || upd.Connections[1].Name != "ws" || upd.Validate() != nil {
+		t.Fatalf("the update: %+v", upd)
+	}
+
+	if tk := add(protocol.HelloConnection{Channel: "dns", Kind: protocol.KindReverseCall}, false); tk.ok || tk.err != "this minion speaks no dns" || len(tr.conns) != 2 {
+		t.Fatalf("another channel: %+v, %d connections", tk, len(tr.conns))
+	}
+
+	// With switch: the move asked for the new place.
+	go func() {
+		req := <-r.switches
+		if req.place != 3 {
+			req.done <- errUnexpected
+			return
+		}
+		req.done <- nil
+	}()
+	ws.Name = "ws2"
+	if tk := add(ws, true); !tk.ok || !strings.Contains(string(tk.out), "connection 3: ws2") || !strings.Contains(string(tk.out), "switched to connection 3") {
+		t.Fatalf("with switch: %+v out %q", tk, tk.out)
+	}
+}

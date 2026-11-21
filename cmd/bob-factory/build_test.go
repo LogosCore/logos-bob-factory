@@ -37,7 +37,7 @@ func TestCommands(t *testing.T) {
 	for _, c := range buildSchema.TargetCommands(target) {
 		ids = append(ids, c.ID)
 	}
-	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell switch switch_connection edit_connection volumes screenshot feedback tunnel reverse_tunnel delegate reverse_delegate" {
+	if got := strings.Join(ids, " "); got != "sleep exit hello ls download stream_download upload stream_upload rm walk shell switch switch_connection edit_connection add_connection volumes screenshot feedback tunnel reverse_tunnel delegate reverse_delegate" {
 		t.Errorf("linux-elf: %s", got)
 	}
 }
@@ -111,7 +111,7 @@ func TestMinionConfigOfABuild(t *testing.T) {
 	if len(c.Values) != 3 {
 		t.Errorf("values %v: the badge is BOB's alone", c.Values)
 	}
-	if !reflect.DeepEqual(c.Ops, []uint64{1, 2, 3, 4, 22, 21, 13}) || c.Crypto == nil || c.Crypto.Suite != protocol.CryptoAES256CBCHMACSHA256 {
+	if !reflect.DeepEqual(c.Ops, []uint64{1, 2, 3, 4, 22, 21, 23, 13}) || c.Crypto == nil || c.Crypto.Suite != protocol.CryptoAES256CBCHMACSHA256 {
 		t.Errorf("ops %v, crypto %+v", c.Ops, c.Crypto)
 	}
 	http, _ := buildSchema.Channel("http")

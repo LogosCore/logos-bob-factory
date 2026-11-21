@@ -395,6 +395,8 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			awaiting = nil
 		}
 		tasks.applyEdit(tr, req)
+		// An add may have moved the list (append): failover follows it.
+		fo.conns = tr.conns
 	}
 	// dialCame moves through core's dial on the listener a switch opened;
 	// one that does not answer leaves it listening, for another dial.

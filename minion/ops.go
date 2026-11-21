@@ -40,6 +40,9 @@ const (
 	// opEditConnection puts a connection core sends at a place in the minion's
 	// (edit.go).
 	opEditConnection = 21
+	// opAddConnection puts a connection core sends after the minion's
+	// (edit.go).
+	opAddConnection = 23
 )
 
 // Params, by command.
@@ -79,6 +82,11 @@ const (
 	// editConnectionConnection is the connection, whole, in core's numbered form.
 	editConnectionConn       = 1
 	editConnectionConnection = 2
+
+	// addConnectionConnection is the connection, whole; addConnectionSwitch
+	// moves there once it is added.
+	addConnectionConnection = 1
+	addConnectionSwitch     = 2
 
 	feedbackLevel   = 1
 	feedbackMessage = 2
