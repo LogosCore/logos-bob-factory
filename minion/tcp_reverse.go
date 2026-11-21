@@ -259,6 +259,7 @@ func (l *tcpDialLink) exchangeOn(side bool, gen uint64, id [16]byte, keys protoc
 	l.mu.Unlock()
 	log.Printf("message %x under %s over the channel's connection: %d bytes of CBOR, %d sealed", msgID, formatUUID(id[:]), plainLen, len(frame))
 	_ = c.SetWriteDeadline(time.Now().Add(l.conn.timeout()))
+	sent := time.Now()
 	if err := writeTCPFrame(c, id[:], frame); err != nil {
 		l.forget(msgID)
 		l.drop(c)
@@ -274,6 +275,7 @@ func (l *tcpDialLink) exchangeOn(side bool, gen uint64, id [16]byte, keys protoc
 		if !bytes.Equal(r.msg.Re, msgID) {
 			return answer, fmt.Errorf("the reply answers %x, not our message", r.msg.Re)
 		}
+		lastRoundtrip.note(time.Since(sent))
 		log.Printf("core's reply over the channel's connection: %d item(s)", len(r.msg.Items))
 		return r, nil
 	case <-timer.C:

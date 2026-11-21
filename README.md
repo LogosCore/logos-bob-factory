@@ -188,7 +188,8 @@ stripped). Run, it **stages** with core through its first HTTP connection, as
 the [Sessions](https://logoscore.github.io/logos-docs/contracts/minion-messages/sessions/#staging)
 contract says, says **hello** under the temporary id with the new keys (its
 pid, OS and arch, hostname, user, executable, root or user, addresses, its
-machine id, and its check-in schedule, so core can tell when it is late),
+machine id, its check-in schedule, so core can tell when it is late, and
+the stage's round trip, `roundtrip_time`),
 which opens a session in core, then checks in under the session id with a
 `get_tasks` for the room its max tasks leave, every check-in interval of the connection, spread by
 its jitter (`checkin_interval`, `checkin_jitter`; the channel's 60s and 20%
@@ -379,6 +380,12 @@ one at a time: at start the first it can use, in the build's order (an
 comes first), and its hello says which (`conn`, its place from 1). The
 session, keys and schedule stay the same across moves.
 
+Each exchange that gets its answer, whichever connection carried it, notes
+its round trip (`minion/roundtrip.go`): from sending the message to core's
+reply to it, or the channel's empty answer. A hello says the latest
+(`roundtrip_time`, in milliseconds): the stage's, or for a rehello the last
+check-in's.
+
 - **Requests** (`http`, `reverse-call`): a request for each exchange, by its
   `method` and `path_prefix`, every check-in interval.
 - **A WebSocket** (`http`, `reverse-persistent`: `minion/ws.go`): every
@@ -458,7 +465,7 @@ else. Its runner and workings are its own: minions share only the protocol.
 |---|---|
 | `main.go` | The config read (`//go:embed minion.cfg`, `protocol.ReadMinionConfig`), staging, the `hello`, the session loop, switching, starting over, the backstop |
 | `fields.go`, `ops.go`, `exits.go` | The numbers it reads its config, its tasks and its exit codes by, checked against the schema by the factory's tests |
-| `conns.go`, `ws.go`, `tcp.go`, `tcp_reverse.go`, `failover.go`, `pushqueue.go`, `side.go` | Its connections: HTTP requests and a WebSocket, the TCP channel's three kinds, failover, what core pushes, side messages |
+| `conns.go`, `ws.go`, `tcp.go`, `tcp_reverse.go`, `failover.go`, `pushqueue.go`, `side.go`, `roundtrip.go` | Its connections: HTTP requests and a WebSocket, the TCP channel's three kinds, failover, what core pushes, side messages, the round trip its hello says |
 | `tasks.go` | The runner: core's items dispatched, `get_tasks` within its limit, acks, result parts, cancels, `reack`, `max_tasks` |
 | `packing.go`, `feedback.go` | Compression; feedback |
 | `machine*.go`, `host_*.go`, `integrity.go`, `smbios.go` | The `hello`: the machine id, the host, the integrity level |

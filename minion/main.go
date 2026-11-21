@@ -868,6 +868,8 @@ func hello(ex exchanger, tempID [16]byte, keys protocol.AES256CBCHMACSHA256Mater
 func describeHost() protocol.HelloItem {
 	h := protocol.HelloItem{T: protocol.ItemHello, PID: uint64(os.Getpid()), OS: runtime.GOOS, Arch: runtime.GOARCH,
 		Version: version, Integrity: integrityLevel(), Domain: hostDomain()}
+	// The round trip of its latest exchange: a first hello's, the stage's.
+	h.RoundtripTime = lastRoundtrip.said()
 	h.Host, _ = os.Hostname()
 	h.MachineSource, h.MachineValue = machineID()
 	if u, err := user.Current(); err == nil {
@@ -911,10 +913,12 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 		}
 		log.Printf("the channel answered with %d bytes in %s", len(sealed), took.Round(time.Millisecond))
 		if len(sealed) == 0 {
+			lastRoundtrip.note(took)
 			return answer, nil
 		}
 		answer, err = openReply(keys, id, msgID, sealed)
 		if err == nil {
+			lastRoundtrip.note(took)
 			log.Printf("opened core's reply: %d item(s)", len(answer.Items))
 		}
 		return answer, err
@@ -932,6 +936,7 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 	}
 	log.Printf("channel answered %d with %d bytes in %s", status, len(reply), took.Round(time.Millisecond))
 	if status == http.StatusNoContent {
+		lastRoundtrip.note(took)
 		return answer, nil
 	}
 	if status != http.StatusOK {
@@ -947,6 +952,7 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 	if len(sealed) == 0 {
 		// The channel's empty reply: core had nothing to say (a check-in,
 		// or a message it took as a replay).
+		lastRoundtrip.note(took)
 		return answer, nil
 	}
 	plain, err := protocol.OpenFrame(keys, id, protocol.FrameCoreToMinion, sealed)
@@ -959,6 +965,7 @@ func exchange(conn connection, id [16]byte, keys protocol.AES256CBCHMACSHA256Mat
 	if !bytes.Equal(answer.Re, msgID) {
 		return answer, fmt.Errorf("core's reply answers %x, not our message", answer.Re)
 	}
+	lastRoundtrip.note(took)
 	log.Printf("opened core's reply: %d bytes of CBOR, %d item(s)", len(plain), len(answer.Items))
 	return answer, nil
 }

@@ -250,6 +250,7 @@ func (l *wsLink) exchangeOn(side bool, gen uint64, id [16]byte, keys protocol.AE
 	log.Printf("message %x under %s over the WebSocket: %d bytes of CBOR, %d packed", msgID, formatUUID(id[:]), plainLen, len(body))
 	ctx, cancel := context.WithTimeout(context.Background(), l.conn.timeout())
 	defer cancel()
+	sent := time.Now()
 	if err := ws.Write(ctx, websocket.MessageBinary, body); err != nil {
 		l.forget(msgID)
 		l.drop(ws)
@@ -263,6 +264,7 @@ func (l *wsLink) exchangeOn(side bool, gen uint64, id [16]byte, keys protocol.AE
 		if !bytes.Equal(r.msg.Re, msgID) {
 			return answer, fmt.Errorf("the reply answers %x, not our message", r.msg.Re)
 		}
+		lastRoundtrip.note(time.Since(sent))
 		log.Printf("core's reply over the WebSocket: %d item(s)", len(r.msg.Items))
 		return r, nil
 	case <-ctx.Done():
