@@ -30,7 +30,7 @@ this README says what BOB and its minion do.
 | Failover | Declared ([Failover](#failover)). |
 | Feedback | The minion tells its operators what it would only log ([Feedback](https://logoscore.github.io/logos-docs/contracts/minion-messages/sessions/#feedback)): check-ins that failed two or more in a row (`checkin_failed`, said once one works again, with the first error), its WebSocket closing when it did not close it (`ws_closed`), a connection to its TCP listener past `max_connections` (`tcp_refused`), a persisted session core did not give back (`session_not_claimed`), and a command that crashed (`task_panic`, an error: the task fails, the minion goes on). It sends them first in its next message, at once, folds one like a queued one into its count, and keeps at most 100 unsent (past that the oldest go, and a `feedback_dropped` warning says how many). The `feedback` command (op 14) sends a warning or an error of your words. |
 | Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch_connection`, `edit_connection`, `add_connection`, `remove_connection` and `volumes` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`, `screenshot`, `feedback`, `tunnel`, `reverse_tunnel`, `delegate` and `reverse_delegate` ([Commands](#commands)). Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. |
-| Factory commands | `build_info`, which BOB runs itself, never the minion, in every session of its builds ([Factory commands](#factory-commands)) |
+| Factory commands | `build_info` and `session_info`, which BOB runs itself, never the minion, in every session of its builds ([Factory commands](#factory-commands)) |
 | Channels | `http` (numbered 1), connection schema version 3: `reverse-call` with the parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`), and `reverse-persistent` (a WebSocket) with `path_prefix`. `tcp` (2), version 1: `bind-persistent` (the minion listens and the channel dials it), `reverse-persistent` and `reverse-call`, with the channel's own fields |
 | Crypto | `aes-256-cbc-hmac-sha256` (AES-256-CBC with HMAC-SHA256); the keys core generates go into the artifact |
 | Failure codes | Why a build failed: `badge_unreadable` (the badge does not read, or not as it was uploaded), `no_toolchain` and `compile_failed` ([The linux-elf binary](#the-linux-elf-binary)), `knocked_out` (`fail_builds`: [Management](#management)) |
@@ -200,9 +200,13 @@ BOB instance, not to the minion. Adding one needs no new schema version.
 | Command | Params | Does |
 |---|---|---|
 | `build_info` | | Prints the session's build as core keeps it (`cmd/bob-factory/build_info.go`) |
+| `session_info` | | Prints the session as core keeps it (`cmd/bob-factory/session_info.go`) |
 
-**`build_info`** prints, in sections of aligned rows, what core gave BOB of
-the session's build:
+Each prints, in sections of aligned rows, what core gave BOB with the task
+(`cmd/bob-factory/factory_commands.go` writes the rows). Times are UTC
+(2026.11.22 10:00:15 UTC).
+
+**`build_info`** prints the session's build:
 
 - the build's id and the session's number; its target (by label),
   platform, description, schema version (and BOB's, once it moved on), who
@@ -220,7 +224,30 @@ the session's build:
 
 It prints none of what the call carries for the task alone: not the keys,
 not the minion config (it holds them), not a credential's values, nor any
-link. Times are UTC (2026.11.22 10:00:15 UTC).
+link.
+
+**`session_info`** prints the session:
+
+- its number and id, its build (target by label, platform), its notes, when
+  it opened (under its build's id, or after a stage) and was last seen, its
+  check-in schedule and when it turns late and lost, whether a persistent
+  connection serves it, whether it is persisted (and its restarts), archived
+  or in a folder, and its keys' suite;
+- its host as the minion's hello said: host name, user and domain with the
+  integrity level, OS and architecture, process and PID, minion version,
+  machine id, addresses (and the one shown), round trip, the hello's other
+  values, and who its tasks run as when not the process's own;
+- the external addresses it was seen from (now, then each with its count
+  and times), and the delegates its messages come through;
+- the connection it uses (its place, name and kind, of how many), the moves
+  the minion reported, and the connections it holds when its hello said
+  them: the channel's params named as the channel numbers them (the HTTP
+  channel's version 3, the TCP channel's version 1; another version's by
+  number) and BOB's values by their labels;
+- tasks at once, as the minion said and the operators' limit; unread
+  errors and when feedback last came; the latest restarts.
+
+It never prints the session's keys.
 
 ## The linux-elf binary
 
@@ -708,6 +735,7 @@ and linted for them. The factory's tests, in `cmd/bob-factory`:
 | `stage_test.go` | A compiled minion against a fake channel and core: staging, the hello, a check-in that gets a 404 and keeps the session, one that gets `session_closed` and stages again; tasks run; one built with a persisted session claiming it, then not after `session_replaced` |
 | `management_test.go`, `broker_test.go` | The manifest beside factory-core's builds section, its properties, `say_hello`; the broker's URL |
 | `build_info_test.go` | `build_info` through `factorytest.Command`, as core's call runs it: the build by BOB's labels, its file, connections and exit codes, and none of its keys, minion config, credentials' values or links; each factory command with its code |
+| `session_info_test.go` | `session_info` through `factorytest.Command`: a session with every record core keeps (hello, acting, peers, a delegate, moves, the minion's own connections, restarts), none of its keys; a session just opened; the channels' params named as `channels_test.go`'s schemas number them |
 
 BOB has no CI workflow: its checks run locally, and a release runs them
 again in both modules, with the race detector (`go test -race -count=1
