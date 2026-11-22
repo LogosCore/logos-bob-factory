@@ -912,6 +912,10 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 		r.runReverseDelegate(ctx, t, ti.Args)
 	case opScreenshot:
 		r.screenshot(ctx, t, ti.Args)
+	case opPs:
+		r.ps(t)
+	case opKill:
+		r.kill(ctx, t, ti.Args)
 	case opExit:
 		r.exit(t)
 	default:
@@ -922,11 +926,19 @@ func (r *runner) run(ctx context.Context, t *task, ti protocol.TaskItem) {
 // exitWait is how long exit waits for the tasks it stops to end.
 const exitWait = 10 * time.Second
 
-// exit stops the minion for good: the tasks running beside it first, each
-// cancelled and ending so (their ends go before exit's: core is told how
-// each one went), then its own end, whose delivery stops the minion. A task
-// that does not end within exitWait is left: the minion goes all the same.
+// exit stops the minion for good: the tasks running beside it first
+// (stopOthers), then its own end, whose delivery stops the minion.
 func (r *runner) exit(t *task) {
+	r.stopOthers(t)
+	r.write(t, []byte("bye\n"), nil)
+	r.end(t, true, nil, "")
+}
+
+// stopOthers cancels the tasks running beside t, each ending so (their ends
+// go before t's: core is told how each one went), and waits for them. A
+// task that does not end within exitWait is left: the minion goes all the
+// same.
+func (r *runner) stopOthers(t *task) {
 	r.mu.Lock()
 	var others []*task
 	for _, o := range r.tasks {
@@ -949,8 +961,6 @@ func (r *runner) exit(t *task) {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	r.write(t, []byte("bye\n"), nil)
-	r.end(t, true, nil, "")
 }
 
 // ls lists a directory: a listing (docs: contracts/minion-messages.md,

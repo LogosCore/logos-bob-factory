@@ -29,7 +29,7 @@ this README says what BOB and its minion do.
 | Persisted sessions | Declared ([The linux-elf binary](#the-linux-elf-binary)). |
 | Failover | Declared ([Failover](#failover)). |
 | Feedback | The minion tells its operators what it would only log ([Feedback](https://logoscore.github.io/logos-docs/contracts/minion-messages/sessions/#feedback)): check-ins that failed two or more in a row (`checkin_failed`, said once one works again, with the first error), its WebSocket closing when it did not close it (`ws_closed`), a connection to its TCP listener past `max_connections` (`tcp_refused`), a persisted session core did not give back (`session_not_claimed`), and a command that crashed (`task_panic`, an error: the task fails, the minion goes on). It sends them first in its next message, at once, folds one like a queued one into its count, and keeps at most 100 unsent (past that the oldest go, and a `feedback_dropped` warning says how many). The `feedback` command (op 14) sends a warning or an error of your words. |
-| Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch_connection`, `edit_connection`, `add_connection`, `remove_connection` and `volumes` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`, `screenshot`, `feedback`, `tunnel`, `reverse_tunnel`, `delegate` and `reverse_delegate` ([Commands](#commands)). Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. |
+| Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch_connection`, `edit_connection`, `add_connection`, `remove_connection`, `volumes` and `ps` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`, `screenshot`, `kill`, `feedback`, `tunnel`, `reverse_tunnel`, `delegate` and `reverse_delegate` ([Commands](#commands)). Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. |
 | Factory commands | `build_info` and `session_info`, which BOB runs itself, never the minion, in every session of its builds ([Factory commands](#factory-commands)) |
 | Channels | `http` (numbered 1), connection schema version 3: `reverse-call` with the parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`), and `reverse-persistent` (a WebSocket) with `path_prefix`. `tcp` (2), version 1: `bind-persistent` (the minion listens and the channel dials it), `reverse-persistent` and `reverse-call`, with the channel's own fields |
 | Crypto | `aes-256-cbc-hmac-sha256` (AES-256-CBC with HMAC-SHA256); the keys core generates go into the artifact |
@@ -63,6 +63,8 @@ this README says what BOB and its minion do.
 | 22 | `switch_connection` | `switch_connection` | `conn` 1 (required), `for` 2 (0s) |
 | 23 | `add_connection` | `add_connection` | `connection` 1 (required, structured), `switch` 2 (false) |
 | 24 | `remove_connection` | `remove_connection` | `conn` 1 (required) |
+| 25 | `ps` | `list_processes`, `process_list` | |
+| 26 | `kill` | `kill_process` | `pid` 1 (required), `started` 2 (0), `force` 3 (false) |
 
 Op 16 (a port forward's, before the fronts were core's) is never used
 again. `switch` (op 12) is `switch_connection` as it was named before:
@@ -108,6 +110,29 @@ Actions](https://logoscore.github.io/logos-docs/contracts/task-results-and-actio
   `DISPLAY`, else `:0`; Wayland gives none); on Windows the desktop of its
   session ([The windows-exe program](#the-windows-exe-program)). It goes to
   core as a download's file does, with a name and no path.
+
+### Processes
+
+- **`ps`** lists the host's processes. On Linux from `/proc`, those of the
+  minion's PID namespace (a container's own): each one's name (its `comm`,
+  whole from its executable or first arg when the kernel cut it at 15
+  bytes), parent, state, threads, start (the boot time, `btime`, and its
+  start in clock ticks, `AT_CLKTCK`), CPU time, resident memory, who it
+  runs as (its effective uid: `root` or `user` its integrity), its command
+  line (its args joined by spaces) and its executable (another user's only
+  for root). No session, and no architecture: an executable's would take
+  opening it, which can hang on a network file system. On Windows every
+  session's ([The windows-exe program](#the-windows-exe-program)). It sends
+  them in parts of half a message each, a command line cut to half a part;
+  core shows them as a tree, the minion's own marked.
+- **`kill`** ends a process: given `started` (as a list said it), only the
+  one with that pid that started then, to the second; 0: whatever has the
+  pid. `force` sends SIGKILL, else SIGTERM (which a process may catch, or
+  ignore); on Linux 5.3 and later through a pidfd opened before the check,
+  so a pid reused between the check and the signal is never signalled. The
+  output says what it did, and whether the process ended within 2 seconds.
+  Its own process the minion ends as `exit` ends it: the tasks beside it
+  stopped first, then the task's end, and it exits once core has it.
 
 ### Tunnels
 
@@ -399,6 +424,17 @@ one does, with what Windows has:
   per monitor where Windows has it), the monitors from `EnumDisplayMonitors`
   (named `\\.\DISPLAY1`). A minion run as a service, in session 0, has no
   desktop to take, and says so.
+- **Process lists**: every session's, from one `NtQuerySystemInformation`
+  (`SystemProcessInformation`, as Task Manager reads them: each one's name,
+  parent, session, threads, start, CPU time and working set, without
+  opening any), then what opening each gives
+  (`PROCESS_QUERY_LIMITED_INFORMATION`: an administrator's for nearly every
+  process, a user's for their own): its executable
+  (`QueryFullProcessImageName`), command line (`NtQueryInformationProcess`),
+  user and integrity level (its token), and `386` (or `arm`) for one WOW64
+  runs. No state: Windows' processes have none of their own. `kill` opens
+  the process, checks when it started (`GetProcessTimes`) and ends it with
+  `TerminateProcess` through the same handle, `force` or not.
 
 The image's build cache holds the standard library for `windows/amd64`;
 `windows/386` and `windows/arm64` compile it on their first build, kept for
@@ -578,6 +614,7 @@ else. Its runner and workings are its own: minions share only the protocol.
 | `download.go`, `upload.go` | File transfers both ways |
 | `walk.go`, `volumes*.go`, `rm.go`, `shell*.go`, `paths*.go`, `mode_*.go`, `owners_*.go` | Its commands' work on the host: paths as the host writes them, hidden files, owners |
 | `screenshot*.go`, `x11.go` | Screenshots: GDI on Windows, the X protocol elsewhere |
+| `ps*.go` | Processes and `kill`: `/proc` and pidfds on Linux, `NtQuerySystemInformation` and each process's handle on Windows |
 | `tunnel*.go`, `proc*.go`, `pipe_*.go`, `icmp_*.go`, `rtt.go` | Tunnels, terminals, named pipes, pings, resend timing that follows the link, and what each stream did (`tunnel_stats.go`) |
 | `delegate.go`, `delegate_reverse.go` | Delegation |
 
@@ -723,7 +760,10 @@ GOOS=windows golangci-lint run ./... && GOOS=windows GOARCH=386 golangci-lint ru
 ```
 
 Nothing in the tests runs on Windows or on 32 bits, so the minion is vetted
-and linted for them. The factory's tests, in `cmd/bob-factory`:
+and linted for them. A few tests are Windows' alone (`ps_windows_test.go`:
+`SYSTEM_PROCESS_INFORMATION`'s layout on 64 and 32 bits, the system's
+processes, WOW64): compiled there with `GOOS=windows go test -c`, for
+`amd64` and `386`, they run on any Windows. The factory's tests, in `cmd/bob-factory`:
 
 | Test | Checks |
 |---|---|

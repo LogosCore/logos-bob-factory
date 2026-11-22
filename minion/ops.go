@@ -46,6 +46,9 @@ const (
 	// opRemoveConnection takes one of the minion's connections out
 	// (edit.go).
 	opRemoveConnection = 24
+	// opPs lists the host's processes, and opKill ends one of them (ps.go).
+	opPs   = 25
+	opKill = 26
 )
 
 // Params, by command.
@@ -121,6 +124,14 @@ const (
 	screenshotFormat   = 2
 	screenshotQuality  = 3
 	screenshotXDisplay = 4
+)
+
+// A kill's params: the process; when it started, unix seconds, as a
+// process list said it (0: whatever has the pid); whether it ends at once.
+const (
+	killPid     = 1
+	killStarted = 2
+	killForce   = 3
 )
 
 // A reverse delegate's params.

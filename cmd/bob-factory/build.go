@@ -291,6 +291,24 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 		{
+			ID: "ps", Op: 25, Label: "List processes", Default: true,
+			Description: "Lists the host's processes: on Linux those the minion sees (its PID namespace: a container's own), on Windows every session's. A process the minion may not open has what it could read of it, its pid and name at least. Core shows them as a tree, the minion's own marked.",
+			Action:      protocol.ActionListProcesses,
+			Result:      protocol.ResultProcessList,
+		},
+		{
+			ID: "kill", Op: 26, Label: "Kill a process",
+			Description: "Ends a process on the minion's host; never one that took the pid since the list was read, when the list said when the process started. Its own process the minion ends last, once core has the task's end.",
+			Action:      protocol.ActionKillProcess,
+			Params: []protocol.FieldSpec{
+				{Key: "pid", Num: 1, Type: protocol.FieldInt, Label: "PID", Required: true, Min: 1, Order: 1},
+				{Key: "started", Num: 2, Type: protocol.FieldInt, Label: "Started", Default: 0, Min: 0, Order: 2,
+					Description: "When it started, unix seconds, as a process list says: a process with the pid that started at another second is not ended. 0: whatever has the pid."},
+				{Key: "force", Num: 3, Type: protocol.FieldBool, Label: "Force", Default: false, Order: 3,
+					Description: "End it at once (SIGKILL), without letting it clean up; unticked, it is asked to end (SIGTERM), and may not. Windows ends it at once either way."},
+			},
+		},
+		{
 			ID: "feedback", Op: 14, Label: "Send feedback",
 			Description: "Sends a warning or an error of your words as the minion's own feedback, to try the mechanic: it shows in the session's Feedback.",
 			Params: []protocol.FieldSpec{

@@ -27,26 +27,35 @@ func integrityLevel() int {
 		return protocol.IntegrityUser
 	}
 	defer func() { _ = tok.Close() }()
+	if level, ok := tokenIntegrity(tok); ok {
+		return level
+	}
+	return protocol.IntegrityUser
+}
+
+// tokenIntegrity is a token's mandatory label's level (low, medium, high,
+// system): the hello's for the minion's own, a process list's for each.
+func tokenIntegrity(tok syscall.Token) (int, bool) {
 	var n uint32
 	_ = syscall.GetTokenInformation(tok, tokenIntegrityLevel, nil, 0, &n)
 	if n == 0 {
-		return protocol.IntegrityUser
+		return 0, false
 	}
 	buf := make([]byte, n)
 	if syscall.GetTokenInformation(tok, tokenIntegrityLevel, &buf[0], n, &n) != nil {
-		return protocol.IntegrityUser
+		return 0, false
 	}
 	// TOKEN_MANDATORY_LABEL: one SID_AND_ATTRIBUTES, its SID S-1-16-<rid>.
 	label := (*syscall.SIDAndAttributes)(unsafe.Pointer(&buf[0]))
 	sid, err := label.Sid.String()
 	if err != nil {
-		return protocol.IntegrityUser
+		return 0, false
 	}
 	rid, err := strconv.ParseUint(sid[strings.LastIndexByte(sid, '-')+1:], 10, 32)
 	if err != nil {
-		return protocol.IntegrityUser
+		return 0, false
 	}
-	return integrityOfRID(uint32(rid))
+	return integrityOfRID(uint32(rid)), true
 }
 
 var (
