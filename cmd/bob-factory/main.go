@@ -85,6 +85,9 @@ func main() {
 		Build:               &schema,
 		Builder:             b,
 		MaxConcurrentBuilds: 4,
+		// The code of the schema's factory commands (build_info.go), which
+		// BOB runs itself in every session of its builds.
+		FactoryCommands: factoryCommands,
 		// Builds fetch their files from core and upload the artifact to it:
 		// core's own address, or its front (logos-nginx). Over HTTPS to a
 		// self-signed core, module-core's LOGOS_CORE_* TLS settings.

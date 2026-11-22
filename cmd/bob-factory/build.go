@@ -380,6 +380,10 @@ var buildSchema = protocol.BuildSchema{
 			},
 		},
 	},
+	// What BOB runs itself, never a minion, in every session of its builds
+	// (build_info.go): no build picks one, and adding one needs no new
+	// version.
+	FactoryCommands: []protocol.FactoryCommand{buildInfoCommand},
 	// What the minion's exit codes mean (minion/exits.go, which
 	// exits_test.go checks against these): it exits with one when it cannot
 	// start. Once running it goes on until stopped, and exit ends it with 0.
