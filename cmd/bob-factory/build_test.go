@@ -27,6 +27,29 @@ func TestBuildSchemaIsValid(t *testing.T) {
 	}
 }
 
+// The path prefix is required, for each kind, with no default: every
+// connection's is one an operator chose, never one all builds share.
+func TestPathPrefixRequired(t *testing.T) {
+	http, _ := buildSchema.Channel("http")
+	for _, kind := range []string{protocol.KindReverseCall, protocol.KindReversePersistent} {
+		var prefix *protocol.FieldSpec
+		for _, f := range http.KindFields(kind) {
+			if f.Key == "path_prefix" {
+				prefix = &f
+			}
+		}
+		switch {
+		case prefix == nil:
+			t.Fatalf("%s: no path_prefix", kind)
+		case !prefix.Required || prefix.Default != nil:
+			t.Errorf("%s: %+v", kind, *prefix)
+		}
+		if problems := protocol.ValidateFieldValues([]protocol.FieldSpec{*prefix}, map[string]any{}); problems["path_prefix"] == "" {
+			t.Errorf("%s: a connection without one is no problem", kind)
+		}
+	}
+}
+
 // The binary has every command; shell, the screenshot, the tunnels
 // (tunnel, reverse_tunnel) and the delegates (delegate, reverse_delegate)
 // are ones only the operator picks; switch is legacy (switch_connection's old

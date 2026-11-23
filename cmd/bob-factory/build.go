@@ -424,10 +424,12 @@ var buildSchema = protocol.BuildSchema{
 	},
 }
 
-// pathPrefix is BOB's path prefix parameter, described for its kind.
+// pathPrefix is BOB's path prefix parameter, described for its kind:
+// required, with no default, so each connection's path is one an operator
+// chose (the form's Generate helper makes one), never one every build shares.
 func pathPrefix(help string) protocol.FieldSpec {
 	return protocol.FieldSpec{
-		Key: "path_prefix", Num: 2, Type: protocol.FieldString, Format: protocol.FormatPath, Label: "Path prefix", Default: "/",
+		Key: "path_prefix", Num: 2, Type: protocol.FieldString, Format: protocol.FormatPath, Label: "Path prefix", Required: true,
 		Group: "HTTP", Order: 2, Description: help,
 		Pattern: `^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`, MaxLength: 256,
 	}
