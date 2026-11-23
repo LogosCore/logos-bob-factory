@@ -133,6 +133,15 @@ type runner struct {
 	maxTasks    uint64
 	maxTasksSay bool
 	persistent  bool
+	// tasksAt is when the minion next asks for tasks through a call: on its
+	// scheduled check-ins alone, one interval apart, so tasks come at the
+	// schedule's pace however soon one ends; a message that goes earlier (a
+	// result, output, an ack) asks for none. Zero: the next message asks.
+	// dueSent: the message in flight was made when due, so the next is due
+	// an interval after it is delivered. Over a kept connection the
+	// allowance stands instead, and core pushes within it.
+	tasksAt time.Time
+	dueSent bool
 	// exec carries out a task's command: run, but in tests.
 	exec func(ctx context.Context, t *task, ti protocol.TaskItem)
 }
@@ -218,7 +227,8 @@ func (r *runner) pending() bool {
 
 // outgoing is the next message's items: the failed message's again, or
 // acks, errs, a sleep_update, a max_tasks (core set the limit), output, and
-// a get_tasks while the limit leaves room.
+// a get_tasks while the limit leaves room (through a call, on a scheduled
+// check-in alone: tasksAt).
 func (r *runner) outgoing() []any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -349,15 +359,31 @@ parts:
 	}
 	// Tasks, as many as the limit leaves room for. On a persistent
 	// connection the limit itself: a standing allowance, which core counts
-	// the tasks under way against. Through a call, this message's: the
-	// room left (none asked when there is none).
+	// the tasks under way against. Through a call, a scheduled check-in's
+	// alone (tasksAt): the room left, none asked when there is none.
 	if r.persistent {
 		max := r.maxTasks
 		items = append(items, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &max})
-	} else if room := r.roomLocked(); room > 0 {
-		items = append(items, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &room})
+	} else if !time.Now().Before(r.tasksAt) {
+		r.dueSent = true
+		if room := r.roomLocked(); room > 0 {
+			items = append(items, protocol.GetTasksItem{T: protocol.ItemGetTasks, Max: &room})
+		}
 	}
 	return items
+}
+
+// tasksWait is how long until the minion next asks for tasks through a
+// call: the session checks in then, so a scheduled check-in is not put off
+// by an earlier message (a result). False over a kept connection, and
+// before the first ask, which the schedule brings as ever.
+func (r *runner) tasksWait() (time.Duration, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.persistent || r.tasksAt.IsZero() {
+		return 0, false
+	}
+	return max(time.Until(r.tasksAt), 0), true
 }
 
 // streamItems are a side message's items (side.go): the delegates' and the
@@ -397,6 +423,11 @@ func (r *runner) delivered(items []any) (exit bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.inflight = nil
+	// A scheduled check-in went: tasks are next asked for an interval on.
+	if r.dueSent {
+		r.dueSent = false
+		r.tasksAt = time.Now().Add(r.sched.next())
+	}
 	r.tasks = slices.DeleteFunc(r.tasks, func(t *task) bool { return t.sentEnd })
 	// A chunk delivered: the next goes from where core's ack says, taken
 	// with the answer; none said, this one again.
@@ -1113,6 +1144,9 @@ func (r *runner) sleep(t *task, args protocol.Args) {
 	r.mu.Lock()
 	r.sched.interval, r.sched.jitter = interval, float64(jitter)
 	r.sleepUpd = &protocol.SleepUpdateItem{T: protocol.ItemSleepUpdate, Interval: uint64(interval.Milliseconds()), Jitter: uint64(jitter)}
+	// The new schedule starts now: tasks are next asked for an interval of
+	// it on, not by the old one's.
+	r.tasksAt = time.Now().Add(r.sched.next())
 	r.mu.Unlock()
 	r.write(t, []byte(fmt.Sprintf("check-ins every %s ± %d%%\n", interval, jitter)), nil)
 	r.end(t, true, nil, "")

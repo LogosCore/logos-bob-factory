@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -86,6 +87,68 @@ func TestMaxTasksIntake(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("the room did not come back once both ended")
+}
+
+// Through a call the minion asks for tasks on its scheduled check-ins
+// alone: with a limit of 1 and a queue at core, one task an interval. A
+// task's result goes at once, in a message that asks for none, and the next
+// ask comes an interval after the check-in that took it; a sleep starts the
+// schedule again. Over a kept connection the allowance stands.
+func TestTasksOnTheSchedule(t *testing.T) {
+	one := uint64(1)
+	const interval = 300 * time.Millisecond
+	r := newRunner(description{Ops: []uint64{opShell, opSleep}, MaxTasks: &one}, &schedule{interval: interval})
+	r.exec = func(_ context.Context, tk *task, _ protocol.TaskItem) { r.end(tk, true, nil, "") }
+	if _, ok := r.tasksWait(); ok {
+		t.Fatal("a wait before the first ask: the schedule brings it")
+	}
+	first := r.outgoing()
+	if m := getTasksIn(first); m == nil || *m != 1 {
+		t.Fatalf("the first check-in: %v", m)
+	}
+	r.delivered(first)
+
+	// The task the check-in took ends at once: its result goes now, and
+	// asks for no other.
+	r.start(protocol.TaskItem{T: protocol.ItemTask, Task: make([]byte, 16), Cmd: opShell, Args: protocol.Args{shellCommand: "true"}})
+	deadline := time.Now().Add(5 * time.Second)
+	for !r.pending() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	result := r.outgoing()
+	ended := false
+	for _, it := range result {
+		if res, ok := it.(protocol.ResultItem); ok && res.Done {
+			ended = true
+		}
+	}
+	if !ended || getTasksIn(result) != nil {
+		t.Fatalf("the result's message: ended %t, asks %v", ended, getTasksIn(result))
+	}
+	r.delivered(result)
+	wait, ok := r.tasksWait()
+	if !ok || wait <= 0 || wait > interval {
+		t.Fatalf("the next ask in %s (%t)", wait, ok)
+	}
+	time.Sleep(wait + 20*time.Millisecond)
+	if m := getTasksIn(r.outgoing()); m == nil || *m != 1 {
+		t.Fatalf("the next scheduled check-in: %v", m)
+	}
+
+	// A sleep starts the schedule again: the next ask by the new interval.
+	sleepTask := make([]byte, 16)
+	sleepTask[0] = 1
+	r.sleep(&task{id: sleepTask, cmd: opSleep}, protocol.Args{sleepInterval: uint64(20 * time.Hour / time.Millisecond), sleepJitter: int64(0)})
+	if wait, ok := r.tasksWait(); !ok || wait < 19*time.Hour {
+		t.Fatalf("after a sleep of 20h: the next ask in %s", wait)
+	}
+	r.setPersistent(true)
+	if m := getTasksIn(next(r)); m == nil || *m != 1 {
+		t.Fatalf("over a kept connection: %v", m)
+	}
+	if _, ok := r.tasksWait(); ok {
+		t.Fatal("a wait over a kept connection")
+	}
 }
 
 // Core's max_tasks changes the limit at once, whatever runs, and the

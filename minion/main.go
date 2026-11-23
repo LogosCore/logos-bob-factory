@@ -585,6 +585,12 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			if polled && p < wait {
 				wait = p
 			}
+			// Through a call, the check-in that asks for tasks keeps to its
+			// schedule: an earlier message (a result) put the next check-in
+			// off, not the tasks'.
+			if t, ok := tasks.tasksWait(); ok && t < wait {
+				wait = t
+			}
 			var due <-chan time.Time
 			if back != nil {
 				due = time.After(time.Until(back.at))
@@ -776,7 +782,8 @@ func session(tr *transport, sched schedule, d description, buildID [16]byte, key
 			log.Printf("check-in %d: get_tasks max %d, %d item(s) sent, %d back", n, *items[i].(protocol.GetTasksItem).Max, len(items),
 				len(answer.Items))
 		} else {
-			log.Printf("check-in %d: no room for tasks, %d item(s) sent, %d back", n, len(items), len(answer.Items))
+			log.Printf("check-in %d: no tasks asked (no room, or not a scheduled check-in), %d item(s) sent, %d back", n, len(items),
+				len(answer.Items))
 		}
 		// Side messages whose replies did not come (the socket closed) go
 		// again now, over the one core answered.

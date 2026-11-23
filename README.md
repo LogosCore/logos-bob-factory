@@ -450,7 +450,19 @@ Each task runs in a goroutine of its own, as many at once as its max tasks
 say: its `get_tasks` asks for the room the limit leaves through a call (none
 when full), and for the limit itself over a persistent connection (a
 standing allowance). A limit core changes live (its `max_tasks` item) the
-minion says back in its next message. Its tasks' parts share each message:
+minion says back in its next message.
+
+**Tasks come at the schedule's pace through a call.** The minion asks for
+tasks on its scheduled check-ins alone, one check-in interval apart (with
+its jitter), whatever else it sends between them. A task's result, output
+and acks go at once, in a message that asks for none. With a check-in
+interval of 5 minutes and max tasks 1, a queue at core runs one task every
+5 minutes: a quick one sends its result at once, and the next comes at the
+next scheduled check-in. A `sleep` starts the schedule again by its new
+interval. Over a persistent connection (a WebSocket, a TCP connection) the
+allowance stands: core pushes the next task as soon as one ends.
+
+Its tasks' parts share each message:
 output, data, chunks and listing
 pieces take two thirds of what the connection carries (`max_message`), 512
 KiB at most, and the rest goes in the next check-ins, which come at once.
