@@ -56,7 +56,7 @@ func coreRequest(t *testing.T) protocol.BuildRequest {
 		}),
 		// Core sends the target's default and required commands when the
 		// operator picked none.
-		Commands: buildSchema.DefaultCommands(target),
+		Commands: buildSchema.DefaultCommands(target, "linux/amd64"),
 		Connections: []protocol.BuildConnection{{
 			Endpoint: protocol.ChannelEndpointExport{
 				Format: protocol.ChannelEndpointExportV2, Name: "edge-eu", Kind: protocol.KindReverseCall,
