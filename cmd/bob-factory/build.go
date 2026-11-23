@@ -36,7 +36,11 @@ var buildSchema = protocol.BuildSchema{
 	// to bake it in whole (minion.cfg), and its minions read it by number.
 	MinionConfig: true,
 	Channels: []protocol.BuildChannel{{
-		ModuleName: "http", Num: 1, Versions: []int{3},
+		// Version 4 adds the mode: BOB builds a url-based connection, the
+		// default, as a version 3 one, and refuses a factory-based one
+		// (factoryBased): its minions take their addresses from the base
+		// URL, and BOB decides none.
+		ModuleName: "http", Num: 1, Versions: []int{3, 4},
 		// Requests first (a build that names no kind polls), and a WebSocket
 		// core pushes tasks over, whose handshake is always a GET.
 		Kinds: []protocol.BuildKind{
@@ -485,6 +489,11 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 		job.Logf("fail_builds is on: BOB fails every build")
 		return factory.Result{}, factory.Fail("knocked_out", "BOB is set to fail every build (fail_builds)")
 	}
+	if name, ok := factoryBased(req); ok {
+		job.Logf("connection %s is a factory-based HTTP connection: BOB decides no addresses", name)
+		return factory.Result{}, factory.Fail("factory_based_http",
+			"connection "+name+": a factory-based HTTP connection leaves the addresses to the factory, and BOB decides none: give it a url-based endpoint")
+	}
 	// Core's minion config, checked with the request: baked in as it came,
 	// the minion reads it by numbers alone.
 	job.Logf("dummy minion of build %s for %s with %d connection(s), a %d-byte config", req.BuildID, req.Platform,
@@ -520,6 +529,22 @@ func (b *bob) Build(ctx context.Context, job *factory.Job) (factory.Result, erro
 	return factory.Result{
 		Warnings: []string{"a dummy minion, made to try the build flow end to end"},
 	}, nil
+}
+
+// httpFactoryBased is the HTTP channel's mode (its connection schema's
+// version 4) in which the factory decides a minion's addresses.
+const httpFactoryBased = "factory-based"
+
+// factoryBased is the name of the first of req's HTTP connections whose
+// addresses the factory is to decide; false for none. BOB decides none: its
+// minions connect to a connection's base URL and the additional ones.
+func factoryBased(req protocol.BuildRequest) (string, bool) {
+	for i, c := range req.Connections {
+		if c.Endpoint.Channel.ModuleName == "http" && c.Endpoint.Params["mode"] == httpFactoryBased {
+			return cmp.Or(c.Endpoint.Name, fmt.Sprintf("http-%d", i+1)), true
+		}
+	}
+	return "", false
 }
 
 // compileProgress counts the packages go build -v names as it compiles them

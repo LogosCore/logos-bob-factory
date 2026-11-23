@@ -49,10 +49,20 @@ func TestConnectionOf(t *testing.T) {
 	}{
 		{protocol.HelloConnection{Channel: "dns", Kind: protocol.KindReverseCall}, "this minion speaks no dns"},
 		{protocol.HelloConnection{Channel: "http", Kind: protocol.KindBindCall}, "does not use bind-call through http"},
+		// The HTTP channel's version 4: factory-based, the factory was to
+		// decide the addresses, and BOB decides none.
+		{protocol.HelloConnection{Channel: "http", Kind: protocol.KindReverseCall, Version: 4,
+			Params: map[uint64]any{httpMode: httpFactoryBased}}, "a factory-based one, without it, is not supported"},
+		{protocol.HelloConnection{Channel: "http", Kind: protocol.KindReverseCall, Version: 3}, "connects to an HTTP connection's base URL"},
 	} {
 		if _, err := connectionOf(bad.hc); err == nil || !strings.Contains(err.Error(), bad.says) {
 			t.Errorf("%+v: %v", bad.hc, err)
 		}
+	}
+	urlBased := protocol.HelloConnection{Channel: "http", Kind: protocol.KindReverseCall, Version: 4,
+		Params: map[uint64]any{httpMode: "url-based", httpBaseURL: "http://127.0.0.1:1"}}
+	if c, err := connectionOf(urlBased); err != nil || c.param(httpBaseURL) != "http://127.0.0.1:1" {
+		t.Errorf("a url-based version 4 connection: %+v %v", c, err)
 	}
 }
 

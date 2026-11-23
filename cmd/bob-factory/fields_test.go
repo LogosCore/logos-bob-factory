@@ -58,7 +58,7 @@ func TestFieldsMatchTheMinion(t *testing.T) {
 	for _, ch := range []struct {
 		module  string
 		version int
-	}{{"http", 3}, {"tcp", 1}} {
+	}{{"http", 3}, {"http", 4}, {"tcp", 1}} {
 		s, ok := testChannels(ch.module, ch.version)
 		if !ok {
 			t.Fatalf("no %s schema", ch.module)

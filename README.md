@@ -31,9 +31,9 @@ this README says what BOB and its minion do.
 | Feedback | The minion tells its operators what it would only log ([Feedback](https://logoscore.github.io/logos-docs/contracts/minion-messages/sessions/#feedback)): check-ins that failed two or more in a row (`checkin_failed`, said once one works again, with the first error), its WebSocket closing when it did not close it (`ws_closed`), a connection to its TCP listener past `max_connections` (`tcp_refused`), a persisted session core did not give back (`session_not_claimed`), and a command that crashed (`task_panic`, an error: the task fails, the minion goes on). It sends them first in its next message, at once, folds one like a queued one into its count, and keeps at most 100 unsent (past that the oldest go, and a `feedback_dropped` warning says how many). The `feedback` command (op 14) sends a warning or an error of your words. |
 | Commands | `sleep` and `exit` (required); `hello`, `ls`, `switch_connection`, `edit_connection`, `add_connection`, `remove_connection`, `volumes` and `ps` (picked by default); `download`, `stream_download`, `upload`, `stream_upload`, `rm`, `walk`, `shell`, `screenshot`, `kill`, `feedback`, `tunnel`, `reverse_tunnel`, `delegate` and `reverse_delegate` ([Commands](#commands)). Each declares the params a task of it takes, by number (`minion/ops.go`); the minion's description lists the ones its build picked. |
 | Factory commands | `build_info` and `session_info`, which BOB runs itself, never the minion, in every session of its builds ([Factory commands](#factory-commands)) |
-| Channels | `http` (numbered 1), connection schema version 3: `reverse-call` with the parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`), and `reverse-persistent` (a WebSocket) with `path_prefix`. `tcp` (2), version 1: `bind-persistent` (the minion listens and the channel dials it), `reverse-persistent` and `reverse-call`, with the channel's own fields |
+| Channels | `http` (numbered 1), connection schema versions 3 and 4: `reverse-call` with the parameters `method` (GET, POST, PUT; default POST) and `path_prefix` (default `/`), and `reverse-persistent` (a WebSocket) with `path_prefix`. Version 4's `mode`: a `url-based` connection, the default, builds as a version 3 one; a `factory-based` one, whose addresses the factory is to decide, fails the build (`factory_based_http`): BOB decides none, and its minions connect to the base URL. `tcp` (2), version 1: `bind-persistent` (the minion listens and the channel dials it), `reverse-persistent` and `reverse-call`, with the channel's own fields |
 | Crypto | `aes-256-cbc-hmac-sha256` (AES-256-CBC with HMAC-SHA256); the keys core generates go into the artifact |
-| Failure codes | Why a build failed: `badge_unreadable` (the badge does not read, or not as it was uploaded), `no_toolchain` and `compile_failed` ([The linux-elf binary](#the-linux-elf-binary)), `knocked_out` (`fail_builds`: [Management](#management)) |
+| Failure codes | Why a build failed: `badge_unreadable` (the badge does not read, or not as it was uploaded), `no_toolchain` and `compile_failed` ([The linux-elf binary](#the-linux-elf-binary)), `knocked_out` (`fail_builds`: [Management](#management)), `factory_based_http` (an HTTP connection of mode `factory-based`: BOB decides no addresses) |
 | Error codes | What the minion's exit codes mean (`error_codes`; docs: minion-build, Minion error codes): 1 could not start (for a reason without a code of its own), 2 crashed (Go's own: a panic no task recovered, or a fatal error of the runtime), 3 its config does not read, 4 built without core's keys, 5 no connection it can use. Core shows them on BOB's page and on each build's Overview. `minion/exits.go` holds them; the minion exits with one when it cannot start, and with 0 when an `exit` task ends it. Each build's minion exits with codes of its own (`error_codes_per_build`), drawn by core from 3 to 255, but for 1 and 2, which are fixed (Go exits with them itself): before it compiles, BOB writes the build's codes into its copy of `minion/exits.go`, and the build log names them ("exit codes of its own: 3→201, 4→87, 5→14"). The build's Overview lists them; Unique error codes off in the build form keeps the declared ones. |
 
 ## Commands
@@ -491,9 +491,10 @@ gone, its name, failover or `max_message`; the connection whole when its
 channel or kind changes), the others kept in their order. The minion says
 its connections again, whole, with a `connection_update` in the message
 that ends the task, whose output says what changed ("connection 2: kind,
-params 1 changed"). A channel BOB does not speak, or a kind it does not
-use (`bind-call`; `http`'s `bind-persistent`), fails the task, and nothing
-changes. The connection in
+params 1 changed"). A channel BOB does not speak, a kind it does not
+use (`bind-call`; `http`'s `bind-persistent`), or an `http` connection
+without a base URL (the HTTP channel's mode `factory-based`) fails the
+task, and nothing changes. The connection in
 use goes on with the new settings from the next exchange, which carries
 the update: the WebSocket or TCP connection it keeps open closes and the
 next exchange opens one by the new settings; a listener listens where the
@@ -506,7 +507,8 @@ minion has its build's again (it says them when it claims a persisted
 session, which may hold an edited list).
 
 **Adding** a connection (`add_connection`, `minion/edit.go`) puts the one
-core sends, whole, after the minion's others, at most 32, and says them
+core sends, whole, after the minion's others, at most 32 (one it cannot
+use, as an edit's, fails the task), and says them
 again with a `connection_update`; the task's output says what it added
 ("connection 3: ws, http reverse-persistent"). It stays on the connection
 it uses, unless the task's `switch` is set: it then moves there as
@@ -768,7 +770,7 @@ processes, WOW64): compiled there with `GOOS=windows go test -c`, for
 | Test | Checks |
 |---|---|
 | `build_test.go` | The schema valid as core checks it, the commands, the targets and `goarm`; a request as core sends it, with the minion config core would make of it, read back by number as the minion will (`TestMinionConfigOfABuild`) |
-| `channels_test.go` | The HTTP channel's connection schema (version 3) and the TCP channel's (version 1), each field's key, `num`, type and default as the channels declare them, for `protocol.EncodeMinionConfig` |
+| `channels_test.go` | The HTTP channel's connection schema (versions 3 and 4, its mode) and the TCP channel's (version 1), each field's key, `num`, type and default as the channels declare them, for `protocol.EncodeMinionConfig` |
 | `fields_test.go`, `ops_test.go`, `exits_test.go` | The minion's numbers and exit codes against the schema; a minion whose config does not read exits with 3; a build's own codes baked in, and exited with |
 | `compile_test.go` | Compiles for Linux, Windows and ARM; the build log and the compile step's progress |
 | `bob_test.go` | The real builder in process with `factorytest`, through the same request checks, job and result as a build core sends: the artifact an ELF or a PE that prints the config it was given, the plan following the build, a wrong badge refused, `fail_builds` |

@@ -157,6 +157,39 @@ func noBadgeRequest(t *testing.T) protocol.BuildRequest {
 	return req
 }
 
+// The HTTP channel's version 4: a url-based connection builds as a version 3
+// one; a factory-based one, whose addresses the factory is to decide, fails
+// the build, as BOB decides none.
+func TestBuildFactoryBasedHTTP(t *testing.T) {
+	v4 := func(params map[string]any) protocol.BuildRequest {
+		req := coreRequest(t)
+		req.Connections[0].Endpoint.Channel.SchemaVersion = 4
+		req.Connections[0].Endpoint.Params = params
+		req, err := withConfig(req)
+		if err != nil {
+			t.Fatalf("the request's minion config: %v", err)
+		}
+		if p := protocol.ValidateBuildRequest(buildSchema, req); p != nil {
+			t.Fatalf("a version 4 request core would send does not fit BOB's schema: %v", p)
+		}
+		// As noBadgeRequest: no file to fetch, and factorytest's own links.
+		req.Artifact, req.Files = protocol.ArtifactUpload{}, nil
+		delete(req.Values, "badge")
+		return req
+	}
+	if name, ok := factoryBased(v4(map[string]any{"mode": "url-based", "base_url": "https://edge-eu.example.com"})); ok {
+		t.Fatalf("a url-based connection taken for factory-based: %s", name)
+	}
+	out := factorytest.Run(t, buildSchema, &bob{}, factorytest.NewStore(t), v4(map[string]any{"mode": httpFactoryBased}))
+	if res := out.Result; res.Status != protocol.BuildFailed || res.Error.Code != "factory_based_http" || out.Artifact != nil ||
+		!strings.Contains(res.Error.Message, "connection edge-eu: a factory-based HTTP connection") {
+		t.Fatalf("result %+v (error %+v)", res, res.Error)
+	}
+	if !logged(out.Log, "compile", "BOB decides no addresses") {
+		t.Fatalf("the log:\n%s", logLines(out.Log))
+	}
+}
+
 func TestBuildFailsWhenTold(t *testing.T) {
 	b := &bob{}
 	b.settings.Store(&settings{fail: true})

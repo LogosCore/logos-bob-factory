@@ -4,16 +4,17 @@ import "github.com/logoscore/logos-golang-protocol/protocol"
 
 // testChannels are the connection schemas of the channels BOB's minions
 // speak, as core has them when it makes a build's minion config: the HTTP
-// channel's version 3 and the TCP channel's version 1, their fields (the
-// TCP channel's targets' too) with the numbers the channels give them (each
-// channel's own tests pin them; minion/fields.go reads them). Labels and
-// limits are left out: a config needs a field's number and type alone.
+// channel's versions 3 and 4 and the TCP channel's version 1, their fields
+// (the TCP channel's targets' too) with the numbers the channels give them
+// (each channel's own tests pin them; minion/fields.go reads them). Labels
+// and limits are left out: a config needs a field's number and type alone,
+// and its condition.
 func testChannels(module string, version int) (protocol.ConnectionSchema, bool) {
 	f := func(key string, num int, typ protocol.FieldType, def any) protocol.FieldSpec {
 		return protocol.FieldSpec{Key: key, Num: num, Type: typ, Default: def}
 	}
 	switch {
-	case module == "http" && version == 3:
+	case module == "http" && (version == 3 || version == 4):
 		address := []protocol.FieldSpec{
 			f("base_url", 1, protocol.FieldURL, nil), f("extra_base_urls", 2, protocol.FieldStringList, nil),
 			f("host_header", 3, protocol.FieldString, nil), f("sni", 4, protocol.FieldString, nil),
@@ -22,7 +23,16 @@ func testChannels(module string, version int) (protocol.ConnectionSchema, bool) 
 			f("headers", 9, protocol.FieldStringMap, nil), f("request_timeout", 10, protocol.FieldDuration, "40s"),
 			f("checkin_interval", 11, protocol.FieldDuration, "60s"), f("checkin_jitter", 12, protocol.FieldInt, 20),
 		}
-		return protocol.ConnectionSchema{SchemaVersion: protocol.ConnectionSchemaV2, Version: 3, Kinds: map[string]protocol.ConnectionKind{
+		if version == 4 {
+			// The mode: the addresses only with url-based; factory-based,
+			// the factory decides them.
+			urlBased := &protocol.FieldCondition{Key: "mode", Values: []string{"url-based"}}
+			address[0].When, address[1].When = urlBased, urlBased
+			mode := f("mode", 14, protocol.FieldEnum, "url-based")
+			mode.Options = []protocol.EnumOption{{Value: "url-based"}, {Value: httpFactoryBased}}
+			address = append([]protocol.FieldSpec{mode}, address...)
+		}
+		return protocol.ConnectionSchema{SchemaVersion: protocol.ConnectionSchemaV2, Version: version, Kinds: map[string]protocol.ConnectionKind{
 			protocol.KindReverseCall: {Fields: address},
 			protocol.KindReversePersistent: {Fields: append(append([]protocol.FieldSpec{}, address...),
 				f("ws_reconnect_backoff", 13, protocol.FieldDuration, "60s"))},

@@ -37,18 +37,18 @@ func (sessionInfo) Run(_ context.Context, t *factory.CommandTask) (factory.Comma
 }
 
 // channelParams are the connection parameters of the channels BOB's minions
-// speak, by number as text, as the channels number them (the HTTP channel's
-// version 3, the TCP channel's version 1, which minion/fields.go reads): a
-// session's own connections say their params by number alone.
-// channels_test.go's schemas check them.
+// speak, by number as text, as the channels number them in the versions BOB
+// reads (the HTTP channel's 3 and 4, whose mode is 14; the TCP channel's 1;
+// minion/fields.go reads them): a session's own connections say their
+// params by number alone. channels_test.go's schemas check them.
 var channelParams = map[string]struct {
-	version uint64
-	keys    map[string]string
+	versions []uint64
+	keys     map[string]string
 }{
-	"http": {3, map[string]string{"1": "base_url", "2": "extra_base_urls", "3": "host_header", "4": "sni", "5": "proxy",
+	"http": {[]uint64{3, 4}, map[string]string{"1": "base_url", "2": "extra_base_urls", "3": "host_header", "4": "sni", "5": "proxy",
 		"6": "tls_verify", "7": "tls_pin_sha256", "8": "user_agent", "9": "headers", "10": "request_timeout",
-		"11": "checkin_interval", "12": "checkin_jitter", "13": "ws_reconnect_backoff"}},
-	"tcp": {1, map[string]string{"1": "host", "2": "port", "3": "connect_timeout", "4": "keepalive", "5": "reconnect_backoff",
+		"11": "checkin_interval", "12": "checkin_jitter", "13": "ws_reconnect_backoff", "14": "mode"}},
+	"tcp": {[]uint64{1}, map[string]string{"1": "host", "2": "port", "3": "connect_timeout", "4": "keepalive", "5": "reconnect_backoff",
 		"6": "request_timeout", "7": "checkin_interval", "8": "checkin_jitter", "9": "listen_port", "10": "listen_address",
 		"11": "max_connections", "12": "proxy"}},
 }
@@ -332,10 +332,10 @@ func plural[N ~int | ~int64](n N, word string) string {
 }
 
 // paramNames are channel's connection parameters by number, when its
-// connection schema version is the one BOB knows (or unsaid).
+// connection schema version is one BOB knows (or unsaid).
 func paramNames(channel string, version uint64) map[string]string {
 	c, ok := channelParams[channel]
-	if !ok || (version != 0 && version != c.version) {
+	if !ok || (version != 0 && !slices.Contains(c.versions, version)) {
 		return nil
 	}
 	return c.keys

@@ -4,9 +4,9 @@ package main
 // minion config): numbers alone, as it reads tasks by ops.go's. BOB's own
 // are its build schema's (cmd/bob-factory/build.go: the channels, the build
 // fields, the connection parameters); the channels' fields are their
-// connection schemas' (the HTTP channel's version 3, the TCP channel's
-// version 1), which a channel never gives another field. Both are checked
-// by cmd/bob-factory/fields_test.go.
+// connection schemas' (the HTTP channel's versions 3 and 4, the TCP
+// channel's version 1), which a channel never gives another field. Both are
+// checked by cmd/bob-factory/fields_test.go.
 
 // BOB's numbers for the channels its minions speak.
 const (
@@ -44,6 +44,9 @@ const (
 	httpCheckinInterval    uint64 = 11
 	httpCheckinJitter      uint64 = 12
 	httpWSReconnectBackoff uint64 = 13
+	// Version 4's mode: a factory-based connection has no base URL, which
+	// this minion connects to (connectionOf refuses one).
+	httpMode uint64 = 14
 )
 
 // The TCP channel's fields.

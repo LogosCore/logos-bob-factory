@@ -161,21 +161,29 @@ func TestSessionInfoOfANewSession(t *testing.T) {
 }
 
 // channelParams names the channels' params as the channels number them, in
-// every kind and in a target.
+// every kind and in a target, in each version BOB reads: the latest has
+// every one of them.
 func TestChannelParamsAsTheChannelsNumberThem(t *testing.T) {
 	for module, c := range channelParams {
-		schema, ok := testChannels(module, int(c.version))
-		if !ok {
-			t.Fatalf("%s v%d: no such channel schema here", module, c.version)
-		}
-		numbered := map[string]string{}
-		for _, k := range schema.Kinds {
-			for _, f := range append(append([]protocol.FieldSpec{}, k.Fields...), k.Target...) {
-				numbered[strconv.Itoa(f.Num)] = f.Key
+		for i, v := range c.versions {
+			schema, ok := testChannels(module, int(v))
+			if !ok {
+				t.Fatalf("%s v%d: no such channel schema here", module, v)
 			}
-		}
-		if !maps.Equal(numbered, c.keys) {
-			t.Errorf("%s: channelParams %v, the channel's %v", module, c.keys, numbered)
+			numbered := map[string]string{}
+			for _, k := range schema.Kinds {
+				for _, f := range append(append([]protocol.FieldSpec{}, k.Fields...), k.Target...) {
+					numbered[strconv.Itoa(f.Num)] = f.Key
+				}
+			}
+			for num, key := range numbered {
+				if c.keys[num] != key {
+					t.Errorf("%s v%d: %s is %q, channelParams %q", module, v, num, key, c.keys[num])
+				}
+			}
+			if i == len(c.versions)-1 && !maps.Equal(numbered, c.keys) {
+				t.Errorf("%s v%d: channelParams %v, the channel's %v", module, v, c.keys, numbered)
+			}
 		}
 	}
 }

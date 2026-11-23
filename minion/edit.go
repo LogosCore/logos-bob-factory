@@ -63,9 +63,14 @@ func channelName(n uint64) string {
 	return ""
 }
 
+// httpFactoryBased is the HTTP channel's mode (its version 4, httpMode) in
+// which the factory decides a minion's addresses: BOB decides none.
+const httpFactoryBased = "factory-based"
+
 // connectionOf is a connection core sent in its numbered form (a
 // HelloConnection: protocol.ConnectionArg) as the minion holds it; an
-// error for one it cannot use.
+// error for one it cannot use: through a channel or a kind it does not
+// use, or an HTTP connection without a base URL (a factory-based one).
 func connectionOf(hc protocol.HelloConnection) (connection, error) {
 	ch, ok := channelNames[hc.Channel]
 	if !ok {
@@ -78,6 +83,9 @@ func connectionOf(hc protocol.HelloConnection) (connection, error) {
 	}
 	if !usable(c) {
 		return connection{}, fmt.Errorf("this minion does not use %s through %s", hc.Kind, hc.Channel)
+	}
+	if ch == chanHTTP && (c.param(httpMode) == httpFactoryBased || c.param(httpBaseURL) == "") {
+		return connection{}, errors.New("this minion connects to an HTTP connection's base URL: a factory-based one, without it, is not supported")
 	}
 	return c, nil
 }
