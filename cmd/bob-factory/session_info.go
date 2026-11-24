@@ -183,9 +183,6 @@ func writeSessionInfo(w io.Writer, schema protocol.BuildSchema, s protocol.Sessi
 	title("Connection")
 	if s.Conn > 0 {
 		uses := strconv.Itoa(s.Conn)
-		if s.ConnName != "" {
-			uses += ". " + s.ConnName
-		}
 		if s.ConnKind != "" {
 			uses += " (" + s.ConnKind + ")"
 		}
@@ -216,7 +213,7 @@ func writeSessionInfo(w io.Writer, schema protocol.BuildSchema, s protocol.Sessi
 		}
 		title("Its connections (%d), %s", len(s.Connections), as)
 		for i, c := range s.Connections {
-			head := fmt.Sprintf("  %d. %s: %s", i+1, c.Name, c.Channel)
+			head := fmt.Sprintf("  %d. %s", i+1, c.Channel)
 			if c.Version > 0 {
 				head += fmt.Sprintf(" v%d", c.Version)
 			}

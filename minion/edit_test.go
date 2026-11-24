@@ -30,7 +30,7 @@ func editArgs(t *testing.T, place int64, hc protocol.ConnectionPatch) protocol.A
 // channel and uses its kind, and says back as it came.
 func TestConnectionOf(t *testing.T) {
 	auto := true
-	hc := protocol.HelloConnection{Channel: "http", Kind: protocol.KindReversePersistent, Name: "ws", Version: 3,
+	hc := protocol.HelloConnection{Channel: "http", Kind: protocol.KindReversePersistent, Version: 3,
 		Params: map[uint64]any{httpBaseURL: "http://127.0.0.1:1"}, Values: map[uint64]any{1: "/cdn/"},
 		Failover: &protocol.HelloConnectionFailover{Auto: &auto, FailAfter: 3}, MaxMessage: 4096}
 	c, err := connectionOf(hc)
@@ -38,8 +38,8 @@ func TestConnectionOf(t *testing.T) {
 		c.Failover == nil || c.Failover.FailAfter != 3 || c.MaxMessage != 4096 {
 		t.Fatalf("%+v %v", c, err)
 	}
-	back := helloConnection(c, "ws")
-	if back.Channel != "http" || back.Kind != protocol.KindReversePersistent || back.Name != "ws" || back.Version != 3 ||
+	back := helloConnection(c)
+	if back.Channel != "http" || back.Kind != protocol.KindReversePersistent || back.Version != 3 ||
 		back.Params[httpBaseURL] != "http://127.0.0.1:1" || back.Failover.FailAfter != 3 || back.Validate() != nil {
 		t.Fatalf("said back: %+v", back)
 	}
@@ -104,10 +104,10 @@ func TestEditConnection(t *testing.T) {
 
 	// The one in use, to a WebSocket at another address: whole, as its
 	// kind changes, and a link of its own.
-	ws := protocol.HelloConnection{Channel: "http", Kind: protocol.KindReversePersistent, Name: "ws", Version: 3,
+	ws := protocol.HelloConnection{Channel: "http", Kind: protocol.KindReversePersistent, Version: 3,
 		Params: map[uint64]any{httpBaseURL: "http://127.0.0.1:9", httpRequestTimeout: int64(2000)}}
-	tk = edit(1, protocol.DiffConnection(helloConnection(tr.conns[0], ""), ws))
-	if !tk.ended || !tk.ok || string(tk.out) != "connection 1: kind, name, version, params 1 changed\n" {
+	tk = edit(1, protocol.DiffConnection(helloConnection(tr.conns[0]), ws))
+	if !tk.ended || !tk.ok || string(tk.out) != "connection 1: kind, version, params 1 changed\n" {
 		t.Fatalf("task %+v out %q", tk, tk.out)
 	}
 	if tr.place() != 1 || !tr.conn().persists() || tr.conn().param(httpBaseURL) != "http://127.0.0.1:9" || !tr.persistent() || !tr.edited {
@@ -123,15 +123,15 @@ func TestEditConnection(t *testing.T) {
 			upd = &u
 		}
 	}
-	if upd == nil || len(upd.Connections) != 2 || upd.Connections[0].Name != "ws" || upd.Connections[1].Name != "" ||
-		upd.Connections[0].Kind != protocol.KindReversePersistent || upd.Validate() != nil {
+	if upd == nil || len(upd.Connections) != 2 || upd.Connections[0].Kind != protocol.KindReversePersistent ||
+		upd.Connections[1].Kind != protocol.KindReverseCall || upd.Validate() != nil {
 		t.Fatalf("the update: %+v", upd)
 	}
 	tr.closeLink()
 
 	// Refused, nothing changed: a place past them, a channel it does not
 	// speak.
-	if tk := edit(3, protocol.ConnectionPatch{Name: "x"}); tk.ok || !strings.Contains(tk.err, "there is no connection 3") {
+	if tk := edit(3, protocol.ConnectionPatch{Values: map[uint64]any{1: "/x/"}}); tk.ok || !strings.Contains(tk.err, "there is no connection 3") {
 		t.Fatalf("past them: %+v", tk)
 	}
 	tk = edit(2, protocol.ConnectionPatch{Channel: "dns", Kind: protocol.KindReverseCall})
@@ -173,11 +173,11 @@ func TestAddConnection(t *testing.T) {
 		r.addConnection(context.Background(), tk, ti.Args)
 		return tk
 	}
-	ws := protocol.HelloConnection{Channel: "http", Kind: protocol.KindReversePersistent, Name: "ws",
+	ws := protocol.HelloConnection{Channel: "http", Kind: protocol.KindReversePersistent,
 		Params: map[uint64]any{httpBaseURL: "http://127.0.0.1:9"}}
 
 	tk := add(ws, false)
-	if !tk.ok || string(tk.out) != "connection 2: ws, http reverse-persistent\n" || len(tr.conns) != 2 || tr.place() != 1 ||
+	if !tk.ok || string(tk.out) != "connection 2: http reverse-persistent\n" || len(tr.conns) != 2 || tr.place() != 1 ||
 		tr.conns[1].param(httpBaseURL) != "http://127.0.0.1:9" || !tr.edited {
 		t.Fatalf("task %+v out %q, %d connections, on %d", tk, tk.out, len(tr.conns), tr.place())
 	}
@@ -187,7 +187,7 @@ func TestAddConnection(t *testing.T) {
 			upd = &u
 		}
 	}
-	if upd == nil || len(upd.Connections) != 2 || upd.Connections[1].Name != "ws" || upd.Validate() != nil {
+	if upd == nil || len(upd.Connections) != 2 || upd.Connections[1].Kind != protocol.KindReversePersistent || upd.Validate() != nil {
 		t.Fatalf("the update: %+v", upd)
 	}
 
@@ -204,8 +204,7 @@ func TestAddConnection(t *testing.T) {
 		}
 		req.done <- nil
 	}()
-	ws.Name = "ws2"
-	if tk := add(ws, true); !tk.ok || !strings.Contains(string(tk.out), "connection 3: ws2") || !strings.Contains(string(tk.out), "switched to connection 3") {
+	if tk := add(ws, true); !tk.ok || !strings.Contains(string(tk.out), "connection 3: http reverse-persistent") || !strings.Contains(string(tk.out), "switched to connection 3") {
 		t.Fatalf("with switch: %+v out %q", tk, tk.out)
 	}
 }
@@ -240,7 +239,7 @@ func TestRemoveConnection(t *testing.T) {
 		}
 	}
 	tk := remove(1)
-	if !tk.ok || string(tk.out) != "connection 1: unnamed, http reverse-call removed\n" || len(tr.conns) != 2 || tr.place() != 2 ||
+	if !tk.ok || string(tk.out) != "connection 1: http reverse-call removed\n" || len(tr.conns) != 2 || tr.place() != 2 ||
 		tr.conn().param(httpBaseURL) != "http://127.0.0.1:3" || tr.conns[0].param(httpBaseURL) != "http://127.0.0.1:2" {
 		t.Fatalf("task %+v out %q, %d connections, on %d", tk, tk.out, len(tr.conns), tr.place())
 	}

@@ -41,12 +41,12 @@ func fullSession() protocol.SessionRecord {
 	s.Via, s.ViaSince = []protocol.SessionVia{{SessionID: protocol.NewID(), Number: 3, TaskID: protocol.NewID()}}, after(time.Minute)
 	s.Sleep = &protocol.SessionSleep{Interval: 30_000, Jitter: 10}
 	s.LateAt, s.LostAt = after(6*time.Minute), after(35*time.Minute)
-	s.Conn, s.ConnKind, s.ConnName, s.ConnCount = 2, protocol.KindReversePersistent, "edge-ws", 2
+	s.Conn, s.ConnKind, s.ConnCount = 2, protocol.KindReversePersistent, 2
 	s.ConnChanges = []protocol.SessionConnChange{{At: at.Add(3 * time.Minute), From: 1, To: 2, Reason: "failover"}}
 	s.Connections = []protocol.SessionConnection{
-		{Channel: "http", Kind: protocol.KindReverseCall, Name: "edge-eu", Version: 3,
+		{Channel: "http", Kind: protocol.KindReverseCall, Version: 3,
 			Params: map[string]any{"1": "https://edge-eu.example.com", "11": "60s"}, Values: map[string]any{"1": "POST", "2": "/cdn/assets/"}},
-		{Channel: "http", Kind: protocol.KindReversePersistent, Name: "edge-ws", Version: 3,
+		{Channel: "http", Kind: protocol.KindReversePersistent, Version: 3,
 			Params: map[string]any{"1": "https://edge-ws.example.com"}, Values: map[string]any{"2": "/ws/"}, MaxMessage: 1 << 20},
 	}
 	s.ConnectionsAt = after(3 * time.Minute)
@@ -101,15 +101,15 @@ func TestSessionInfo(t *testing.T) {
 		"198.51.100.9 1 message,",
 		"Through delegates (1), nearest first",
 		"Session #3 its task " + s.Via[0].TaskID,
-		"Uses 2. edge-ws (reverse-persistent), of 2",
+		"Uses 2 (reverse-persistent), of 2",
 		"Moves 2026.11.22 10:03:00 UTC, 1 → 2: failover",
 		"Its connections (2), as its minion said, 2026.11.22 10:03:00 UTC",
-		"1. edge-eu: http v3, reverse-call\n",
+		"1. http v3, reverse-call\n",
 		"base_url https://edge-eu.example.com",
 		"checkin_interval 60s",
 		"Method POST",
 		"Path prefix /cdn/assets/",
-		"2. edge-ws: http v3, reverse-persistent (in use)",
+		"2. http v3, reverse-persistent (in use)",
 		"Largest message 1.0 MiB",
 		"At once 5, as its minion said",
 		"Operators' limit 4",
@@ -151,7 +151,7 @@ func TestSessionInfoOfANewSession(t *testing.T) {
 		}
 	}
 
-	s.Connections = []protocol.SessionConnection{{Channel: "http", Kind: protocol.KindReverseCall, Name: "later", Version: 9,
+	s.Connections = []protocol.SessionConnection{{Channel: "http", Kind: protocol.KindReverseCall, Version: 9,
 		Params: map[string]any{"1": "https://later.example.com"}, Values: map[string]any{"7": "x"}}}
 	b.Reset()
 	writeSessionInfo(&b, buildSchema, s)

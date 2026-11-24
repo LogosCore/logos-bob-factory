@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -90,11 +89,11 @@ func connectionOf(hc protocol.HelloConnection) (connection, error) {
 	return c, nil
 }
 
-// helloConnection is c as a hello or a connection_update says it, named
-// name ("": core keeps the name it has at the place).
-func helloConnection(c connection, name string) protocol.HelloConnection {
+// helloConnection is c as a hello or a connection_update says it: by its
+// place, as a session's connections have no names.
+func helloConnection(c connection) protocol.HelloConnection {
 	kind, _ := protocol.KindOfNumber(c.Kind)
-	hc := protocol.HelloConnection{Channel: channelName(c.Channel), Kind: kind, Name: name, Version: c.Version,
+	hc := protocol.HelloConnection{Channel: channelName(c.Channel), Kind: kind, Version: c.Version,
 		Params: c.Params, Values: c.Values, MaxMessage: c.MaxMessage}
 	if c.Failover != nil {
 		hc.Failover = &protocol.HelloConnectionFailover{Auto: c.Failover.Auto, FailAfter: c.Failover.FailAfter}
@@ -106,19 +105,19 @@ func helloConnection(c connection, name string) protocol.HelloConnection {
 func (t *transport) ownConnections() []protocol.HelloConnection {
 	out := make([]protocol.HelloConnection, len(t.conns))
 	for i, c := range t.conns {
-		out[i] = helloConnection(c, t.names[i])
+		out[i] = helloConnection(c)
 	}
 	return out
 }
 
-// edit puts c, named name, at place; the connection in use takes the new
-// settings at its next exchange. It changes nothing when place is past
-// the connections.
-func (t *transport) edit(place int, c connection, name string) error {
+// edit puts c at place; the connection in use takes the new settings at
+// its next exchange. It changes nothing when place is past the
+// connections.
+func (t *transport) edit(place int, c connection) error {
 	if place < 1 || place > len(t.conns) {
 		return fmt.Errorf("the minion has %d connection(s): there is no connection %d", len(t.conns), place)
 	}
-	t.conns[place-1], t.names[place-1], t.edited = c, name, true
+	t.conns[place-1], t.edited = c, true
 	if t.listening == place {
 		// A switch's port, opened by the old settings.
 		t.stopListening()
@@ -133,16 +132,13 @@ func (t *transport) edit(place int, c connection, name string) error {
 
 // editChanges says what an edit changed of was, for its task's output:
 // "connection 2: kind, params 1 and 3 changed".
-func editChanges(place int, was, now connection, wasName, name string) string {
+func editChanges(place int, was, now connection) string {
 	var changed []string
 	if was.Channel != now.Channel {
 		changed = append(changed, "channel")
 	}
 	if was.Kind != now.Kind {
 		changed = append(changed, "kind")
-	}
-	if name != "" && name != wasName {
-		changed = append(changed, "name")
 	}
 	if was.Version != now.Version {
 		changed = append(changed, "version")
@@ -267,17 +263,16 @@ func (r *runner) applyEdit(tr *transport, req editReq) (ok bool) {
 		req.done <- editDone{err: fmt.Errorf("the minion has %d connection(s): there is no connection %d", len(tr.conns), req.place)}
 		return false
 	}
-	was, wasName := tr.conns[req.place-1], tr.names[req.place-1]
-	made := req.patch.Apply(helloConnection(was, wasName))
-	now, err := connectionOf(made)
+	was := tr.conns[req.place-1]
+	now, err := connectionOf(req.patch.Apply(helloConnection(was)))
 	if err == nil {
-		err = tr.edit(req.place, now, made.Name)
+		err = tr.edit(req.place, now)
 	}
 	if err != nil {
 		req.done <- editDone{err: err}
 		return false
 	}
-	what := editChanges(req.place, was, now, wasName, made.Name)
+	what := editChanges(req.place, was, now)
 	r.mu.Lock()
 	r.connUpd = &protocol.ConnectionUpdateItem{T: protocol.ItemConnectionUpdate, Connections: tr.ownConnections()}
 	r.mu.Unlock()
@@ -290,10 +285,9 @@ func (r *runner) applyEdit(tr *transport, req editReq) (ok bool) {
 // them to.
 const maxConnections = 32
 
-// add puts c, named name ("" for none), after the connections: its place.
-func (t *transport) add(c connection, name string) int {
+// add puts c after the connections: its place.
+func (t *transport) add(c connection) int {
 	t.conns = append(t.conns, c)
-	t.names = append(t.names, name)
 	t.edited = true
 	return len(t.conns)
 }
@@ -310,8 +304,8 @@ func (r *runner) applyAdd(tr *transport, req editReq) bool {
 		req.done <- editDone{err: err}
 		return false
 	}
-	place := tr.add(c, req.add.Name)
-	what := fmt.Sprintf("connection %d: %s, %s %s", place, cmp.Or(req.add.Name, "unnamed"), req.add.Channel, req.add.Kind)
+	place := tr.add(c)
+	what := fmt.Sprintf("connection %d: %s %s", place, req.add.Channel, req.add.Kind)
 	r.mu.Lock()
 	r.connUpd = &protocol.ConnectionUpdateItem{T: protocol.ItemConnectionUpdate, Connections: tr.ownConnections()}
 	r.mu.Unlock()
@@ -370,7 +364,6 @@ func (r *runner) addConnection(ctx context.Context, t *task, args protocol.Args)
 func (t *transport) remove(place int) {
 	i := place - 1
 	t.conns = slices.Delete(t.conns, i, i+1)
-	t.names = slices.Delete(t.names, i, i+1)
 	t.edited = true
 	if t.cur > i {
 		t.cur--
@@ -401,9 +394,9 @@ func (r *runner) applyRemove(tr *transport, req editReq) bool {
 		req.done <- editDone{err: err}
 		return false
 	}
-	gone := helloConnection(tr.conns[place-1], tr.names[place-1])
+	gone := helloConnection(tr.conns[place-1])
 	tr.remove(place)
-	what := fmt.Sprintf("connection %d: %s, %s %s removed", place, cmp.Or(gone.Name, "unnamed"), gone.Channel, gone.Kind)
+	what := fmt.Sprintf("connection %d: %s %s removed", place, gone.Channel, gone.Kind)
 	r.mu.Lock()
 	r.connUpd = &protocol.ConnectionUpdateItem{T: protocol.ItemConnectionUpdate, Connections: tr.ownConnections(), Removed: uint64(place)} //nolint:gosec // a small place
 	r.mu.Unlock()

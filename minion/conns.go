@@ -26,10 +26,8 @@ import (
 // transport is the build's connections and the one in use.
 type transport struct {
 	conns []connection
-	// names are the connections' names as an edit gave them, by place: ""
-	// for one the minion has no name for (core keeps its own). edited: an
-	// edit changed the connections, which a hello then says (edit.go).
-	names  []string
+	// edited: an edit changed the connections, which a hello then says
+	// (edit.go).
 	edited bool
 	cur    int
 	// link is the persistent connection in use: a reverse-persistent one's
@@ -112,7 +110,6 @@ func newTransport(all []protocol.MinionConnection) (*transport, error) {
 	for _, c := range all {
 		t.conns = append(t.conns, connection{c})
 	}
-	t.names = make([]string, len(t.conns))
 	for i, c := range t.conns {
 		if usable(c) {
 			t.use(i, nil)

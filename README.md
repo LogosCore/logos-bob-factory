@@ -264,7 +264,7 @@ link.
   values, and who its tasks run as when not the process's own;
 - the external addresses it was seen from (now, then each with its count
   and times), and the delegates its messages come through;
-- the connection it uses (its place, name and kind, of how many), the moves
+- the connection it uses (its place and kind, of how many), the moves
   the minion reported, and the connections it holds when its hello said
   them: the channel's params named as the channel numbers them (the HTTP
   channel's version 3, the TCP channel's version 1; another version's by
@@ -499,7 +499,7 @@ session, keys and schedule stay the same across moves.
 **Editing** a connection (`edit_connection`, core's action of the name:
 `minion/edit.go`) applies what core sends, what changed of the connection
 at that place (a patch: its params and values that changed, `null` for one
-gone, its name, failover or `max_message`; the connection whole when its
+gone, its failover or `max_message`; the connection whole when its
 channel or kind changes), the others kept in their order. The minion says
 its connections again, whole, with a `connection_update` in the message
 that ends the task, whose output says what changed ("connection 2: kind,
